@@ -106,7 +106,7 @@ class LiteLLMBatchEmbedder:
             "LITELLM_MASTER_KEY", "sk-local-dev-change-me"
         )
         self.model = model or os.environ.get(
-            "LITELLM_EMBED_MODEL", "text-embedding-3-small"
+            "LITELLM_EMBED_MODEL", "snp-embed"
         )
         self.dim = dim
 

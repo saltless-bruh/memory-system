@@ -110,10 +110,6 @@ def apply_heals_in_place(heals: list[ProposedHeal], *, dry_run: bool = False) ->
     Guarded so it can only run on a PR branch, never on `main`. The workflow
     lints, commits, and pushes; the human reviews the bot commit in the PR.
     """
-    if not heals:
-        print("No drifted addresses - nothing to apply.")
-        return 0
-
     branch = current_branch()
     if branch in PROTECTED_BRANCHES:
         print(
@@ -121,6 +117,10 @@ def apply_heals_in_place(heals: list[ProposedHeal], *, dry_run: bool = False) ->
             f"a PR branch only (a human reviews the bot commit before merge)."
         )
         return 1
+
+    if not heals:
+        print("No drifted addresses - nothing to apply.")
+        return 0
 
     if dry_run:
         print(f"[dry-run] Would apply to current branch '{branch}':")
@@ -282,6 +282,15 @@ async def verify_and_heal_vault(
     ci_mode=False -> open a new heal branch + PR (scheduled/local).
     ci_mode=True  -> apply to the current PR branch (Gitea Actions commits + pushes).
     """
+    if ci_mode:
+        branch = current_branch()
+        if branch in PROTECTED_BRANCHES:
+            print(
+                f"Refusing CI heal on protected branch '{branch}'. CI mode applies to "
+                f"a PR branch only (a human reviews the bot commit before merge)."
+            )
+            return 1
+
     pages = list(vault.load_pages())
     addresses = _collect_addresses(pages)
     if not addresses:

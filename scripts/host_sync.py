@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from typing import Any
 
 from fastapi import (
@@ -31,6 +32,8 @@ app = FastAPI(title="SNP Host-Sync Service", version="2.0.0")
 
 SECRET = os.environ.get("WEBHOOK_SECRET", "dev-secret").encode("utf-8")
 VAULT_DIR = os.environ.get("VAULT_DIR", "/repo")
+
+_sync_lock = threading.Lock()
 
 
 def _ensure_safe_git_directory(vault_path: str = VAULT_DIR) -> None:
@@ -56,34 +59,35 @@ _ensure_safe_git_directory()
 
 def _perform_git_sync(vault_path: str = VAULT_DIR) -> None:
     """Asynchronously execute git fetch and reset --hard origin/main in vault directory."""
-    remote = os.environ.get("GIT_REMOTE", "origin")
-    branch = os.environ.get("GIT_BRANCH", "main")
-    logger.info(f"Executing git sync in {vault_path} for remote '{remote}' branch '{branch}'...")
-    try:
-        fetch_res = subprocess.run(
-            ["git", "fetch", remote],
-            cwd=vault_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.info(f"git fetch output: {fetch_res.stdout.strip()}")
+    with _sync_lock:
+        remote = os.environ.get("GIT_REMOTE", "origin")
+        branch = os.environ.get("GIT_BRANCH", "main")
+        logger.info(f"Executing git sync in {vault_path} for remote '{remote}' branch '{branch}'...")
+        try:
+            fetch_res = subprocess.run(
+                ["git", "fetch", remote],
+                cwd=vault_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"git fetch output: {fetch_res.stdout.strip()}")
 
-        reset_res = subprocess.run(
-            ["git", "reset", "--hard", f"{remote}/{branch}"],
-            cwd=vault_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.info(f"git reset output: {reset_res.stdout.strip()}")
-        logger.info("Host-sync completed successfully. Vault read replica is up to date.")
-    except subprocess.CalledProcessError as e:
-        logger.error(
-            f"Git sync failed with code {e.returncode}: {e.stderr.strip() if e.stderr else e}"
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error during git sync: {e}")
+            reset_res = subprocess.run(
+                ["git", "reset", "--hard", f"{remote}/{branch}"],
+                cwd=vault_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"git reset output: {reset_res.stdout.strip()}")
+            logger.info("Host-sync completed successfully. Vault read replica is up to date.")
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"Git sync failed with code {e.returncode}: {e.stderr.strip() if e.stderr else e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error during git sync: {e}")
 
 
 @app.get("/")

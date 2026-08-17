@@ -1,114 +1,114 @@
-# Connecting a Coding Agent to the SNP Memory System
+# Connecting a Coding Agent to the SNP Memory System (V2)
 
-> How to point **any** MCP-capable coding agent (Claude Code, Codex, Cursor,
-> Cline, Gemini / Antigravity, …) at this system so it can search the wiki and
-> fetch verbatim sources. For *how the agent should behave* once connected,
-> read **[`AGENTS.md`](../AGENTS.md)** — that is the operating contract; this
-> file is only the wiring.
+> How to point **any** MCP-capable coding agent (Claude Code, Cursor, Windsurf, Cline, Gemini CLI / Antigravity, …) at this system so it can search the wiki and fetch verbatim sources. For *how the agent should behave* once connected, read **[`AGENTS.md`](../AGENTS.md)** — that is the operating contract; this file is the client wiring guide.
 
-## The two endpoints (the invariant facts)
+---
 
-Bring the stack up first (`docker compose up -d --build`, see the
-[runbook](runbook.md) §3). It then exposes **two MCP servers** over
-**streamable-HTTP**:
+## 1. The Two MCP Endpoints
 
-| Server | URL | Transport | Tools the agent gets |
+Bring the stack up first (`docker compose up -d --build`, see the [runbook](runbook.md) §3). It exposes **two Streamable HTTP MCP servers**:
+
+| Server | URL | Transport | Tools Exposed to Agent |
 |---|---|---|---|
-| **basic-memory** (the wiki) | `http://localhost:8765/mcp` | streamable-http | `search_notes`, `read_note`, `write_note`, … |
-| **scout** (the RAG bridge) | `http://localhost:8080/mcp` | streamable-http | `rag_fetch` **only** |
+| **basic-memory** (the wiki) | `http://localhost:8765/mcp` | Streamable HTTP | `search_notes`, `read_note`, `write_note`, … |
+| **scout** (the RAG bridge) | `http://localhost:8080/mcp` | Streamable HTTP | `rag_fetch` **only** |
 
-That is the whole surface. The agent connects to **both**: `basic-memory` to
-navigate/read the compiled wiki, `scout` to pull the original verbatim source
-for an address it found on a page. The agent can **never** reach RAG-Anything
-directly — `scout` is the only door (R-4.2), and it is the only thing on the
-Docker network that can (the `rag` service publishes no port).
+The agent connects to **both**:
+1. `basic-memory` to navigate and read the compiled Knowledge Vault.
+2. `scout` to pull the original verbatim source evidence for an address found on a page. The agent never queries PostgreSQL directly — `scout` is the fail-closed access bridge (R-4.2).
 
-> A plain browser GET to `/mcp` returns **HTTP 406** — that is correct, not a
-> failure. The endpoint requires MCP protocol headers; only an MCP client
-> speaks to it properly.
+> [!NOTE]
+> A plain browser GET request to `http://localhost:8765/mcp` or `http://localhost:8080/mcp` returns **HTTP 406 Not Acceptable**. This is expected behavior under the MCP Streamable HTTP specification: the endpoint requires MCP protocol headers and SSE streaming initiated by an MCP client.
 
-## Per-client setup
+---
 
-The URLs + transport above are the same everywhere; only the config *format*
-differs. Two of these clients speak HTTP-MCP natively; stdio-only clients need
-the one-line `mcp-remote` bridge (bottom).
+## 2. Per-Client Configuration Templates
 
-### Claude Code
+### A. Claude Code CLI
 
 ```bash
-claude mcp add --transport http snp-wiki  http://localhost:8765/mcp
-claude mcp add --transport http scout     http://localhost:8080/mcp
+claude mcp add --transport http snp-wiki http://localhost:8765/mcp
+claude mcp add --transport http scout    http://localhost:8080/mcp
 ```
 
-Then in a session, `/mcp` lists both servers and their tools.
+Inside a Claude Code session, run `/mcp` to verify that `snp-wiki` and `scout` tools are active.
 
-### Cursor / Cline / Windsurf (`.mcp.json` / `mcpServers`)
+---
+
+### B. Cursor / Windsurf / Cline (`.mcp.json` or Workspace Settings)
+
+Save the following in `.mcp.json` in your project root or add to your global MCP settings:
 
 ```json
 {
   "mcpServers": {
-    "snp-wiki": { "url": "http://localhost:8765/mcp" },
-    "scout":    { "url": "http://localhost:8080/mcp" }
+    "snp-wiki": {
+      "url": "http://localhost:8765/mcp"
+    },
+    "scout": {
+      "url": "http://localhost:8080/mcp"
+    }
   }
 }
 ```
 
-Some builds key the URL as `"serverUrl"` or expect `"type": "streamable-http"`
-alongside `"url"` — check your client's MCP docs if it doesn't pick it up.
+---
 
-### Gemini CLI / Antigravity (`~/.gemini/settings.json`)
+### C. Gemini CLI / Antigravity (`~/.gemini/settings.json`)
 
 ```json
 {
   "mcpServers": {
-    "snp-wiki": { "httpUrl": "http://localhost:8765/mcp" },
-    "scout":    { "httpUrl": "http://localhost:8080/mcp" }
+    "snp-wiki": {
+      "httpUrl": "http://localhost:8765/mcp"
+    },
+    "scout": {
+      "httpUrl": "http://localhost:8080/mcp"
+    }
   }
 }
 ```
 
-Gemini uses `httpUrl` for streamable-HTTP servers (older versions: `url`).
+---
 
-### Codex CLI and other stdio-only clients (`mcp-remote` bridge)
+### D. Stdio-Only MCP Clients (`mcp-remote` Bridge)
 
-Clients that only launch MCP servers as a subprocess (stdio) can't hold an
-HTTP URL directly. Bridge with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote)
-(needs Node):
+Clients that only launch MCP servers as subprocesses (stdio) can bridge to HTTP endpoints using [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
 
-```toml
-# ~/.codex/config.toml
-[mcp_servers.snp-wiki]
-command = "npx"
-args = ["-y", "mcp-remote", "http://localhost:8765/mcp"]
-
-[mcp_servers.scout]
-command = "npx"
-args = ["-y", "mcp-remote", "http://localhost:8080/mcp"]
+```json
+{
+  "mcpServers": {
+    "snp-wiki": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8765/mcp"]
+    },
+    "scout": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"]
+    }
+  }
+}
 ```
 
-The same `command`/`args` shape works for any stdio-only MCP client (just its
-own config file/keys). If your Codex build supports HTTP MCP natively, use its
-`url` form instead of the bridge.
+---
 
-## Verify the connection
+## 3. Automated Configuration Export
 
-Once wired, ask the agent to list tools — you should see `search_notes` +
-`read_note` (from `snp-wiki`) and `rag_fetch` (from `scout`). A fast smoke
-test, in the agent:
+To generate copy-pasteable JSON configuration blocks for your current system automatically, run:
 
-1. `search_notes("kerberoasting")` → returns `techniques/kerberoasting.md`.
-2. `read_note("techniques/kerberoasting.md")` → body + `sources[]`.
-3. `rag_fetch(path="raw/reports/acme-2026-final.pdf", hint="Acme kerberoasting service account SPN offline crack")`
-   → `status: "ok"` with verbatim `context[]` + `citations[]`.
+```bash
+python scripts/export_mcp_config.py
+```
 
-The full scripted demo is in **[`DEMO.md`](DEMO.md)**.
+---
 
-## The no-egress caveat (read this before a sensitive demo)
+## 4. Verifying Agent Connectivity
 
-The **system** is local-only: every model call it makes (embeddings, entity
-extraction, VLM parsing) goes through LiteLLM → local Ollama, no internet
-(runbook §1). **But the agent's own model is outside that boundary.** If you
-connect a cloud agent (Claude Code, Codex, Gemini on their hosted models), the
-wiki text and RAG passages the agent *reads to answer* travel to that
-provider. For absolute no-egress, the member must run a **local** agent model.
-This is a property of the member's IDE, not something the system can enforce.
+Once configured, verify that your agent can access both servers:
+
+1. **Test Wiki Search**:
+   Call `basic-memory.search_notes("PagedAttention Engine")` $\rightarrow$ should return the note with its summary and tags.
+2. **Test Note Read**:
+   Call `basic-memory.read_note("PagedAttention Engine")` $\rightarrow$ should return the Markdown body and `sources[]` block.
+3. **Test RAG Fetch**:
+   Call `Scout.rag_fetch(path="raw/reports/vllm_high_throughput_serving.pdf", hint="PagedAttention KV-Cache Virtual Block Allocation")` $\rightarrow$ should return `status: "ok"` with verbatim `context[]` and `citations[]`.

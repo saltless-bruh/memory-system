@@ -99,7 +99,7 @@ async def verify_address(backend: RagBackend, address: Address) -> VerifyReport:
     from scout.types import Scope
 
     chunks = await backend.retrieve(
-        address.hint, path=address.path, scope=Scope(roles=frozenset(["all"]))
+        address.hint, scope=Scope(roles=frozenset(["all"])), k=5
     )
     if not chunks:
         return VerifyReport(

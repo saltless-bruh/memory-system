@@ -314,11 +314,17 @@ async def verify_and_heal_vault(
         if not page:
             continue
 
+        candidates: list[str] = []
+        title = str(page.frontmatter.get("title", ""))
+        if title:
+            candidates.append(title)
         summary = str(page.frontmatter.get("summary", ""))
-        candidates = [report.hint]
         if summary:
             candidates.append(summary[:50])
             candidates.append(summary)
+        entities = page.frontmatter.get("entities", [])
+        if isinstance(entities, list):
+            candidates.extend(str(e) for e in entities if e)
 
         mint_result = await mint_address(
             backend, report.path, candidates, loc=found_addr.loc

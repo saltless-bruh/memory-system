@@ -440,6 +440,7 @@ class ScoutDiyEngine:
 
         match_query = " ".join(f'"{t}"' for t in terms)
         try:
+            assert self._fts_conn is not None
             cursor = self._fts_conn.execute(
                 "SELECT page_id FROM fts_index WHERE fts_index MATCH ? ORDER BY bm25(fts_index) LIMIT ?",
                 (match_query, limit),

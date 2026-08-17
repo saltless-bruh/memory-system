@@ -15,7 +15,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, cast
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("setup-gitea")
@@ -70,7 +70,7 @@ def create_gitea_webhook(
                         method="PATCH",
                     )
                     with urllib.request.urlopen(req_patch, timeout=10) as patch_resp:
-                        return json.load(patch_resp)
+                        return cast(dict[str, Any], json.load(patch_resp))
     except urllib.error.HTTPError as e:
         if e.code != 404:
             logger.warning(f"Failed to query existing hooks ({e.code}): {e.read().decode('utf-8', errors='ignore')}")
@@ -99,7 +99,7 @@ def create_gitea_webhook(
     )
 
     with urllib.request.urlopen(req_create, timeout=10) as resp:
-        result = json.load(resp)
+        result = cast(dict[str, Any], json.load(resp))
         logger.info(f"Successfully registered Gitea webhook (ID: {result.get('id')}) -> {webhook_url}")
         return result
 
@@ -131,7 +131,7 @@ def send_test_ping(target_webhook_url: str, secret: str) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             resp_body = json.load(resp)
             logger.info(f"Ping response (HTTP {resp.status}): {resp_body}")
-            return resp.status == 200 and resp_body.get("status") == "ok"
+            return bool(resp.status == 200 and resp_body.get("status") == "ok")
     except Exception as e:
         logger.error(f"Test ping failed: {e}")
         return False

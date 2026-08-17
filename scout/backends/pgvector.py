@@ -52,7 +52,7 @@ class PgVectorRlsBackend(RagBackend):
                 user=self.user,
                 password=self.password,
                 min_size=2,
-                max_size=10,
+                max_size=20,
             )
         return self._pool
 

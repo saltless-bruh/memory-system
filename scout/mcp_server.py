@@ -61,7 +61,7 @@ async def rag_fetch_tool(
     from scout.types import Scope
 
     address = Address(path=path, hint=hint, loc=loc)
-    scope = Scope(roles=["all"])
+    scope = Scope(roles=frozenset(["all"]))
     result = await rag_fetch(backend, address, scope=scope)
     return {
         "status": result.status.value,

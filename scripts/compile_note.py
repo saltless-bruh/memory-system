@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 # Append root repo to sys.path
 REPO_ROOT = Path(__file__).resolve().parents[1]

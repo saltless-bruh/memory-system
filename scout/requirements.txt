@@ -1,6 +1,6 @@
 # Scout runtime deps. The library core (types, core, backends over urllib) is
 # stdlib-only; these are needed only by the two service entry points:
-fastmcp==3.3.1      # scout.serve — agent-facing MCP server (rag_fetch)
+fastmcp==3.3.1      # scout.serve — agent-facing MCP server (rag_fetch; pinned for Streamable HTTP stability)
 watchfiles>=0.21    # scout.sync_job — raw/ file-watch (Nhịp A, T-3.2)
 asyncpg>=0.29.0     # scout.backends.pgvector — Postgres 16 async client
 pypdf>=4.0.0        # scout.parsers — PDF document extraction

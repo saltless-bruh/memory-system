@@ -9,6 +9,7 @@ description = "SNP Memory System (V1) — Dual-layer Wiki + RAG Shared Knowledge
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # fastmcp is pinned at 3.3.1 for Streamable HTTP transport and MCP output schema stability
     "fastmcp==3.3.1",
     "watchfiles>=0.21",
     "pyyaml>=6.0",
@@ -25,6 +26,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "mypy>=1.10",
+    "types-PyYAML>=6.0",
     "ruff>=0.4",
 ]
 
@@ -45,7 +47,7 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["lightrag.*"]
+module = ["lightrag.*", "asyncpg.*", "pypdf.*", "watchfiles.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

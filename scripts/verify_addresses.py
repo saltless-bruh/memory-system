@@ -130,7 +130,13 @@ async def verify_all(
     Returns:
         One `VerifyReport` per input address, in the same order.
     """
-    reports = await asyncio.gather(*(verify_address(backend, a) for a in addresses))
+    sem = asyncio.Semaphore(5)
+
+    async def _sem_verify(a: Address) -> VerifyReport:
+        async with sem:
+            return await verify_address(backend, a)
+
+    reports = await asyncio.gather(*(_sem_verify(a) for a in addresses))
     return list(reports)
 
 

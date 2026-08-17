@@ -4,7 +4,7 @@ import os
 from scout.backends.rag_anything_http import RagAnythingHttpBackend
 
 
-async def stress_test():
+async def stress_test() -> None:
     backend = RagAnythingHttpBackend(base_url="http://localhost:8000")
 
     questions = [

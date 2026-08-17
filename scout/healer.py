@@ -35,6 +35,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -257,7 +258,7 @@ def propose_heals(
     return result
 
 
-def _build_address_to_page(pages) -> dict[Address, vault.Page]:
+def _build_address_to_page(pages: Any) -> dict[Address, vault.Page]:
     mapping: dict[Address, vault.Page] = {}
     for page in pages:
         for src in page.sources:

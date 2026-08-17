@@ -26,6 +26,9 @@ def main() -> None:  # pragma: no cover - deploy wiring (needs a live transport)
     """Wire the chosen backend + MCP transport and serve `rag_fetch`."""
     backend_choice = os.environ.get("RAG_BACKEND", "pgvector").lower()
 
+    from scout.types import RagBackend
+
+    backend: RagBackend
     if backend_choice == "pgvector" or "POSTGRES_HOST" in os.environ:
         from scout.backends.pgvector import PgVectorRlsBackend
 

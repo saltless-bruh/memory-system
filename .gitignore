@@ -1,0 +1,51 @@
+# ── Derived indexes — NEVER source of truth (R-2.5) ──────────────────
+# basic-memory index rebuilds from wiki/*.md. Deleting it must be safe.
+.basic-memory/
+*.db
+*.db-wal
+*.db-shm
+
+# RAG-Anything working artifacts (KG + VDB built from raw/, derived)
+rag_storage/
+raw/**/kv_store_*.json
+raw/**/vdb_*.json
+raw/**/graph_*.graphml
+
+# ── Specs — ignored per request ──────────────────────────────────────
+specs/
+
+# ── Secrets ──────────────────────────────────────────────────────────
+.env
+.env.agent_local
+config/litellm/.litellm_secrets.yaml
+
+# ── Local Agent Configuration ─────────────────────────────────────────
+.agent-local/
+
+# ── Spike outputs ───────────────────────────────────────────────────
+spikes/**/out/
+spikes/**/*.tmp
+spikes/**/scratch/
+
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ── Editor / tooling / OS ────────────────────────────────────────────
+.claude/settings.local.json
+.vscode/
+.idea/
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.DS_Store
+Thumbs.db
+desktop.ini

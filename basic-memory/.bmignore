@@ -1,0 +1,30 @@
+# basic-memory sync ignore patterns (vault-relevant subset).
+
+# Hidden files
+.*
+
+# index.md is a GENERATED navigation aggregate (gen_index.py) that
+# concatenates every page summary — indexing it pollutes semantic search
+# (it matches every query). The engine must never surface it. (setup doc)
+index.md
+
+# archive.md / log.md are navigational, not knowledge pages — excluding them
+# keeps them out of search results (demo post-mortem, flaw #5).
+archive.md
+log.md
+
+# basic-memory internal / db files
+*.db
+*.db-shm
+*.db-wal
+config.json
+
+# VCS / tooling / OS noise
+.git
+__pycache__
+*.pyc
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.swp

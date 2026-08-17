@@ -1,0 +1,73 @@
+# GATE 4 — Vietnamese recall test set (T-0.7 → R-8.4.4, R-2.3, R-2.6)
+#
+# Each item: a Vietnamese question and the page(s) that SHOULD be the top
+# hit. `paraphrase: true` marks questions that deliberately share NO
+# surface keywords with the target page's title/summary — those are the
+# ones that separate real semantic search from keyword matching (R-2.3).
+#
+# Target = page slug (filename without .md). Recall@k is measured against
+# these labels for FastEmbed-default vs bge-m3.
+
+targets_dir: wiki   # slugs resolved by filename within this dir
+
+questions:
+  # ── kerberoasting ────────────────────────────────────────────────
+  - q: "Làm sao lấy được mật khẩu tài khoản dịch vụ có SPN mà không cần quyền admin?"
+    target: kerberoasting
+    paraphrase: false
+  - q: "Tài khoản chạy dịch vụ bị bẻ khoá ngoại tuyến bằng cách xin vé rồi crack, kỹ thuật đó tên gì?"
+    target: kerberoasting
+    paraphrase: false
+  - q: "Có cách nào biến một người dùng thường thành đọc được hash của account chạy ứng dụng nội bộ không?"
+    target: kerberoasting
+    paraphrase: true
+  - q: "Vì sao đặt mật khẩu ngắn cho account tự động chạy phần mềm lại nguy hiểm trong mạng Windows?"
+    target: kerberoasting
+    paraphrase: true
+
+  # ── asrep-roasting ───────────────────────────────────────────────
+  - q: "Tài khoản tắt xác thực trước của Kerberos thì bị tấn công thế nào?"
+    target: asrep-roasting
+    paraphrase: false
+  - q: "Không có credential nào vẫn lấy được phần mã hoá để bẻ khoá offline, nhờ cấu hình sai nào?"
+    target: asrep-roasting
+    paraphrase: true
+  - q: "Cờ DONT_REQ_PREAUTH bật lên thì kẻ tấn công khai thác ra sao?"
+    target: asrep-roasting
+    paraphrase: false
+
+  # ── adcs-esc8 ────────────────────────────────────────────────────
+  - q: "Chuyển tiếp xác thực NTLM sang trang cấp chứng chỉ để mạo danh máy khác, đó là lỗ hổng nào?"
+    target: adcs-esc8
+    paraphrase: false
+  - q: "Ép domain controller đăng nhập về mình rồi đổi lấy certificate để leo lên quyền domain?"
+    target: adcs-esc8
+    paraphrase: true
+  - q: "Endpoint /certsrv/ không bật EPA thì bị lạm dụng kiểu gì?"
+    target: adcs-esc8
+    paraphrase: false
+  - q: "Dịch vụ phát hành chứng thư số của Windows bị dùng để chiếm toàn bộ hệ thống như thế nào?"
+    target: adcs-esc8
+    paraphrase: true
+
+  # ── active-directory (concept) ───────────────────────────────────
+  - q: "Thành phần trung tâm quản lý danh tính trong mạng doanh nghiệp Windows là gì?"
+    target: active-directory
+    paraphrase: false
+  - q: "Cái gì mà chiếm được nó thì gần như kiểm soát cả miền, dùng Kerberos và LDAP?"
+    target: active-directory
+    paraphrase: true
+
+  # ── acme-corp (entity) ───────────────────────────────────────────
+  - q: "Khách hàng nào năm 2026 bị đi từ user thường lên Domain Admin qua chuỗi kerberoast rồi ESC8?"
+    target: acme-corp
+    paraphrase: false
+  - q: "Vụ đánh giá an ninh nào có service account yếu kết hợp CA cấu hình sai làm ví dụ tham chiếu?"
+    target: acme-corp
+    paraphrase: true
+
+  # ── cross-cutting (harder: could match 2, primary listed first) ──
+  - q: "Những kỹ thuật nào lợi dụng vé Kerberos để lấy thông tin đăng nhập?"
+    target: kerberoasting
+    also_acceptable: [asrep-roasting]
+    paraphrase: true

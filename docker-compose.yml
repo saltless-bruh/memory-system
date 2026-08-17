@@ -1,0 +1,227 @@
+# SNP Memory System — Docker Compose (R-9.1) — FULL STACK (T-3.8)
+#
+# Services (design.md §6):
+#   git           Gitea — version + audit trail (R-1.1); optional (R-9.3)
+#   litellm       the single model chokepoint → local Ollama (R-8.1)
+#   rag           RAG-Anything storage; internal-only, no ports (R-4.2)
+#   scout         RAG bridge + agent-facing MCP; the ONLY caller of rag
+#   sync-job      Nhịp A auto-ingest: raw/ change → rag reindex (T-3.2)
+#   basic-memory  LLM-Wiki engine, search/read MCP (AGPL; runbook §4)
+#
+# R-9.2: the wiki vault is NOT a service. It is plain files in the Git
+# repo, bind-mounted read-only into whatever needs to read it.
+#
+# Bring-up prerequisite: Ensure you have populated `.env` with your 
+# Cloud API keys (OPENAI_API_KEY, etc.) and model settings. 
+# `docker compose up -d` then builds the stack.
+
+name: snp-memory
+
+services:
+  # ── Git backend — version + audit trail (R-1.1) ───────────────────
+  # R-9.3: if the company already runs GitLab, delete this service and
+  # point WIKI_REMOTE at the existing GitLab repo. Nothing else changes.
+  git:
+    image: gitea/gitea:1.24
+    container_name: snp-gitea
+    restart: unless-stopped
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__ROOT_URL: ${GITEA__server__ROOT_URL:-http://localhost:3000/}
+      GITEA__server__DISABLE_SSH: "false"
+      GITEA__server__SSH_PORT: ${GITEA_SSH_PORT:-2222}
+      # Local-first: nothing here reaches out to the internet.
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__security__INSTALL_LOCK: "true"
+    volumes:
+      - gitea-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "${GITEA_HTTP_PORT:-3000}:3000"
+      - "${GITEA_SSH_PORT:-2222}:22"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # ── LiteLLM — the single model chokepoint (R-8.1) ─────────────────
+  # Every model call made BY THE SYSTEM goes through here and lands on a
+  # Cloud API provider (OpenAI, Anthropic, Gemini). 
+  # Exceptions:
+  #   1. basic-memory's FastEmbed runs in-process, not through LiteLLM
+  #   2. The member's own coding-agent model is OUTSIDE this boundary
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: snp-litellm
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-change-me}
+      LITELLM_EMBED_MODEL: ${LITELLM_EMBED_MODEL:-text-embedding-3-small}
+      LITELLM_LLM_MODEL: ${LITELLM_LLM_MODEL:-gpt-4o}
+      LITELLM_VLM_MODEL: ${LITELLM_VLM_MODEL:-gpt-4o}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - ./config/litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    healthcheck:
+      # The litellm image ships python but NOT curl, so probe via urllib.
+      # /health/liveliness returns 200 when the proxy is up; urlopen
+      # raises (→ nonzero exit → unhealthy) otherwise.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Scout — the RAG bridge; the ONLY door into rag (R-4.1, R-4.2) ─
+  # Agent-facing MCP exposing exactly one tool, `rag_fetch`. It reaches
+  # PostgreSQL 16 + pgvector directly using fail-closed RLS and post-
+  # filters every result to the addressed file (R-4.3).
+  scout:
+    build:
+      context: ./scout
+    image: snp-scout
+    container_name: snp-scout
+    restart: unless-stopped
+    environment:
+      RAG_BACKEND: pgvector
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-snp_rag}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-rag_app_role}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-rag_app_secret}
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-change-me}
+      SCOUT_HOST: 0.0.0.0
+      SCOUT_PORT: "8080"
+    ports:
+      - "${SCOUT_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+
+  # ── sync-job — Nhịp A auto-ingest (T-3.2, R-6.1) ───────────────────
+  # Same image as scout: watches raw/ and triggers a direct V2
+  # PostgreSQL reindex on every change so dropped files are seen automatically.
+  sync-job:
+    image: snp-scout
+    container_name: snp-sync-job
+    restart: unless-stopped
+    command: ["python", "-m", "scout.sync_job"]
+    environment:
+      RAG_BACKEND: pgvector
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-snp_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_master_secret}
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-change-me}
+      RAW_DIR: /data/raw
+    volumes:
+      - ./raw:/data/raw:ro           # watch raw/ ONLY, read-only (R-3.1)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+
+  # ── basic-memory — LLM-Wiki engine, search/read MCP ────────────────
+  # The single AGPL piece (runbook §4). Config baked from the validated
+  # setup. Embeddings hit the LiteLLM proxy which routes to Cloud APIs.
+  basic-memory:
+    build:
+      context: ./basic-memory
+    container_name: snp-basic-memory
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      LITELLM_BASE_URL: http://127.0.0.1:4000/v1
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev-change-me}
+    volumes:
+      - ./wiki:/vault:ro             # ZERO-CREDENTIAL MOUNT (read-only)
+      - bm-data:/root/.basic-memory  # SQLite DB + vector store persist here
+
+  # ── host-sync — Zero-Credential Git Puller (Phase 1) ─────────────
+  host-sync:
+    build: 
+      context: ./scripts
+      dockerfile: Dockerfile.sync
+    container_name: snp-host-sync
+    restart: unless-stopped
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-secret}
+      VAULT_DIR: /repo
+      GIT_REMOTE: origin
+      GIT_BRANCH: main
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./:/repo:rw                  # Root repo mounted so git reset updates wiki/ in place
+
+  # ── PostgreSQL 16 + pgvector — V2 Hybrid RAG Store (Phase 2) ─────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: snp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-snp_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_master_secret}
+    volumes:
+      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-snp_rag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Gitea Actions Runner — Phase 3 Auto-Healer CI Runner ──────────
+  gitea-runner:
+    image: gitea/act_runner:0.2.11
+    container_name: snp-gitea-runner
+    restart: unless-stopped
+    environment:
+      GITEA_INSTANCE_URL: ${GITEA_INSTANCE_URL:-http://git:3000}
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_REGISTRATION_TOKEN:-}
+      GITEA_RUNNER_NAME: snp-auto-healer-runner
+      CONFIG_FILE: /config.yaml
+    volumes:
+      - ./config/gitea/runner-config.yaml:/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-data:/data
+    depends_on:
+      git:
+        condition: service_healthy
+    profiles:
+      - runner
+
+# ─────────────────────────────────────────────────────────────────────
+# R-9.3: if the company already runs GitLab, delete the `git` service and
+# point WIKI_REMOTE at the existing GitLab repo — nothing else changes.
+# The wiki vault is NOT a service (R-9.2): it is plain files in the repo,
+# bind-mounted (read-only) into whatever reads it.
+# ─────────────────────────────────────────────────────────────────────
+
+volumes:
+  gitea-data:
+  rag-storage:
+  rag-hf-cache:
+  bm-data:
+  pgdata:
+  runner-data:

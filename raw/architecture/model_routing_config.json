@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "2026.2.0",
+  "gateway": "LiteLLM-Enterprise-Router",
+  "routing_rules": [
+    {
+      "alias": "snp-embed",
+      "primary_model": "gemini/gemini-embedding-001",
+      "fallback_model": "openai/text-embedding-3-large",
+      "dimensions": 3072,
+      "timeout_seconds": 15,
+      "rate_limit_rpm": 3000
+    },
+    {
+      "alias": "snp-llm",
+      "primary_model": "gemini/gemini-3.5-flash",
+      "fallback_model": "anthropic/claude-3-5-sonnet",
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "timeout_seconds": 30
+    },
+    {
+      "alias": "snp-vlm",
+      "primary_model": "gemini/gemini-3.5-flash",
+      "supports_images": true,
+      "supports_video": true,
+      "timeout_seconds": 45
+    }
+  ],
+  "caching": {
+    "enabled": true,
+    "backend": "redis",
+    "ttl_seconds": 86400
+  },
+  "security": {
+    "mask_pii": true,
+    "drop_hostile_headers": true
+  }
+}

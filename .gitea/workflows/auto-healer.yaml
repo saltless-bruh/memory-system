@@ -1,0 +1,124 @@
+# .gitea/workflows/auto-healer.yaml
+# Vault mechanical verification + PR-first auto-healer (Technical_Blueprint_Auto_Healer_CICD.md).
+#
+# Two triggers, matching scout/healer.py's two modes:
+#   • pull_request  -> `--ci`: heal drift in the analyst's PR by committing a bot
+#                      fix onto THAT PR branch; the human reviews before merge.
+#   • schedule      -> `--push`: sweep already-merged content; the healer opens
+#                      its OWN heal PR off main (never commits to main directly).
+#
+# Runner: use a SELF-HOSTED runner that can reach the company LiteLLM gateway
+# and the PostgreSQL V2 database, but is not exposed to the public internet.
+
+name: Vault Verification & Auto-Healer
+
+on:
+  pull_request:
+    paths:
+      - 'wiki/**/*.md'
+  schedule:
+    - cron: '0 0 * * 0'   # weekly sweep, Sunday 00:00
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # PR path: heal drift on the analyst's PR branch (bot commit -> human review)
+  # ---------------------------------------------------------------------------
+  pr-heal:
+    if: github.event_name == 'pull_request' && !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: self-hosted
+    env:
+      HEALER_BACKEND: pgvector
+      POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'postgres' }}
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${{ vars.POSTGRES_DB || 'snp_rag' }}
+      POSTGRES_USER: ${{ vars.POSTGRES_USER || 'postgres' }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres_master_secret' }}
+      LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'http://litellm:4000/v1' }}
+      LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://internal-telemetry:4317"
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BOT_TOKEN }}
+          ref: ${{ github.head_ref }}
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv and dependencies
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync
+
+      - name: Verify addresses
+        run: |
+          if ! uv run python scripts/verify_addresses.py; then
+            echo "DRIFT_DETECTED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Heal (CI mode - applies to this PR branch, no commit)
+        if: env.DRIFT_DETECTED == 'true'
+        run: uv run python scout/healer.py --ci
+
+      - name: Lint gate (a broken heal fails CI - nothing gets pushed)
+        if: env.DRIFT_DETECTED == 'true'
+        run: uv run python scripts/gen_index.py --check
+
+      - name: Commit and push bot fix (single commit to the PR branch)
+        if: env.DRIFT_DETECTED == 'true'
+        run: |
+          git config user.name  "SNP Vault Healer Bot"
+          git config user.email "bot@snp-memory.local"
+          git add wiki/
+          if git diff --cached --quiet; then
+            echo "Healer produced no changes to commit."
+          else
+            git commit -m "bot: auto-heal drifted RAG citation(s) [skip ci]"
+            git push origin "HEAD:${{ github.head_ref }}"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Scheduled sweep: drift in already-merged content -> healer opens a heal PR
+  # ---------------------------------------------------------------------------
+  scheduled-sweep:
+    if: github.event_name == 'schedule'
+    runs-on: self-hosted
+    env:
+      HEALER_BACKEND: pgvector
+      POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'postgres' }}
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${{ vars.POSTGRES_DB || 'snp_rag' }}
+      POSTGRES_USER: ${{ vars.POSTGRES_USER || 'postgres' }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres_master_secret' }}
+      LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'http://litellm:4000/v1' }}
+      LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://internal-telemetry:4317"
+      GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BOT_TOKEN }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv and dependencies
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync
+
+      - name: Configure bot identity
+        run: |
+          git config user.name  "SNP Vault Healer Bot"
+          git config user.email "bot@snp-memory.local"
+
+      - name: Sweep and open a heal PR (default mode; healer branches + pushes)
+        run: uv run python scout/healer.py --push --base main

@@ -1,0 +1,19 @@
+{
+  "env": "dev",
+  "projects": {
+    "snp-wiki": { "path": "/vault", "mode": "local" }
+  },
+  "default_project": "snp-wiki",
+  "log_level": "INFO",
+  "database_backend": "sqlite",
+  "semantic_search_enabled": true,
+  "semantic_embedding_provider": "fastembed",
+  "semantic_embedding_model": "BAAI/bge-small-en-v1.5",
+  "semantic_embedding_dimensions": 384,
+  "semantic_min_similarity": 0.35,
+  "disable_permalinks": true,
+  "ensure_frontmatter_on_sync": false,
+  "update_permalinks_on_move": false,
+  "auto_update": false,
+  "logfire_enabled": false
+}

@@ -29,7 +29,7 @@
 > [!IMPORTANT]
 > **ATTENTION AI CODING AGENTS**: Before searching the vault, reading pages, or modifying code in this repository, you must review the operational contract:
 > 1. **Primary Handbook & Rules**: [`AGENTS.md`](AGENTS.md) — The mechanical rules (R-1 through R-8) for query workflows, frontmatter schemas, address minting, and PR-first commits.
-> 2. **Agent Guide & Error Playbook**: [`.agent/instructions/agent_guide.instructions.md`](.agent/instructions/agent_guide.instructions.md) — Fast-track setup, Do's & Don'ts, and troubleshooting tables.
+> 2. **Agent Guide & Error Playbook**: [`packages/snp-agent/instructions/agent_guide.instructions.md`](packages/snp-agent/instructions/agent_guide.instructions.md) — Fast-track setup, Do's & Don'ts, and troubleshooting tables.
 
 ---
 

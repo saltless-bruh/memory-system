@@ -7,7 +7,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL_16-336791?style=for-the-badge&logo=postgresql&logoColor=white)
 ![Model Context Protocol](https://img.shields.io/badge/MCP-Enabled-00ADD8?style=for-the-badge&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/Tests-159%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-169%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)
 
 <p align="center">
   <b>Bi-temporal, self-hosted dual-layer memory infrastructure for autonomous AI coding agents and engineering organizations.</b><br>
@@ -305,6 +305,10 @@ The system was evaluated against the **Unified 9-Scenario Real-World Stress Test
 * **Agent Onboarding Guide**: [`.agent/instructions/agent_guide.instructions.md`](.agent/instructions/agent_guide.instructions.md)
 * **MCP Client Setup**: [`docs/CONNECT_AGENTS.md`](docs/CONNECT_AGENTS.md)
 * **Operations Runbook**: [`docs/runbook.md`](docs/runbook.md)
+* **Architecture Blueprints**:
+  - [Agent Distribution Package & Dual-Mode Workflows](docs/proposal/Technical_Blueprint_Agent_Package_and_Dual_Mode_Workflows.md)
+  - [Enterprise Layer 1: Knowledge Vault (Gitea & Host-Sync)](docs/proposal/Technical_Blueprint_Enterprise_Knowledge_Vault.md)
+  - [Enterprise Layer 2: Data Vault & RAG Bridge (PostgreSQL 16 RLS)](docs/proposal/Technical_Blueprint_Enterprise_Data_Vault_and_RAG.md)
 * **V2 Architecture Roadmap**: [`docs/SESSION_HANDOVER_AND_V2_ROADMAP.md`](docs/SESSION_HANDOVER_AND_V2_ROADMAP.md)
 
 ---

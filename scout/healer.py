@@ -31,7 +31,6 @@ Library (run_system.py):
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,9 +38,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(REPO_ROOT / "spikes" / "_lib"))
-import vault as vault  # type: ignore[import-not-found] # noqa: E402
-
+from scout import vault  # noqa: E402
 from scout.types import Address, RagBackend  # noqa: E402
 from scripts.mint import MintStatus, mint_address  # noqa: E402
 from scripts.propose_page import (  # noqa: E402
@@ -356,12 +353,6 @@ def _build_backend() -> RagBackend:
         from scout.backends.pgvector import PgVectorRlsBackend
 
         return PgVectorRlsBackend()
-    if kind == "rag_anything_http":
-        from scout.backends.rag_anything_http import RagAnythingHttpBackend
-
-        return RagAnythingHttpBackend(
-            base_url=os.environ.get("RAG_HTTP_URL", "http://localhost:8000")
-        )
     if kind == "fake":
         from scout.backends.fake import FakeRagBackend
 

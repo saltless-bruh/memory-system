@@ -92,7 +92,19 @@ Clients that only launch MCP servers as subprocesses (stdio) can bridge to HTTP 
 
 ---
 
-## 3. Automated Configuration Export
+## 3. One-Line Smart Package Installer (Automated Setup)
+
+Instead of manually creating `.mcp.json` and copying rules, you can bootstrap the entire SNP agent package into any workspace:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saltless-bruh/memory-system/main/scripts/install-agent.sh | bash
+```
+
+This non-destructively installs the SNP rules (`rules/snp-memory.md`), 6 dual-mode slash-command workflows (`/snp-query`, `/snp-compile`, etc.), and 8 progressive disclosure skills into `.agent/`.
+
+---
+
+## 4. Automated Configuration Export
 
 To generate copy-pasteable JSON configuration blocks for your current system automatically, run:
 
@@ -102,13 +114,13 @@ python scripts/export_mcp_config.py
 
 ---
 
-## 4. Verifying Agent Connectivity
+## 5. Verifying Agent Connectivity & Handshake
 
-Once configured, verify that your agent can access both servers:
+Once configured, perform the handshake in your agent chat:
 
-1. **Test Wiki Search**:
-   Call `basic-memory.search_notes("PagedAttention Engine")` $\rightarrow$ should return the note with its summary and tags.
-2. **Test Note Read**:
-   Call `basic-memory.read_note("PagedAttention Engine")` $\rightarrow$ should return the Markdown body and `sources[]` block.
+1. **Trigger Handshake**:
+   Type `/snp-reload` in your chat session $\rightarrow$ the agent loads all rules, skills, and verifies endpoint connectivity.
+2. **Test Wiki Search**:
+   Call `basic-memory.search_notes("PagedAttention Engine")` $\rightarrow$ returns the note with summary and tags.
 3. **Test RAG Fetch**:
-   Call `Scout.rag_fetch(path="raw/reports/vllm_high_throughput_serving.pdf", hint="PagedAttention KV-Cache Virtual Block Allocation")` $\rightarrow$ should return `status: "ok"` with verbatim `context[]` and `citations[]`.
+   Call `Scout.rag_fetch(path="raw/reports/vllm_high_throughput_serving.pdf", hint="PagedAttention KV-Cache Virtual Block Allocation")` $\rightarrow$ returns `status: "ok"` with verbatim `context[]` and `citations[]`.

@@ -29,16 +29,14 @@ def main() -> None:  # pragma: no cover - deploy wiring (needs a live transport)
     from scout.types import RagBackend
 
     backend: RagBackend
-    if backend_choice == "pgvector" or "POSTGRES_HOST" in os.environ:
+    if backend_choice == "fake":
+        from scout.backends.fake import FakeRagBackend
+
+        backend = FakeRagBackend(chunks=[])
+    else:
         from scout.backends.pgvector import PgVectorRlsBackend
 
         backend = PgVectorRlsBackend()
-    else:
-        from scout.backends.rag_anything_http import RagAnythingHttpBackend
-
-        backend = RagAnythingHttpBackend(
-            base_url=os.environ.get("RAG_URL", "http://rag:8000")
-        )
 
     server = build_server(backend)
     server.run(

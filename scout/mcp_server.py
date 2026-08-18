@@ -1,6 +1,6 @@
 """Agent-facing MCP layer for Scout — the only door into RAG (R-4.1, R-4.2).
 
-Exposes exactly one tool to the agent: ``rag_fetch``. RAG-Anything (or any
+Exposes exactly one tool to the agent: ``rag_fetch``. PostgreSQL 16 + pgvector (or any
 other `RagBackend` adapter) is never reachable from the agent directly — the
 agent can only ask Scout, and Scout is the sole caller of the backend
 (design.md §2.3, R-4.2). No raw RAG query is exposed here.
@@ -11,10 +11,9 @@ unit-tested directly — no server, no transport, no network. Its return shape
 is fixed to quotes + citations only; there is no ``"action"``/``"command"``
 field, which is the structural half of the prompt-injection guard (R-8.5).
 
-A real `RagBackend` (the RAG-Anything adapter, wired in T-2.1) and an actual
+A real `RagBackend` (such as `PgVectorRlsBackend`) and an actual
 MCP transport are chosen at deploy time — `build_server` takes whatever
-backend it is given (dependency injection), so importing this module never
-requires RAG-Anything or MinerU to be installed.
+backend it is given (dependency injection).
 """
 
 from __future__ import annotations

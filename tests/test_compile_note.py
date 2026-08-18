@@ -62,7 +62,7 @@ def test_compile_note_success(mock_mint, mock_gen_index, mock_raw_file) -> None:
 
     mock_mint.side_effect = mock_mint_address
 
-    with patch("scripts.compile_note.RagAnythingHttpBackend"):
+    with patch("scripts.compile_note.PgVectorRlsBackend"):
         compile_note(rel_path, "Acme Corp", "concept")
 
     wiki_path = repo_root / "wiki" / "concepts" / "acme-corp.md"

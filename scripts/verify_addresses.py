@@ -44,14 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # give standalone CLI runs the same root pytest gets.
 sys.path.insert(0, str(REPO_ROOT))
 
-# Reuse the shared vault library (also used by gen_index.py and the spike
-# harnesses) instead of re-implementing frontmatter parsing. Not a normal
-# package, so it needs its directory on sys.path too — same pattern as
-# gen_index.py. mypy cannot resolve this dynamic path; the module behaves
-# as `Any` from here on, which is fine (see the T-2.5 handoff notes).
-sys.path.insert(0, str(REPO_ROOT / "spikes" / "_lib"))
-import vault as vault  # type: ignore[import-not-found]  # noqa: E402
-
+from scout import vault  # noqa: E402
 from scout.core import normalize_path, post_filter  # noqa: E402
 from scout.types import Address, RagBackend  # noqa: E402
 

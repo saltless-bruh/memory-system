@@ -15,16 +15,11 @@ Usage:
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import tiktoken
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "spikes" / "_lib"))
-import vault as vault  # type: ignore[import-not-found]  # noqa: E402
+from scout import vault  # noqa: E402
 
 _ENC = tiktoken.get_encoding("cl100k_base")
 

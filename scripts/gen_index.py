@@ -40,9 +40,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WIKI_DIR = REPO_ROOT / "wiki"
 INDEX_PATH = WIKI_DIR / "index.md"
 
-# Reuse the shared vault library (also used by the spike harnesses).
-sys.path.insert(0, str(REPO_ROOT / "spikes" / "_lib"))
-import vault  # type: ignore[import-not-found]  # noqa: E402
+sys.path.insert(0, str(REPO_ROOT))
+from scout import vault  # noqa: E402
 
 GENERATED_HEADER = "<!-- GENERATED FILE — DO NOT EDIT BY HAND -->"
 

@@ -16,7 +16,7 @@ import json
 import os
 import urllib.request
 
-from scout.backends.rag_anything_http import RagAnythingHttpBackend  # noqa: E402
+from scout.backends.pgvector import PgVectorRlsBackend  # noqa: E402
 from scripts.mint import MintStatus, mint_address  # noqa: E402
 
 
@@ -82,7 +82,7 @@ def compile_note(path: str, title: str, category: str) -> None:
 
     mock_data = generate_mock_data(title, path)
 
-    backend = RagAnythingHttpBackend()
+    backend = PgVectorRlsBackend()
     result = asyncio.run(
         mint_address(
             backend=backend,

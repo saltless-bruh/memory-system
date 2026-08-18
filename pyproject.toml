@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "snp-memory-system"
 version = "0.1.0"
-description = "SNP Memory System (V1) — Dual-layer Wiki + RAG Shared Knowledge System"
+description = "SNP Memory System (V2) — Dual-layer Wiki + PostgreSQL 16 pgvector Knowledge Platform"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -47,7 +47,7 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["lightrag.*", "asyncpg.*", "pypdf.*", "watchfiles.*"]
+module = ["asyncpg.*", "pypdf.*", "watchfiles.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

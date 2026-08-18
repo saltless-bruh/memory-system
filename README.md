@@ -206,20 +206,62 @@ claude mcp add --transport http scout    http://localhost:8080/mcp
 
 ---
 
+## 📦 Portable Agent Package & Smart Installer
+
+The SNP Memory System includes a self-contained, downstream agent package (`packages/snp-agent/`) designed for instant integration into external repositories (inspired by `gemini-superpowers-antigravity`).
+
+### 1. One-Line Smart Bootstrap (For Any Repository)
+In any target project connecting to an SNP Memory System instance, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saltless-bruh/memory-system/main/scripts/install-agent.sh | bash
+```
+
+* **Non-Destructive**: Merges SNP rules and workflows safely without overwriting existing custom configurations.
+* **Instant Activation**: Open your agent chat (Cursor, Claude Code, Gemini CLI, Antigravity) and enter:
+  ```
+  /snp-reload
+  ```
+
+---
+
+## ⚡ Dual-Mode Slash Commands & Workflows
+
+| Slash Command | Intent & Dual-Mode Behavior |
+|---|---|
+| **`/snp-query [query]`** | Multi-hop search: Reads local `basic-memory` and retrieves verbatim evidence via local or remote Scout MCP (Rule R-5.1). |
+| **`/snp-compile [path]`** | Synthesizes raw docs into AGENTS.md notes with minted pgvector addresses on a PR branch (Rule R-6.3, R-6.4). |
+| **`/snp-ingest [path]`** | Ingests documents into PostgreSQL 16 `pgvector` locally or via Central Ingest REST API. |
+| **`/snp-verify`** | Pre-flight gate: Runs frontmatter schema check (`gen_index.py --check`) and RAG address resolution. |
+| **`/snp-heal`** | Autonomous drift healing: Re-mints invalid citations via pgvector and records audit entries in `wiki/log.md`. |
+| **`/snp-reload`** | Hot-reloads rules, skills, workflows, and confirms MCP endpoint connectivity. |
+
+---
+
 ## 🤖 Progressive Disclosure Agent Skills
 
-All domain skills are located under [`.agent/skills/`](.agent/skills/):
+All domain skills are packaged under [`packages/snp-agent/skills/`](packages/snp-agent/skills/):
 
 ```
-.agent/skills/
-├── snp-search-wiki/       # Search and traverse compiled wiki notes
-├── snp-rag-fetch/         # Fetch verbatim quotes via Scout MCP
-├── snp-compile-wiki/      # Compile raw data into AGENTS.md-compliant notes
-├── snp-ingest-raw-data/   # Transactional ingestion into PostgreSQL 16 pgvector
-├── snp-verify-vault/      # Run schema and RAG address verification gates
-├── snp-auto-heal-vault/   # Re-mint drifted RAG addresses via pgvector in CI/local
-├── snp-export-mcp/        # Export ready-to-paste MCP client configurations
-└── snp-bootstrap-system/  # Deploy, verify, and healthcheck Docker stack
+packages/snp-agent/
+├── rules/snp-memory.md               # Core Operating Invariants (R-5, R-8.5, R-6.3, R-6.4)
+├── workflows/                        # 6 Dual-Mode Slash Commands
+│   ├── snp-query.md
+│   ├── snp-compile.md
+│   ├── snp-ingest.md
+│   ├── snp-verify.md
+│   ├── snp-heal.md
+│   └── snp-reload.md
+├── skills/                           # Progressive Disclosure Skills
+│   ├── snp-search-wiki/              # Search and traverse compiled wiki notes
+│   ├── snp-rag-fetch/                # Fetch verbatim quotes via Scout MCP
+│   ├── snp-compile-wiki/             # Compile raw data into AGENTS.md-compliant notes
+│   ├── snp-ingest-raw-data/          # Transactional ingestion into PostgreSQL 16 pgvector
+│   ├── snp-verify-vault/             # Run schema and RAG address verification gates
+│   ├── snp-auto-heal-vault/          # Re-mint drifted RAG addresses via pgvector in CI/local
+│   ├── snp-export-mcp/               # Export ready-to-paste MCP client configurations
+│   └── snp-bootstrap-system/         # Deploy, verify, and healthcheck Docker stack
+└── instructions/                     # Authoritative contracts & error playbooks
 ```
 
 ---

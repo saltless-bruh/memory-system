@@ -1,11 +1,9 @@
 import asyncio
-import json
 import os
-import subprocess
 
 from datasets import Dataset
 
-from scout.backends.rag_anything_http import RagAnythingHttpBackend
+from scout.backends.pgvector import PgVectorRlsBackend
 
 try:
     from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -17,69 +15,36 @@ except ImportError:
     RAGAS_AVAILABLE = False
 
 
-class DockerRag:
-    async def retrieve(self, hint, k=3):
-        py_script = f"""
-import json, urllib.request
-body = json.dumps({{"hint": "{hint}", "k": {k}}}).encode("utf-8")
-req = urllib.request.Request("http://localhost:8000/retrieve", data=body, headers={{"Content-Type": "application/json"}})
-with urllib.request.urlopen(req) as resp:
-    print(resp.read().decode("utf-8"))
-"""
-        cmd = ["docker", "compose", "exec", "-T", "rag", "python", "-c", py_script]
-        res = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd="/home/ple/Documents/memo-project/snp-memory-system-main",
-        )
-        try:
-            chunks = json.loads(res.stdout).get("chunks", [])
-            return [
-                RagAnythingHttpBackend._to_chunk(c)
-                for c in chunks
-                if isinstance(c, dict)
-            ]
-        except Exception as e:
-            print(
-                f"Docker retrieve failed: {e}, stdout: {res.stdout}, stderr: {res.stderr}"
-            )
-            return []
-
-
 async def run_ragas():
-    print("Setting up Automated Framework Test (Ragas via Docker exec)...")
+    print("Setting up Automated Framework Test (Ragas against PgVector)...")
     if not RAGAS_AVAILABLE:
         print(
             "⚠️ Ragas or Langchain dependencies are missing. Skipping automated evaluation."
         )
         return
 
-    os.environ["OPENAI_API_KEY"] = "sk-local-dev-placeholder"
     os.environ["OPENAI_API_BASE"] = "http://localhost:4000"
-    os.environ["LITELLM_MASTER_KEY"] = "sk-local-dev-placeholder"
 
     judge_llm = ChatOpenAI(model="openai/gpt-4o")
     judge_embeddings = OpenAIEmbeddings(model="gemini/gemini-embedding-2")
 
-    rag = DockerRag()
-
-    query = "What is the primary function of TCP?"
-    results = await rag.retrieve(hint=query, k=2)
+    backend = PgVectorRlsBackend()
+    query = "PagedAttention Engine"
+    results = await backend.retrieve(query=query, k=2)
     contexts = (
         [r.text for r in results]
         if results
         else [
-            "TCP provides reliable, ordered, and error-checked delivery of a stream of octets."
+            "PagedAttention eliminates memory fragmentation in KV-cache allocation."
         ]
     )
+    await backend.close()
 
     data = {
         "question": [query],
-        "answer": ["TCP provides reliable delivery of data streams."],
+        "answer": ["PagedAttention manages virtual GPU block allocations."],
         "contexts": [contexts],
-        "ground_truth": ["TCP provides reliable, ordered, and error-checked delivery."],
+        "ground_truth": ["PagedAttention allocates non-contiguous physical GPU blocks."],
     }
     dataset = Dataset.from_dict(data)
 

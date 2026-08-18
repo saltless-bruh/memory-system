@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "spikes" / "_lib"))
-import vault as vault  # type: ignore[import-not-found] # noqa: E402
-
+from scout import vault  # noqa: E402
 from scout.healer import (  # noqa: E402
     ProposedHeal,
     _build_backend,

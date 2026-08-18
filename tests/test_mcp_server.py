@@ -9,11 +9,18 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from fastmcp import FastMCP
 
 from scout.backends.fake import FakeRagBackend
 from scout.mcp_server import build_server, rag_fetch_tool
 from scout.types import RagChunk
+
+
+@pytest.fixture(autouse=True)
+def _default_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCOUT_AUTH_MODE", "development")
+
 
 
 def _walk(value: object) -> list[object]:
@@ -131,15 +138,136 @@ async def test_build_server_registers_rag_fetch_tool_only(
 async def test_build_server_tool_delegates_to_backend(backend: FakeRagBackend) -> None:
     """The registered `rag_fetch` tool must actually call through to Scout
     core / the injected backend, not just exist as a stub."""
-    mcp = build_server(backend)
+    mcp = build_server(backend, allowed_depts=["all", "redteam"])
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "rag_fetch")
 
     result: Any = await tool.run(
-        {"path": "raw/reports/acme.pdf", "hint": "kerberoasting service account"}
+        {
+            "path": "raw/reports/acme.pdf",
+            "hint": "kerberoasting service account",
+            "department": "redteam",
+        }
     )
     payload = result.structured_content
 
     assert payload["status"] == "ok"
     assert all(c["file_path"] == "raw/reports/acme.pdf" for c in payload["context"])
     _assert_no_action_or_command(payload)
+
+
+async def test_rag_fetch_tool_authenticated_unauthorized_dept_rejected(
+    backend: FakeRagBackend,
+    monkeypatch: Any,
+) -> None:
+    """Denial test: Requesting an unauthorized department returns fail-closed no_source."""
+    monkeypatch.setenv("SCOUT_AUTH_MODE", "authenticated")
+    monkeypatch.setenv("SCOUT_ALLOWED_DEPTS", "redteam,infra")
+
+    # blueteam is not in allowed depts
+    result = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+        department="blueteam",
+    )
+
+    assert result["status"] == "no_source"
+    assert result["context"] == []
+    assert result["citations"] == []
+
+
+async def test_rag_fetch_tool_authenticated_empty_env_fails_closed(
+    backend: FakeRagBackend,
+    monkeypatch: Any,
+) -> None:
+    """In authenticated mode with no allowed depts configured, calls fail closed."""
+    monkeypatch.setenv("SCOUT_AUTH_MODE", "authenticated")
+    monkeypatch.delenv("SCOUT_ALLOWED_DEPTS", raising=False)
+
+    result = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+    )
+
+    assert result["status"] == "no_source"
+    assert result["context"] == []
+    assert result["citations"] == []
+
+
+async def test_rag_fetch_tool_authenticated_narrowing_valid_scope(
+    backend: FakeRagBackend,
+    monkeypatch: Any,
+) -> None:
+    """Narrowing to an authorized department succeeds."""
+    monkeypatch.setenv("SCOUT_AUTH_MODE", "authenticated")
+    monkeypatch.setenv("SCOUT_ALLOWED_DEPTS", "redteam,infra")
+
+    # Authorized department
+    result = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+        department="redteam",
+    )
+    assert result["status"] == "ok"
+
+    # List of departments with partial match narrows to authorized
+    result_multi = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+        department=["redteam", "unauthorized_dept"],
+    )
+    assert result_multi["status"] == "ok"
+
+
+async def test_rag_fetch_tool_development_mode(
+    backend: FakeRagBackend,
+    monkeypatch: Any,
+) -> None:
+    """In development mode, requests default to 'all' or the requested department."""
+    monkeypatch.setenv("SCOUT_AUTH_MODE", "development")
+    monkeypatch.delenv("SCOUT_ALLOWED_DEPTS", raising=False)
+
+    # Default call without department
+    res_default = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+    )
+    assert res_default["status"] == "ok"
+
+    # Call with requested department
+    res_dept = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+        department="custom_dev_dept",
+    )
+    assert res_dept["status"] == "ok"
+
+
+async def test_rag_fetch_tool_explicit_allowed_depts_injection(
+    backend: FakeRagBackend,
+) -> None:
+    """Explicitly passing allowed_depts takes precedence over environment."""
+    result = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+        department="redteam",
+        allowed_depts={"redteam"},
+    )
+    assert result["status"] == "ok"
+
+    unauth = await rag_fetch_tool(
+        backend,
+        path="raw/reports/acme.pdf",
+        hint="kerberoasting service account",
+        department="other",
+        allowed_depts={"redteam"},
+    )
+    assert unauth["status"] == "no_source"
+

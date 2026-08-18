@@ -18,10 +18,56 @@ backend it is given (dependency injection).
 
 from __future__ import annotations
 
+import os
+from collections.abc import Sequence
+
 from fastmcp import FastMCP
 
 from scout.core import rag_fetch
-from scout.types import Address, RagBackend
+from scout.types import Address, RagBackend, Scope
+
+SCOUT_AUTH_MODE = os.environ.get("SCOUT_AUTH_MODE", "authenticated").lower()
+
+
+def _resolve_scope(
+    department: str | list[str] | None,
+    allowed_depts: set[str] | Sequence[str] | None = None,
+) -> Scope | None:
+    """Derive effective authorized scope from server config and requested department."""
+    auth_mode = os.environ.get("SCOUT_AUTH_MODE", "authenticated").lower()
+
+    if allowed_depts is not None:
+        base_allowed = set(allowed_depts)
+    else:
+        env_depts = os.environ.get("SCOUT_ALLOWED_DEPTS", "")
+        if env_depts.strip():
+            base_allowed = {d.strip() for d in env_depts.split(",") if d.strip()}
+        elif auth_mode == "development":
+            base_allowed = {"all"}
+        else:
+            base_allowed = set()
+
+    if department is not None:
+        if isinstance(department, str):
+            requested = {department.strip()} if department.strip() else set()
+        else:
+            requested = {d.strip() for d in department if d.strip()}
+
+        if (
+            auth_mode == "development"
+            and not os.environ.get("SCOUT_ALLOWED_DEPTS", "").strip()
+            and allowed_depts is None
+        ):
+            effective = requested if requested else {"all"}
+        else:
+            effective = base_allowed & requested
+    else:
+        effective = base_allowed
+
+    if not effective:
+        return None
+
+    return Scope(roles=frozenset(effective))
 
 
 async def rag_fetch_tool(
@@ -29,6 +75,8 @@ async def rag_fetch_tool(
     path: str,
     hint: str,
     loc: str | None = None,
+    department: str | list[str] | None = None,
+    allowed_depts: set[str] | Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Resolve one wiki `sources[]` address to verbatim quotes + citations.
 
@@ -44,6 +92,10 @@ async def rag_fetch_tool(
         hint: The phrase RAG matches on to retrieve the passage.
         loc: Optional human locator (e.g. ``"p.12-14"``) carried into
             citations.
+        department: Optional department name or list of department names
+            to scope retrieval.
+        allowed_depts: Optional server-configured allowed departments. If
+            omitted, defaults to `SCOUT_ALLOWED_DEPTS` or environment auth mode.
 
     Returns:
         A JSON-serializable dict shaped as::
@@ -57,10 +109,15 @@ async def rag_fetch_tool(
         (injection guard, R-8.5). On ``"no_source"``, `context` and
         `citations` are both empty (R-4.5).
     """
-    from scout.types import Scope
+    scope = _resolve_scope(department=department, allowed_depts=allowed_depts)
+    if scope is None:
+        return {
+            "status": "no_source",
+            "context": [],
+            "citations": [],
+        }
 
     address = Address(path=path, hint=hint, loc=loc)
-    scope = Scope(roles=frozenset(["all"]))
     result = await rag_fetch(backend, address, scope=scope)
     return {
         "status": result.status.value,
@@ -79,7 +136,11 @@ async def rag_fetch_tool(
     }
 
 
-def build_server(backend: RagBackend, name: str = "scout") -> FastMCP:
+def build_server(
+    backend: RagBackend,
+    name: str = "scout",
+    allowed_depts: set[str] | Sequence[str] | None = None,
+) -> FastMCP:
     """Build the Scout MCP server, exposing only `rag_fetch` to the agent.
 
     Args:
@@ -88,6 +149,7 @@ def build_server(backend: RagBackend, name: str = "scout") -> FastMCP:
             is wired in at deploy time (T-2.1); `build_server` itself never
             imports RAG-Anything and accepts whatever backend it is given.
         name: The MCP server name.
+        allowed_depts: Optional server-configured allowed departments.
 
     Returns:
         A `FastMCP` instance with exactly one registered tool, `rag_fetch`.
@@ -98,7 +160,10 @@ def build_server(backend: RagBackend, name: str = "scout") -> FastMCP:
 
     @mcp.tool(name="rag_fetch")
     async def rag_fetch_endpoint(
-        path: str, hint: str, loc: str | None = None
+        path: str,
+        hint: str,
+        loc: str | None = None,
+        department: str | list[str] | None = None,
     ) -> dict[str, object]:
         """Fetch verbatim quotes + citations from RAG for one source address.
 
@@ -106,11 +171,19 @@ def build_server(backend: RagBackend, name: str = "scout") -> FastMCP:
             path: The `raw/` file this address must resolve to.
             hint: The phrase RAG matches on to retrieve the passage.
             loc: Optional human locator carried into citations.
+            department: Optional department name or list of department names.
 
         Returns:
             See `rag_fetch_tool` for the exact response shape.
         """
-        return await rag_fetch_tool(backend, path, hint, loc)
+        return await rag_fetch_tool(
+            backend,
+            path,
+            hint,
+            loc=loc,
+            department=department,
+            allowed_depts=allowed_depts,
+        )
 
     return mcp
 

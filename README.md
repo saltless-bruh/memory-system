@@ -10,7 +10,7 @@
 ![Tests](https://img.shields.io/badge/Tests-169%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)
 
 <p align="center">
-  <b>Bi-temporal, self-hosted dual-layer memory infrastructure for autonomous AI coding agents and engineering organizations.</b><br>
+  <b>Self-hosted dual-layer Git + pgvector architecture for autonomous AI coding agents and engineering organizations.</b><br>
   Combines Git-native compiled knowledge graphs with PostgreSQL 16 <code>pgvector</code> hybrid retrieval, fail-closed Row-Level Security, and automated CI/CD link healing.
 </p>
 

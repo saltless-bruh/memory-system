@@ -71,8 +71,102 @@ def test_compile_note_success(mock_mint, mock_gen_index, mock_raw_file) -> None:
     content = wiki_path.read_text(encoding="utf-8")
     assert "type: concept" in content
     assert "title: Acme Corp" in content
+    assert "department: general" in content
     assert f"path: {rel_path}" in content
     assert "hint: Acme Corp summary" in content
     assert "## TL;DR" in content
 
     mock_gen_index.assert_called_once()
+
+
+def test_compile_note_entities_directory_and_dept(
+    mock_mint, mock_gen_index, mock_raw_file
+) -> None:
+    repo_root, rel_path = mock_raw_file
+
+    mock_address = Address(
+        path=rel_path, hint="Acme Corp summary", loc="Auto-generated"
+    )
+
+    async def mock_mint_address(*args, **kwargs):
+        return MintResult(
+            path=rel_path, address=mock_address, status=MintStatus.MINTED, tried=()
+        )
+
+    mock_mint.side_effect = mock_mint_address
+
+    with patch("scripts.compile_note.PgVectorRlsBackend"):
+        compile_note(rel_path, "Acme Threat Actor", "entity", department="redteam")
+
+    wiki_path = repo_root / "wiki" / "entities" / "acme-threat-actor.md"
+    assert wiki_path.exists()
+
+    content = wiki_path.read_text(encoding="utf-8")
+    assert "type: entity" in content
+    assert "title: Acme Threat Actor" in content
+    assert "department: redteam" in content
+    assert f"path: {rel_path}" in content
+
+
+def test_compile_note_mint_failure_aborts(
+    mock_mint, mock_gen_index, mock_raw_file
+) -> None:
+    repo_root, rel_path = mock_raw_file
+
+    async def mock_mint_fail(*args, **kwargs):
+        return MintResult(
+            path=rel_path, address=None, status=MintStatus.NO_HINT_WORKS, tried=()
+        )
+
+    mock_mint.side_effect = mock_mint_fail
+
+    with patch("scripts.compile_note.PgVectorRlsBackend"), pytest.raises(SystemExit) as exc_info:
+        compile_note(rel_path, "Acme Fail", "playbook", department="infra")
+
+    assert exc_info.value.code == 1
+    wiki_path = repo_root / "wiki" / "playbooks" / "acme-fail.md"
+    assert not wiki_path.exists()
+
+
+def test_compile_note_cli_dept(
+    mock_mint, mock_gen_index, mock_raw_file, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.compile_note import main
+
+    repo_root, rel_path = mock_raw_file
+
+    mock_address = Address(
+        path=rel_path, hint="Acme CLI summary", loc="Auto-generated"
+    )
+
+    async def mock_mint_address(*args, **kwargs):
+        return MintResult(
+            path=rel_path, address=mock_address, status=MintStatus.MINTED, tried=()
+        )
+
+    mock_mint.side_effect = mock_mint_address
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "compile_note.py",
+            "--path",
+            rel_path,
+            "--title",
+            "Acme CLI Dept",
+            "--category",
+            "technique",
+            "--dept",
+            "blueteam",
+        ],
+    )
+
+    with patch("scripts.compile_note.PgVectorRlsBackend"):
+        main()
+
+    wiki_path = repo_root / "wiki" / "techniques" / "acme-cli-dept.md"
+    assert wiki_path.exists()
+    content = wiki_path.read_text(encoding="utf-8")
+    assert "type: technique" in content
+    assert "department: blueteam" in content
+

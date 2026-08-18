@@ -1,7 +1,7 @@
 """Hardened Host-Sync Webhook Receiver (Phase 1, Technical_Blueprint_Basic_Memory_Gitea.md).
 
 Listens for Gitea push webhooks on port 9000, validates HMAC-SHA256 signatures in
-constant time, and executes `git fetch && git reset --hard origin/main` asynchronously
+constant time, and executes safe wiki-scoped git checkout asynchronously
 in `/vault` to maintain the zero-credential read-replica for basic-memory (R-2.5).
 """
 
@@ -44,11 +44,6 @@ def _ensure_safe_git_directory(vault_path: str = VAULT_DIR) -> None:
             check=False,
             capture_output=True,
         )
-        subprocess.run(
-            ["git", "config", "--global", "--add", "safe.directory", "*"],
-            check=False,
-            capture_output=True,
-        )
     except Exception as e:
         logger.warning(f"Failed to set git safe.directory: {e}")
 
@@ -58,14 +53,14 @@ _ensure_safe_git_directory()
 
 
 def _perform_git_sync(vault_path: str = VAULT_DIR) -> None:
-    """Asynchronously execute git fetch and reset --hard origin/main in vault directory."""
+    """Asynchronously execute git fetch and wiki-scoped checkout in vault directory."""
     with _sync_lock:
         remote = os.environ.get("GIT_REMOTE", "origin")
         branch = os.environ.get("GIT_BRANCH", "main")
         logger.info(f"Executing git sync in {vault_path} for remote '{remote}' branch '{branch}'...")
         try:
             fetch_res = subprocess.run(
-                ["git", "fetch", remote],
+                ["git", "fetch", remote, branch],
                 cwd=vault_path,
                 check=True,
                 capture_output=True,
@@ -73,14 +68,23 @@ def _perform_git_sync(vault_path: str = VAULT_DIR) -> None:
             )
             logger.info(f"git fetch output: {fetch_res.stdout.strip()}")
 
-            reset_res = subprocess.run(
-                ["git", "reset", "--hard", f"{remote}/{branch}"],
+            checkout_res = subprocess.run(
+                ["git", "checkout", f"{remote}/{branch}", "--", "wiki/"],
                 cwd=vault_path,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            logger.info(f"git reset output: {reset_res.stdout.strip()}")
+            logger.info(f"git checkout output: {checkout_res.stdout.strip()}")
+
+            clean_res = subprocess.run(
+                ["git", "clean", "-fd", "--", "wiki/"],
+                cwd=vault_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"git clean output: {clean_res.stdout.strip()}")
             logger.info("Host-sync completed successfully. Vault read replica is up to date.")
         except subprocess.CalledProcessError as e:
             logger.error(

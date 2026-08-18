@@ -137,27 +137,83 @@ def test_webhook_accepts_github_signature_prefix(client: TestClient) -> None:
         mock_sync.assert_called_once_with(VAULT_DIR)
 
 
-def test_perform_git_sync_runs_fetch_and_reset() -> None:
-    """_perform_git_sync calls git fetch --all and git reset --hard origin/main."""
+def test_perform_git_sync_runs_safe_wiki_checkout() -> None:
+    """_perform_git_sync executes scoped git fetch, checkout -- wiki/, and clean -- wiki/."""
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
         _perform_git_sync("/test/vault")
 
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
         mock_run.assert_any_call(
-            ["git", "fetch", "origin"],
+            ["git", "fetch", "origin", "main"],
             cwd="/test/vault",
             check=True,
             capture_output=True,
             text=True,
         )
         mock_run.assert_any_call(
-            ["git", "reset", "--hard", "origin/main"],
+            ["git", "checkout", "origin/main", "--", "wiki/"],
             cwd="/test/vault",
             check=True,
             capture_output=True,
             text=True,
         )
+        mock_run.assert_any_call(
+            ["git", "clean", "-fd", "--", "wiki/"],
+            cwd="/test/vault",
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def test_git_sync_preserves_external_files_and_uncommitted_edits(tmp_path: pytest.TempPathFactory) -> None:
+    """Uncommitted edits and untracked files outside wiki/ are preserved during sync."""
+    import subprocess
+    from pathlib import Path
+
+    base_dir = Path(str(tmp_path))
+    remote_repo = base_dir / "remote_repo"
+    local_repo = base_dir / "local_repo"
+
+    remote_repo.mkdir()
+    subprocess.run(["git", "init", "--initial-branch=main", str(remote_repo)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(remote_repo), check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(remote_repo), check=True)
+
+    # Initial commit in remote repo
+    (remote_repo / "wiki").mkdir()
+    (remote_repo / "src").mkdir()
+    (remote_repo / "wiki" / "page.md").write_text("# Wiki v1\n", encoding="utf-8")
+    (remote_repo / "src" / "file.py").write_text("print('original code')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(remote_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(remote_repo), check=True)
+
+    # Clone to local repo
+    subprocess.run(["git", "clone", str(remote_repo), str(local_repo)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(local_repo), check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(local_repo), check=True)
+
+    # Remote pushes update to wiki
+    (remote_repo / "wiki" / "page.md").write_text("# Wiki v2 Updated\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(remote_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "update wiki"], cwd=str(remote_repo), check=True)
+
+    # Local has uncommitted changes outside wiki/ and untracked files
+    (local_repo / "src" / "file.py").write_text("print('local uncommitted change')\n", encoding="utf-8")
+    (local_repo / "src" / "untracked.py").write_text("print('untracked script')\n", encoding="utf-8")
+    (local_repo / "wiki" / "stray.tmp").write_text("stray wiki file\n", encoding="utf-8")
+
+    # Run _perform_git_sync on local repo
+    _perform_git_sync(str(local_repo))
+
+    # Verify wiki is updated and stray cleaned
+    assert (local_repo / "wiki" / "page.md").read_text(encoding="utf-8") == "# Wiki v2 Updated\n"
+    assert not (local_repo / "wiki" / "stray.tmp").exists()
+
+    # Verify external files are preserved intact
+    assert (local_repo / "src" / "file.py").read_text(encoding="utf-8") == "print('local uncommitted change')\n"
+    assert (local_repo / "src" / "untracked.py").read_text(encoding="utf-8") == "print('untracked script')\n"
 
 
 def test_send_test_ping_utility() -> None:
@@ -173,4 +229,5 @@ def test_send_test_ping_utility() -> None:
 
         success = send_test_ping("http://localhost:9000/hooks/wiki-update", "dev-secret")
         assert success is True
+
 

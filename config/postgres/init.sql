@@ -64,6 +64,22 @@ GRANT SELECT ON rag_documents, rag_chunks TO rag_app_role;
 
 -- 6. Row-Level Security (RLS) Configuration
 -- Kernel-enforced department isolation (Fail-Closed)
+ALTER TABLE rag_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rag_documents FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS doc_dept_overlap_policy ON rag_documents;
+
+CREATE POLICY doc_dept_overlap_policy ON rag_documents
+    FOR SELECT
+    TO rag_app_role
+    USING (
+        'all' = ANY(allowed_depts)
+        OR (
+            current_setting('scout.current_depts', true) IS NOT NULL
+            AND allowed_depts && string_to_array(current_setting('scout.current_depts', true), ',')
+        )
+    );
+
 ALTER TABLE rag_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rag_chunks FORCE ROW LEVEL SECURITY;
 
@@ -75,3 +91,4 @@ USING (
     (SELECT d.allowed_depts FROM rag_documents d WHERE d.doc_id = rag_chunks.doc_id)
     && string_to_array(NULLIF(current_setting('scout.current_depts', true), ''), ',')
 );
+

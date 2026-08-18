@@ -55,7 +55,7 @@ def test_contextual_chunker() -> None:
 
 
 def test_batch_embedder_dimension() -> None:
-    embedder = LiteLLMBatchEmbedder(dim=1024)
+    embedder = LiteLLMBatchEmbedder(dim=1024, allow_mock=True)
     res = embedder.embed_texts(["hello world", "protocol specification"])
     assert len(res) == 2
     assert len(res[0]) == 1024
@@ -71,6 +71,8 @@ async def test_ingest_document_to_postgres() -> None:
     except Exception as e:
         pytest.skip(f"Postgres container not reachable: {e}")
 
+    embedder = LiteLLMBatchEmbedder(allow_mock=True)
+
     with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
         f.write("# Ingestion Test\n\nThis is a live integration test for Postgres V2 ingestion.")
         temp_path = Path(f.name)
@@ -82,6 +84,7 @@ async def test_ingest_document_to_postgres() -> None:
             allowed_depts=["engineering", "all"],
             conn=conn,
             base_dir=temp_path.parent,
+            embedder=embedder,
         )
         assert res1["status"] == "ingested_ok"
         assert res1["chunks_count"] >= 1
@@ -108,6 +111,7 @@ async def test_ingest_document_to_postgres() -> None:
             allowed_depts=["engineering", "security"],
             conn=conn,
             base_dir=temp_path.parent,
+            embedder=embedder,
         )
         assert res2["status"] == "ingested_ok"
 
@@ -141,6 +145,8 @@ async def test_reconcile_deletions() -> None:
         file1 = dir_path / "doc1.md"
         file1.write_text("# Doc 1\nContent of doc 1.")
 
+        embedder = LiteLLMBatchEmbedder(allow_mock=True)
+
         try:
             # 1. Ingest directory
             from scout.ingest import ingest_directory, reconcile_deletions
@@ -150,6 +156,7 @@ async def test_reconcile_deletions() -> None:
                 allowed_depts=["all"],
                 dry_run=False,
                 reconcile=False,
+                embedder=embedder,
             )
             assert len(results) >= 1
             doc_uri = results[0]["source_uri"]
@@ -174,6 +181,7 @@ async def test_reconcile_deletions() -> None:
             assert exists_after == 0
         finally:
             await conn.close()
+
 
 
 def test_image_parsing() -> None:

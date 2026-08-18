@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -270,56 +270,43 @@ async def test_litellm_embedder_builds_request_and_parses_response(
     assert json.loads(sent_data) == {"model": "snp-embed", "input": ["first", "second"]}
 
 
-# ── from_vault (dynamic import mocked — never touches the real vault) ────
-@dataclass
-class _FakeVaultModule:
-    """Stand-in for `spikes._lib.vault`, satisfying the `_load_pages` shape."""
+# ── from_vault (real integration against synthetic vault files on disk) ──
+async def test_from_vault_real_integration_with_synthetic_vault(tmp_path: Path) -> None:
+    wiki_dir = tmp_path / "wiki"
+    techniques_dir = wiki_dir / "techniques"
+    techniques_dir.mkdir(parents=True)
 
-    pages_by_dir: dict[Path | None, list[_SyntheticPage]]
-    calls: list[Path | None] = field(default_factory=list)
-
-    def load_pages(self, wiki_dir: Path | None = None) -> list[_SyntheticPage]:
-        self.calls.append(wiki_dir)
-        return self.pages_by_dir[wiki_dir]
-
-
-async def test_from_vault_wires_seam_without_touching_real_vault(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake_mod = _FakeVaultModule(
-        pages_by_dir={None: [_page("default", "default page summary")]}
+    page_file = techniques_dir / "kerberoasting.md"
+    page_file.write_text(
+        """---
+type: technique
+title: Kerberoasting Attack
+summary: Kerberoasting requests a service ticket for an SPN to crack offline.
+entities: [kerberoasting, active-directory, spn]
+department: redteam
+sources: []
+last_compiled: 2026-08-18
+---
+## TL;DR
+Verbatim attack notes.
+""",
+        encoding="utf-8",
     )
-
-    def fake_import_module(name: str) -> _FakeVaultModule:
-        assert name == "spikes._lib.vault"
-        return fake_mod
-
-    monkeypatch.setattr("importlib.import_module", fake_import_module)
 
     engine = ScoutDiyEngine.from_vault(
-        FakeEmbedder(), cache_path=tmp_path / "cache.json"
+        FakeEmbedder(),
+        wiki_dir=wiki_dir,
+        cache_path=tmp_path / "cache.json",
     )
-    hits = await engine.wiki_search("default page summary", k=5)
 
-    assert hits[0].page_id == "default"
-    assert fake_mod.calls == [None]
+    hits = await engine.wiki_search("service ticket SPN crack", k=5)
+    assert len(hits) == 1
+    assert hits[0].page_id == "kerberoasting"
+    assert "ticket for an SPN" in hits[0].summary
 
-
-async def test_from_vault_passes_through_wiki_dir_override(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake_mod = _FakeVaultModule(
-        pages_by_dir={tmp_path: [_page("custom", "custom page summary")]}
-    )
-    monkeypatch.setattr("importlib.import_module", lambda name: fake_mod)
-
-    engine = ScoutDiyEngine.from_vault(
-        FakeEmbedder(), wiki_dir=tmp_path, cache_path=tmp_path / "cache.json"
-    )
-    hits = await engine.wiki_search("custom page summary", k=5)
-
-    assert hits[0].page_id == "custom"
-    assert fake_mod.calls == [tmp_path]
+    read_page = await engine.wiki_read("kerberoasting")
+    assert read_page.frontmatter["title"] == "Kerberoasting Attack"
+    assert "Verbatim attack notes." in read_page.body
 
 
 async def test_ensure_index_creates_and_populates_fts(tmp_path: Path) -> None:
@@ -339,6 +326,37 @@ async def test_ensure_index_creates_and_populates_fts(tmp_path: Path) -> None:
         rows = cursor.fetchall()
         assert len(rows) == 1
         assert rows[0] == ("p1", "some summary text")
+
+
+async def test_ensure_index_rebuilds_fts_when_search_db_missing(tmp_path: Path) -> None:
+    """When vector cache exists but search.db is deleted/missing, FTS index is rebuilt."""
+    import sqlite3
+
+    cache_path = tmp_path / "vector_cache.json"
+    p1 = _page("p1", "summary for page one")
+    p2 = _page("p2", "summary for page two")
+
+    engine1 = ScoutDiyEngine(embedder=FakeEmbedder(), pages=[p1, p2], cache_path=cache_path)
+    await engine1._ensure_index()
+
+    search_db = cache_path.parent / "search.db"
+    assert search_db.exists()
+    assert cache_path.exists()
+
+    # Simulate missing/corrupted search.db while cache_path remains
+    search_db.unlink()
+    assert not search_db.exists()
+
+    # New engine instance with existing cache_path must rebuild search.db
+    engine2 = ScoutDiyEngine(embedder=FakeEmbedder(), pages=[p1, p2], cache_path=cache_path)
+    await engine2._ensure_index()
+
+    assert search_db.exists()
+    with sqlite3.connect(search_db) as conn:
+        cursor = conn.execute("SELECT page_id FROM fts_index ORDER BY page_id")
+        rows = [r[0] for r in cursor.fetchall()]
+        assert rows == ["p1", "p2"]
+
 
 
 async def test_ensure_index_uses_cache_and_only_embeds_uncached(tmp_path: Path) -> None:

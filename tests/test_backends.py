@@ -34,7 +34,9 @@ async def test_pgvector_production_backend_interface() -> None:
 
 
 async def test_pgvector_production_backend_retrieve_empty_pool() -> None:
-    backend = PgVectorRlsBackend()
+    from scout.chunker import LiteLLMEmbedder
+
+    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
     # When pool is None or during unit tests, verify safe fallback
     backend._pool = None
     res = await backend.retrieve("test query", path="raw/test.pdf")

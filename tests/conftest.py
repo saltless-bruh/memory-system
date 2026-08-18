@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 
 from scout.backends.fake import FakeRagBackend
+from scout.chunker import LiteLLMEmbedder
 from scout.types import RagChunk
+
+
+@pytest.fixture
+def mock_embedder() -> LiteLLMEmbedder:
+    """Mock embedder allowing offline deterministic embeddings in tests."""
+    return LiteLLMEmbedder(allow_mock=True)
 
 
 @pytest.fixture

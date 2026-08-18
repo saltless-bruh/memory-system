@@ -193,6 +193,7 @@ async def ingest_directory(
     allowed_depts: list[str],
     dry_run: bool = False,
     reconcile: bool = True,
+    embedder: LiteLLMBatchEmbedder | None = None,
 ) -> list[dict[str, Any]]:
     """Recursively ingests all supported files in a directory and purges deleted records."""
     supported_exts = {
@@ -223,7 +224,7 @@ async def ingest_directory(
 
     results: list[dict[str, Any]] = []
     chunker = ContextualChunker()
-    embedder = LiteLLMBatchEmbedder()
+    embedder = embedder or LiteLLMBatchEmbedder()
 
     conn = None if dry_run else await get_pg_connection()
     try:
@@ -260,6 +261,8 @@ def main() -> None:
 
     parser.add_argument(
         "--allowed-depts",
+        "--dept",
+        dest="allowed_depts",
         type=str,
         default="all",
         help="Comma-separated list of allowed departments (e.g. redteam,blueteam,all)",

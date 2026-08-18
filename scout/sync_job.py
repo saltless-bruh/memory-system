@@ -30,7 +30,10 @@ import urllib.request
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from scout.chunker import LiteLLMBatchEmbedder
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +107,7 @@ class PgVectorDirectIndexer:
 
     raw_dir: Path = Path("raw")
     allowed_depts: tuple[str, ...] = ("all",)
+    embedder: LiteLLMBatchEmbedder | None = None
 
     async def index(self) -> IndexOutcome:
         """Runs the direct V2 ingestion pipeline on raw_dir."""
@@ -114,6 +118,7 @@ class PgVectorDirectIndexer:
                 dir_path=self.raw_dir,
                 allowed_depts=list(self.allowed_depts),
                 dry_run=False,
+                embedder=self.embedder,
             )
             count = len(results)
             return IndexOutcome(ok=True, status=f"ingested_{count}_files")
@@ -148,6 +153,7 @@ async def watch(
     changes: AsyncIterator[object] | None = None,
     raw_dir: Path | None = None,
     stop: object | None = None,
+    initial_sync: bool = False,
 ) -> int:
     """Reindex once per change batch until the stream ends (R-6.1).
 
@@ -159,6 +165,7 @@ async def watch(
         raw_dir: Directory to watch when `changes` is not supplied.
         stop: Optional stop event forwarded to the filesystem watcher so the
             loop can be shut down cleanly.
+        initial_sync: When True, runs an initial sync before awaiting changes.
 
     Returns:
         The number of change batches handled (useful for tests; a live watch
@@ -173,6 +180,10 @@ async def watch(
         changes = _awatch_raw(raw_dir, stop)
 
     handled = 0
+    if initial_sync:
+        await sync_once(indexer, regen=regen)
+        handled += 1
+
     async for _batch in changes:
         await sync_once(indexer, regen=regen)
         handled += 1
@@ -188,6 +199,12 @@ def _awatch_raw(  # pragma: no cover - thin watchfiles adapter
     return awatch(raw_dir, stop_event=stop)
 
 
+async def _async_main(indexer: RagIndexer, raw_dir: Path) -> None:
+    # Cold-start startup sync before entering watch loop
+    await sync_once(indexer)
+    await watch(indexer, raw_dir=raw_dir, initial_sync=False)
+
+
 def main() -> int:  # pragma: no cover - process entry point
     """Watch ``$RAW_DIR`` and reindex into PostgreSQL on every change."""
     raw_dir = Path(os.environ.get("RAW_DIR", "/data/raw"))
@@ -197,7 +214,7 @@ def main() -> int:  # pragma: no cover - process entry point
     else:
         indexer = HttpRagIndexer(base_url=os.environ.get("RAG_URL", "http://rag:8000"))
         print(f"[sync-job] watching {raw_dir} -> {indexer.base_url}/index (Nhịp A)")
-    asyncio.run(watch(indexer, raw_dir=raw_dir))
+    asyncio.run(_async_main(indexer, raw_dir))
     return 0
 
 

@@ -45,8 +45,12 @@ async def run_niah_depth(depth_pct: int) -> bool:
         f.write(content)
         temp_path = Path(f.name)
 
-    backend = PgVectorRlsBackend()
+    from scout.chunker import LiteLLMBatchEmbedder
+
+    embedder = LiteLLMBatchEmbedder(allow_mock=True)
+    backend = PgVectorRlsBackend(embedder=embedder)
     conn = await get_pg_connection()
+    doc_id: str | None = None
 
     try:
         # Ingest document
@@ -54,6 +58,7 @@ async def run_niah_depth(depth_pct: int) -> bool:
             file_path=temp_path,
             allowed_depts=["all"],
             conn=conn,
+            embedder=embedder,
             base_dir=temp_path.parent,
         )
         doc_id = ingest_res.get("doc_id")

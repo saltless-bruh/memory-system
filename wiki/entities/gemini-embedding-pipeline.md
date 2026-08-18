@@ -1,7 +1,7 @@
 ---
 type: entity
 title: Google Gemini Cloud Embedding Pipeline
-summary: Production embedding pipeline generating 3072-dimensional semantic vectors via LiteLLM for PostgreSQL HNSW indexing.
+summary: Production embedding pipeline generating 1024-dimensional semantic vectors via LiteLLM for PostgreSQL HNSW indexing.
 entities: [gemini, embeddings, litellm, pgvector]
 department: ai_eng
 sources:
@@ -15,7 +15,7 @@ last_compiled: 2026-08-17
 ---
 
 ## TL;DR
-The core semantic indexing engine of the SNP Memory System, transforming multi-modal raw text into 3072-dimensional vector embeddings for HNSW search in PostgreSQL.
+The core semantic indexing engine of the SNP Memory System, transforming multi-modal raw text into 1024-dimensional vector embeddings for HNSW search in PostgreSQL.
 
 ## Technical Specifications
 - **Model Target**: Google Gemini `models/gemini-embedding-001` configured via [[model-routing-gateway]].

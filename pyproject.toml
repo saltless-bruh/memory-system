@@ -38,6 +38,9 @@ include = ["scout*", "scripts*", "spikes*"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: marks integration tests",
+]
 
 [tool.mypy]
 python_version = "3.12"

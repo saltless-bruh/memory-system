@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 
 from scout.backends.pgvector import PgVectorRlsBackend
+from scout.chunker import LiteLLMEmbedder
 from scout.core import rag_fetch
 from scout.ingest import get_pg_connection, ingest_document
 from scout.types import Address, FetchStatus, Scope
@@ -22,6 +23,8 @@ async def setup_test_documents() -> AsyncGenerator[None, None]:
         conn = await get_pg_connection()
     except Exception as e:
         pytest.skip(f"Postgres not reachable: {e}")
+
+    embedder = LiteLLMEmbedder(allow_mock=True)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -41,12 +44,14 @@ async def setup_test_documents() -> AsyncGenerator[None, None]:
             allowed_depts=["all", "networking"],
             conn=conn,
             base_dir=tmp_path,
+            embedder=embedder,
         )
         res_tls = await ingest_document(
             file_path=tls_doc,
             allowed_depts=["all", "security"],
             conn=conn,
             base_dir=tmp_path,
+            embedder=embedder,
         )
 
         try:
@@ -62,7 +67,8 @@ async def setup_test_documents() -> AsyncGenerator[None, None]:
 
 @pytest.mark.asyncio
 async def test_pgvector_hybrid_search_retrieval() -> None:
-    backend = PgVectorRlsBackend()
+    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
+
     try:
         scope = Scope(roles=frozenset(["all", "networking"]))
         chunks = await backend.retrieve(
@@ -80,7 +86,7 @@ async def test_pgvector_hybrid_search_retrieval() -> None:
 
 @pytest.mark.asyncio
 async def test_pgvector_pre_filter_path() -> None:
-    backend = PgVectorRlsBackend()
+    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
     try:
         scope = Scope(roles=frozenset(["all", "security"]))
         chunks = await backend.retrieve(
@@ -98,7 +104,7 @@ async def test_pgvector_pre_filter_path() -> None:
 
 @pytest.mark.asyncio
 async def test_pgvector_rls_security_fail_closed() -> None:
-    backend = PgVectorRlsBackend()
+    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
     try:
         # Case A: Missing/empty scope -> Fail-Closed (0 chunks)
         empty_chunks = await backend.retrieve(
@@ -134,7 +140,7 @@ async def test_pgvector_rls_security_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_pgvector_scout_core_rag_fetch_live_address() -> None:
-    backend = PgVectorRlsBackend()
+    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
     try:
         address = Address(
             path="rfc793-tcp.md",

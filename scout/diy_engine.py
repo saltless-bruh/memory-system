@@ -43,7 +43,7 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from scout.core import normalize_path
 from scout.types import RagBackend
@@ -297,22 +297,22 @@ class ScoutDiyEngine:
         Args:
             embedder: The `Embedder` to use (typically `LiteLLMEmbedder`).
             wiki_dir: Optional override of the vault directory; defaults to
-                `spikes._lib.vault.WIKI_DIR` when omitted.
+                `scout.vault.WIKI_DIR` when omitted.
+            cache_path: Optional vector cache path.
+            rag_backend: Optional RagBackend adapter for RAG fallback.
 
         Returns:
             A `ScoutDiyEngine` whose `pages` seam calls
-            `spikes._lib.vault.load_pages` on first use.
+            `scout.vault.load_pages` on first use.
         """
-        import importlib
-
         def _load() -> Sequence[PageLike]:
-            # Dynamic (string) import: lazy, and opaque to mypy so this
-            # module's --strict run never depends on `spikes/_lib/vault.py`
-            # being --strict clean itself (see `_VaultModule`).
-            vault = cast(_VaultModule, importlib.import_module("spikes._lib.vault"))
+            from typing import cast
+
+            from scout import vault
+
             if wiki_dir is not None:
-                return list(vault.load_pages(wiki_dir))
-            return list(vault.load_pages())
+                return cast(Sequence[PageLike], list(vault.load_pages(wiki_dir)))
+            return cast(Sequence[PageLike], list(vault.load_pages()))
 
         if cache_path is not None:
             return cls(
@@ -379,9 +379,21 @@ class ScoutDiyEngine:
                 h = page_hashes[idx]
                 cache_data[h] = vec
 
-                # Update FTS incrementally for uncached items
-                if self._fts_conn:
-                    p = pages[idx]
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.cache_path.open("w", encoding="utf-8") as f:
+                json.dump(cache_data, f)
+
+        # Synchronize and rebuild FTS index if search.db was missing/recreated
+        if self._fts_conn is not None:
+            try:
+                cursor = self._fts_conn.execute("SELECT page_id FROM fts_index")
+                existing_page_ids = {row[0] for row in cursor.fetchall()}
+            except sqlite3.Error:
+                existing_page_ids = set()
+
+            fts_updated = False
+            for p in pages:
+                if p.slug not in existing_page_ids or uncached_summaries:
                     page_id = p.slug
                     title = str(p.frontmatter.get("title", ""))
                     summary_str = str(p.frontmatter.get("summary", ""))
@@ -391,7 +403,6 @@ class ScoutDiyEngine:
                         if isinstance(entities, list)
                         else str(entities)
                     )
-
                     try:
                         self._fts_conn.execute(
                             "DELETE FROM fts_index WHERE page_id = ?", (page_id,)
@@ -400,16 +411,13 @@ class ScoutDiyEngine:
                             "INSERT INTO fts_index(page_id, title, summary, entities) VALUES (?, ?, ?, ?)",
                             (page_id, title, summary_str, entities_str),
                         )
+                        fts_updated = True
                     except sqlite3.Error:
                         pass
 
-            if self._fts_conn:
+            if fts_updated:
                 with contextlib.suppress(sqlite3.Error):
                     self._fts_conn.commit()
-
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.cache_path.open("w", encoding="utf-8") as f:
-                json.dump(cache_data, f)
 
         index = [
             _IndexedPage(

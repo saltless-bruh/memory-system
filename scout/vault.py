@@ -73,7 +73,11 @@ class Page:
 
     @property
     def rel(self) -> str:
-        return self.path.relative_to(REPO_ROOT).as_posix()
+        try:
+            return self.path.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            return self.path.as_posix()
+
 
     @property
     def slug(self) -> str:

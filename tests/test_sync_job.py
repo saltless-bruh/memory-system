@@ -28,9 +28,23 @@ def test_pgvector_direct_indexer_is_a_rag_indexer() -> None:
 async def test_pgvector_direct_indexer_runs_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    async def fake_ingest(dir_path: Path, allowed_depts: list[str], dry_run: bool) -> list[dict[str, Any]]:
-        calls.append({"dir_path": dir_path, "allowed_depts": allowed_depts, "dry_run": dry_run})
+    async def fake_ingest(
+        dir_path: Path,
+        allowed_depts: list[str],
+        dry_run: bool = False,
+        embedder: Any = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        calls.append(
+            {
+                "dir_path": dir_path,
+                "allowed_depts": allowed_depts,
+                "dry_run": dry_run,
+                "embedder": embedder,
+            }
+        )
         return [{"status": "ingested_ok", "source_uri": "raw/test.md"}]
+
 
     monkeypatch.setattr("scout.ingest.ingest_directory", fake_ingest)
     indexer = PgVectorDirectIndexer(raw_dir=Path("raw/test"), allowed_depts=("redteam", "all"))
@@ -184,3 +198,63 @@ async def test_watch_with_raw_dir_uses_the_file_watch_adapter(
     handled = await watch(indexer, raw_dir=Path("raw"))
     assert handled == 2 and indexer.calls == 2
     assert seen["raw_dir"] == Path("raw")
+
+
+async def test_watch_initial_sync_triggers_reindex_before_changes() -> None:
+    indexer = FakeIndexer()
+    hits: list[str] = []
+    handled = await watch(
+        indexer,
+        changes=_batches(2),
+        initial_sync=True,
+        regen=lambda: hits.append("regen"),
+    )
+    # 1 initial sync + 2 stream batches = 3 total
+    assert handled == 3
+    assert indexer.calls == 3
+    assert len(hits) == 3
+
+
+async def test_watch_initial_sync_with_empty_stream() -> None:
+    indexer = FakeIndexer()
+    handled = await watch(
+        indexer,
+        changes=_batches(0),
+        initial_sync=True,
+    )
+    # 1 initial sync + 0 stream batches = 1 total
+    assert handled == 1
+    assert indexer.calls == 1
+
+
+async def test_async_main_executes_cold_start_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scout.sync_job import _async_main
+
+    order: list[str] = []
+
+    async def fake_sync_once(indexer: Any, *, regen: Any = None) -> IndexOutcome:
+        order.append("sync_once")
+        return IndexOutcome(ok=True, status="indexed")
+
+    async def fake_watch(
+        indexer: Any,
+        *,
+        regen: Any = None,
+        changes: Any = None,
+        raw_dir: Any = None,
+        stop: Any = None,
+        initial_sync: bool = False,
+    ) -> int:
+        order.append(f"watch(initial_sync={initial_sync})")
+        return 1
+
+    monkeypatch.setattr("scout.sync_job.sync_once", fake_sync_once)
+    monkeypatch.setattr("scout.sync_job.watch", fake_watch)
+
+    indexer = FakeIndexer()
+    await _async_main(indexer, Path("raw"))
+
+    assert order == ["sync_once", "watch(initial_sync=False)"]
+

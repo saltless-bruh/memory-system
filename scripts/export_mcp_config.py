@@ -60,14 +60,18 @@ def merge_configs(
     return existing
 
 
+SUPPORTED_CLIENTS = ["cursor", "vscode", "claude", "gemini"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="One-Click Agent MCP Configuration Exporter"
     )
     parser.add_argument(
         "--client",
-        choices=["cursor", "claude", "gemini", "vscode"],
-        required=True,
+        choices=SUPPORTED_CLIENTS,
+        required=False,
+        default=None,
         help="The target client for the MCP configuration.",
     )
     parser.add_argument(
@@ -77,13 +81,44 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = generate_config(args.client)
+    client = args.client
+
+    if client is None:
+        if args.print:
+            all_configs = {c: generate_config(c) for c in SUPPORTED_CLIENTS}
+            print(json.dumps(all_configs, indent=2))
+            return
+
+        if sys.stdin.isatty():
+            print("Select target client:")
+            for idx, c in enumerate(SUPPORTED_CLIENTS, 1):
+                print(f"  {idx}) {c}")
+            try:
+                choice = input("Enter number [1-4] or client name: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.", file=sys.stderr)
+                sys.exit(1)
+
+            client_map = {str(i): c for i, c in enumerate(SUPPORTED_CLIENTS, 1)}
+            if choice in client_map:
+                client = client_map[choice]
+            elif choice in SUPPORTED_CLIENTS:
+                client = choice
+            else:
+                print(f"Error: Invalid client selection '{choice}'.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            all_configs = {c: generate_config(c) for c in SUPPORTED_CLIENTS}
+            print(json.dumps(all_configs, indent=2))
+            return
+
+    config = generate_config(client)
 
     if args.print:
         print(json.dumps(config, indent=2))
         return
 
-    path_str = CLIENT_CONFIG_PATHS[args.client]
+    path_str = CLIENT_CONFIG_PATHS[client]
     target_path = Path(path_str).expanduser()
 
     existing_config: dict[str, Any] = {}
@@ -113,7 +148,7 @@ def main() -> None:
         json.dump(merged_config, f, indent=2)
         f.write("\n")
 
-    print(f"Successfully exported {args.client} MCP config to {target_path}")
+    print(f"Successfully exported {client} MCP config to {target_path}")
 
 
 if __name__ == "__main__":

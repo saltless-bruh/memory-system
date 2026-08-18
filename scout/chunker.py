@@ -88,6 +88,12 @@ class ContextualChunker:
         return chunks
 
 
+class EmbeddingError(RuntimeError):
+    """Raised when an embedding request to LiteLLM fails and mock fallback is disabled."""
+
+    pass
+
+
 class LiteLLMBatchEmbedder:
     """Batch embedder routing through LiteLLM Gateway to Cloud/Local embeddings."""
 
@@ -97,6 +103,7 @@ class LiteLLMBatchEmbedder:
         api_key: str | None = None,
         model: str | None = None,
         dim: int = 1024,
+        allow_mock: bool | None = None,
     ) -> None:
         self.base_url = (
             base_url
@@ -106,14 +113,23 @@ class LiteLLMBatchEmbedder:
             "LITELLM_MASTER_KEY", "sk-local-dev-change-me"
         )
         self.model = model or os.environ.get(
-            "LITELLM_EMBED_MODEL", "snp-embed"
+            "SCOUT_EMBED_MODEL", "snp-embed"
         )
         self.dim = dim
+        self.allow_mock = (
+            allow_mock
+            if allow_mock is not None
+            else os.environ.get("SCOUT_ALLOW_MOCK", "false").lower() == "true"
+        )
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embeds a batch of texts via LiteLLM HTTP API, with deterministic mock fallback."""
+    def embed_texts(
+        self, texts: list[str], allow_mock: bool | None = None
+    ) -> list[list[float]]:
+        """Embeds a batch of texts via LiteLLM HTTP API, with optional mock fallback."""
         if not texts:
             return []
+
+        use_mock = self.allow_mock if allow_mock is None else allow_mock
 
         url = f"{self.base_url}/embeddings"
         payload = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
@@ -139,9 +155,10 @@ class LiteLLMBatchEmbedder:
                     else:
                         res.append(emb[: self.dim])
                 return res
-        except Exception:
-            # Fallback deterministic pseudo-embedding for testing / offline scenarios
-            return [self._mock_embed(t) for t in texts]
+        except Exception as e:
+            if use_mock:
+                return [self._mock_embed(t) for t in texts]
+            raise EmbeddingError(f"LiteLLM embedding call failed: {e}") from e
 
     def _mock_embed(self, text: str) -> list[float]:
         """Deterministic 1024-dim normalized pseudo-embedding."""
@@ -151,3 +168,7 @@ class LiteLLMBatchEmbedder:
         # Normalize vector
         norm = math.sqrt(sum(x * x for x in vec)) or 1.0
         return [x / norm for x in vec]
+
+
+# Alias for explicit dependency injection and backward compatibility
+LiteLLMEmbedder = LiteLLMBatchEmbedder

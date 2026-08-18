@@ -53,6 +53,45 @@ def test_main_print(
     assert output["mcpServers"]["snp-wiki"]["url"] == "http://localhost:8765/mcp"
 
 
+def test_main_print_gemini(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv", ["export_mcp_config.py", "--client", "gemini", "--print"]
+    )
+    main()
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert output["mcpServers"]["snp-wiki"]["httpUrl"] == "http://localhost:8765/mcp"
+
+
+def test_main_print_all_clients(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.argv", ["export_mcp_config.py", "--print"])
+    main()
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "cursor" in output
+    assert "vscode" in output
+    assert "claude" in output
+    assert "gemini" in output
+    assert output["cursor"]["mcpServers"]["snp-wiki"]["url"] == "http://localhost:8765/mcp"
+    assert output["gemini"]["mcpServers"]["snp-wiki"]["httpUrl"] == "http://localhost:8765/mcp"
+
+
+def test_main_non_interactive_no_client(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.argv", ["export_mcp_config.py"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    main()
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "cursor" in output
+    assert "gemini" in output
+
+
 def test_main_write_file(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     target_file = tmp_path / "settings.json"
 
@@ -84,3 +123,4 @@ def test_main_write_file_merge(monkeypatch: MonkeyPatch, tmp_path: Path) -> None
     content = json.loads(target_file.read_text(encoding="utf-8"))
     assert "existing" in content["mcpServers"]
     assert "snp-wiki" in content["mcpServers"]
+

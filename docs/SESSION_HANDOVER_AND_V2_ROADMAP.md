@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary & Architectural Overview
 
-The **SNP Memory System** is a bi-temporal knowledge and data intelligence platform operating on a three-tier architecture:
+The **SNP Memory System** is a dual-layer Git + pgvector architecture knowledge and data intelligence platform operating on a three-tier architecture:
 1. **Knowledge Vault (Wiki):** Compiled markdown notes structured with strict frontmatter (`type`, `title`, `summary`, `entities`, `department`, `sources`, `last_compiled`), queryable via `basic-memory` (MCP port `8765`).
 2. **Data Vault (RAG):** Verbatim source documents (`raw/`), indexed into vector embeddings for ground-truth retrieval via `scout` (MCP port `8080`).
 3. **Scout Bridge:** The unified agent-facing MCP adapter that routes wiki search results to raw citations (`rag_fetch`) while preventing prompt injection by treating retrieved content strictly as quoted evidence.

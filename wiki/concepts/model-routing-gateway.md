@@ -19,7 +19,7 @@ The routing gateway sits between client agents and LLM backends to guarantee 99.
 
 ## Technical Specifications
 - **Proxy Engine**: Powered by LiteLLM on port 4000, abstracting Google Gemini, Anthropic, and local [[vllm-inference-cluster]] instances.
-- **Embedding Standardization**: Standardizes on 3072-dimensional Gemini embeddings routed through [[gemini-embedding-pipeline]].
+- **Embedding Standardization**: Standardizes on 1024-dimensional Gemini embeddings routed through [[gemini-embedding-pipeline]].
 - **Operational Failover**: Automatically triggers [[llm-outage-failover]] upon upstream HTTP 429 or 503 errors.
 - **Telemetry**: Tracks per-request tokens, TTFT, and latency metrics ingested into PostgreSQL via [[zero-downtime-db-migration]].
 

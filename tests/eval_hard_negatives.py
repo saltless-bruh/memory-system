@@ -43,7 +43,10 @@ async def run_hard_negatives() -> bool:
         f2.write(hard_negative_text)
         neg_path = Path(f2.name)
 
-    backend = PgVectorRlsBackend()
+    from scout.chunker import LiteLLMBatchEmbedder
+
+    embedder = LiteLLMBatchEmbedder(allow_mock=True)
+    backend = PgVectorRlsBackend(embedder=embedder)
     conn = await get_pg_connection()
     doc_ids: list[str] = []
 
@@ -52,6 +55,7 @@ async def run_hard_negatives() -> bool:
             file_path=true_path,
             allowed_depts=["all"],
             conn=conn,
+            embedder=embedder,
         )
         if res1.get("doc_id"):
             doc_ids.append(res1["doc_id"])
@@ -60,6 +64,7 @@ async def run_hard_negatives() -> bool:
             file_path=neg_path,
             allowed_depts=["all"],
             conn=conn,
+            embedder=embedder,
         )
         if res2.get("doc_id"):
             doc_ids.append(res2["doc_id"])

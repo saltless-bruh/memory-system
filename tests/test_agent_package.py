@@ -131,3 +131,26 @@ def test_installer_non_destructive_merge(tmp_path: Path) -> None:
     # Verify SNP rules were added
     assert (agent_dir / "rules" / "snp-memory.md").is_file()
     assert (agent_dir / "workflows" / "snp-query.md").is_file()
+
+
+def test_installer_idempotent(tmp_path: Path) -> None:
+    """Test that running install-agent.sh multiple times is idempotent."""
+    subprocess.run([str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True)
+    res2 = subprocess.run([str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True, text=True)
+    assert "Successfully Installed" in res2.stdout
+
+
+def test_installer_nested_path(tmp_path: Path) -> None:
+    """Test installer against deeply nested directory that does not exist yet."""
+    deep_path = tmp_path / "deeply" / "nested" / "target" / "workspace"
+    subprocess.run([str(INSTALLER_SCRIPT), str(deep_path)], check=True, capture_output=True)
+    assert (deep_path / ".agent" / "rules" / "snp-memory.md").is_file()
+    assert (deep_path / ".mcp.json").is_file()
+
+
+def test_package_and_root_skills_synchronized() -> None:
+    """Verify all 8 domain skills in packages/snp-agent/skills match .agent/skills/."""
+    root_skills = sorted(p.name for p in (REPO_ROOT / ".agent" / "skills").glob("snp-*"))
+    pkg_skills = sorted(p.name for p in PACKAGE_DIR.glob("skills/snp-*"))
+    assert root_skills == pkg_skills
+    assert len(pkg_skills) == 8

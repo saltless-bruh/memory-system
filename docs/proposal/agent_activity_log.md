@@ -1,5 +1,9 @@
 # Agent Activity Log: SNP Memory System
 
+> **HISTORICAL ACTIVITY LOG.** Events and commands below describe their time of
+> execution and are not current operating instructions. See
+> `docs/ARCHITECTURE_STATUS.md`.
+
 **Date:** 2026-08-05
 **Project:** SNP Memory System
 **Objective:** Implement four major automation steps, fix integration issues, and prepare the project for a live demo.

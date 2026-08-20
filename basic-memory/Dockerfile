@@ -3,9 +3,8 @@
 #
 # Config is baked from the validated setup (docs/basic-memory-setup.md):
 # OFF so the vault is NEVER mutated (R-2.5)
-# basic-memory service
-# bind-mounted read-only in compose. Embeddings hit the LiteLLM proxy
-# which routes to Cloud APIs.
+# basic-memory service mounted read-only in Compose. Its configured FastEmbed
+# model runs in-process and does not receive the LiteLLM master credential.
 FROM python:3.12-slim
 
 # --prefer-binary is REQUIRED: without it pip builds litellm's Rust sdist and

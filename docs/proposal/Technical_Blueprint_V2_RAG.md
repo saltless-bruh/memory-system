@@ -1,5 +1,8 @@
 # Technical Blueprint: V2 RAG System Architecture (Revised)
 
+> **SUPERSEDED PROPOSAL.** Preserved for design provenance. Use the implemented
+> Cloud API + pgvector/RLS contract in `docs/ARCHITECTURE_STATUS.md`.
+
 **Document Version:** 3.0
 **Status:** Revised for review — supersedes v2.4 (dept-set RBAC, fail-closed auth, honest egress)
 **Target Audience:** Systems Architects, Security Engineers, Backend Developers

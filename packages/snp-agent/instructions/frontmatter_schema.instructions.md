@@ -8,9 +8,9 @@ type: technique            # Required: technique | concept | playbook | entity
 title: PagedAttention Engine # Required: Human-readable display title
 summary: High-density, assertive one-sentence summary for vector routing. # Required: EXACTLY ONE sentence
 entities: [paged-attention, vllm, kv-cache] # Required: 2-8 lowercase entity tags
-department: ai_eng         # Required: Scope hook (redteam | blueteam | ai_eng | infra | general)
+department: ai_eng         # Required: redteam | blueteam | ai_eng | infra
 sources:                   # Required: RAG address pointers (empty list [] for pure concepts)
-  - path: raw/reports/vllm_serving.pdf
+  - path: raw/reports/vllm_high_throughput_serving.pdf
     loc: p.2
     hint: PagedAttention KV-Cache Virtual Block Allocation
 last_compiled: 2026-08-17  # Required: YYYY-MM-DD format

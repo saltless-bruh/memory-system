@@ -17,15 +17,23 @@ The SNP Memory System V2 includes an autonomous Address Auto-Healer ([`scout/hea
    uv run python scripts/verify_addresses.py
    ```
 
-2. **Execute the Auto-Healer**
-   - **Local / Developer Mode** (on a feature/PR branch):
-     ```bash
-     uv run python scout/healer.py
-     ```
-   - **CI / Headless Mode** (validates that current branch is not `main`, applies fixes, and logs actions):
-     ```bash
-     uv run python scout/healer.py --ci
-     ```
+   > **Only `DRIFT` is healable.** `DRIFT` means the addressed file is retrievable
+   > but the hint lost rank 1 or is not grounded in the file's own text — a better
+   > phrase exists and the healer can find it. `FAIL` means the addressed file
+   > returned **no chunks at all** (unindexed, empty after parsing, or outside the
+   > declaring page's department). There is nothing to re-mint against, so neither
+   > the healer nor the closed-loop gate can repair it; it is a **content
+   > decision** — fix or replace the source, drop the address, or re-scope the
+   > page's department.
+
+2. **Execute the Closed-Loop Gate**
+   On a feature/PR branch run:
+   ```bash
+   uv run python scripts/ci_address_gate.py --mode pr
+   ```
+   The gate refuses protected/unresolved PR branches, never mutates on verifier
+   exit `2`, permits one scoped healer pass on exit `1`, and rolls the wiki back
+   unless post-heal address verification and lint both pass.
 
 3. **Inspect the Audit Log**
    Check [`wiki/log.md`](wiki/log.md). The healer records a timestamped audit entry for every auto-healed address:
@@ -41,4 +49,6 @@ The SNP Memory System V2 includes an autonomous Address Auto-Healer ([`scout/hea
    ```
 
 5. **Commit and Propose PR**
-   Commit the healed `.md` files and open a Pull Request for human review (R-6.4, R-7.3). Never commit directly to `main`.
+   Review the verified changes and open a Pull Request for human review
+   (R-6.4, R-7.3). Scheduled mode creates and pushes a `heal/*` branch from a
+   protected base; it does not auto-merge.

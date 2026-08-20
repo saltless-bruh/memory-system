@@ -1,5 +1,9 @@
 # SNP Memory System — Implementation Plan (Phase 0 → Phase 1)
 
+> **SUPERSEDED HISTORICAL PLAN.** Completed and revised implementation work is
+> reflected in current code and `docs/ARCHITECTURE_STATUS.md`. Do not execute
+> commands or adopt topology from this planning snapshot.
+
 > Coordination dashboard. Adapted from the `create-implementation-plan`
 > workflow to a local file — this project's "tickets" are the `T-x.y`
 > checkboxes in [tasks.md](../../specs/tasks.md); overview docs are local

@@ -7,7 +7,9 @@ description: >-
 # snp-ingest-raw-data
 
 ## Purpose
-The SNP Memory System V2 processes multi-format raw artifacts (PDFs, Markdown RFCs, CSV spreadsheets, source code) and indexes them into **PostgreSQL 16 + pgvector** with HNSW indexing, full-text tsvector search, and Row-Level Security (RLS).
+The SNP Memory System V2 processes supported PDF, Markdown/text, CSV/TSV,
+source-code, and image artifacts and indexes them into **PostgreSQL 16 +
+pgvector** with HNSW indexing, full-text search, and Row-Level Security (RLS).
 
 ## How to use
 
@@ -27,10 +29,9 @@ The SNP Memory System V2 processes multi-format raw artifacts (PDFs, Markdown RF
      ```
 
 3. **Verify Database Ingestion**
-   Run address verification to ensure the indexed chunks are queryable:
-   ```bash
-   uv run python scripts/verify_addresses.py
-   ```
+   Mint an address with explicit department and locator, then run live address
+   verification. Exit `2` is an infrastructure/configuration failure, not an
+   address defect.
 
 4. **Compile the Wiki Knowledge Page**
    After raw data is indexed, synthesize a structured Wiki note so humans and agents can navigate to it. Use the `snp-compile-wiki` skill to mint a verifiable address and write the note.

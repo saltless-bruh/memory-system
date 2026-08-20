@@ -7,7 +7,9 @@ description: >-
 # snp-bootstrap-system
 
 ## Purpose
-The SNP Memory System V2 relies on 6 core Docker containers (LiteLLM, PostgreSQL 16 `postgres`, `basic-memory`, `scout`, `sync-job`, `host-sync`) to provide dual-layer memory and fail-closed MCP servers. This skill guides the orchestration and verification of the system bring-up.
+The SNP Memory System V2 uses Compose services for Git, LiteLLM, PostgreSQL,
+one-shot migrations, Scout, ingestion, host-sync, and basic-memory. This skill
+guides ordered bring-up without relying on a stale service count.
 
 ## How to use
 
@@ -15,7 +17,9 @@ The SNP Memory System V2 relies on 6 core Docker containers (LiteLLM, PostgreSQL
    Ensure Docker, Docker Compose, and Python 3.12+ are installed.
    
 2. **Configure API Keys**
-   Ensure `.env` exists and contains required Cloud API keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) and database passwords (`POSTGRES_PASSWORD`, `POSTGRES_APP_PASSWORD`, `LITELLM_MASTER_KEY`, `WEBHOOK_SECRET`).
+   Run `./scripts/bootstrap.sh`, then configure Cloud API, Scout auth, and
+   webhook values in `.env`. Keep the generated admin, query, and ingest secret
+   files separate; runtime services must not fall back to the admin identity.
 
 3. **Run the Automated Bootstrap**
    ```bash
@@ -29,7 +33,9 @@ The SNP Memory System V2 relies on 6 core Docker containers (LiteLLM, PostgreSQL
    ```
 
 5. **Verify System Health**
-   - Check container status: `docker compose ps` (all 6 services healthy).
-   - Check basic-memory MCP: `curl -fsS http://localhost:8765/mcp` (returns HTTP 406 for browser GET, confirming active MCP SSE endpoint).
-   - Check Scout MCP: `curl -fsS http://localhost:8080/mcp` (returns HTTP 406 for browser GET).
-   - Run verification gates: `python3 scripts/gen_index.py --check && uv run python scripts/verify_addresses.py`.
+   - Check container status: `docker compose ps`; `postgres-migrate` must
+     complete successfully before Scout and sync-job.
+   - Check replica publication: `curl -fsS http://127.0.0.1:9000/ready`.
+   - Run `python3 scripts/gen_index.py --check`.
+   - Run live `uv run python scripts/verify_addresses.py` only with its backend
+     configured; interpret exits as 0 PASS, 1 semantic drift, 2 infrastructure.

@@ -1,5 +1,9 @@
 # Technical Blueprint: High-Throughput LLM Inference Systems & Dual-Layer Agentic Memory
 
+> **DOMAIN REFERENCE, NOT SNP DEPLOYMENT AUTHORITY.** This compiled report is
+> retained as knowledge-system output. Current platform topology and commands
+> are defined by `docs/ARCHITECTURE_STATUS.md`, `README.md`, and `AGENTS.md`.
+
 > **Retrieved & Compiled Entirely via the SNP Memory System**  
 > **Retrieval Protocol**: Wiki Knowledge Graph (`basic-memory`) $\rightarrow$ Address Resolution $\rightarrow$ Verbatim RAG Engine (`Scout` / `snp-postgres`).  
 > **Clearance Scope**: `['all', 'ai_eng']`  

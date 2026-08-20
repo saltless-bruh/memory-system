@@ -14,12 +14,16 @@ Execute the following synchronization protocol:
    - Enumerate all active domain skills in `.agent/skills/`.
 
 3. **Topology & Connectivity Handshake**:
-   - Read configuration from `.env` / `.mcp.json`.
+   - Read non-secret configuration references from `.env` / `.mcp.json`.
+   - Confirm the client runtime provides
+     `SCOUT_AUTH_HEADER='Bearer <token>'`; never print its value.
    - Probe `basic-memory` endpoint (`http://localhost:8765/mcp`).
-   - Probe `Scout` endpoint (Local: `http://localhost:8080/mcp` | Team: `https://scout.snp.internal/mcp`).
+   - Probe authenticated Scout at `http://localhost:8080/mcp` using the MCP
+     client; do not assume an unimplemented remote endpoint.
 
 4. **Output Operational Readiness Card**:
-   - Output structured status card confirming loaded rules, active skills, detected topology (Local vs. Team), and readiness status:
+   - Output structured status card confirming loaded rules, active skills,
+     authenticated local endpoints, and readiness status:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -29,7 +33,7 @@ Execute the following synchronization protocol:
 │ • Active Skills: 8 skills loaded from .agent/skills/                   │
 │ • Active Workflows: /snp-query, /snp-compile, /snp-ingest, ...         │
 │ • Knowledge Vault: basic-memory (:8765)                                │
-│ • Data Vault Bridge: Scout (:8080 or Remote)                           │
+│ • Data Vault Bridge: authenticated Scout (:8080)                       │
 │ Status: READY FOR ASSISTED RETRIEVAL & NOTE COMPILING                  │
 └────────────────────────────────────────────────────────────────────────┘
 ```

@@ -1,105 +1,97 @@
-# basic-memory — Required Setup & Config (V1)
+# basic-memory — Current Container Configuration
 
-> Hard-won configuration from getting basic-memory 0.22.1 working as the
-> LLM-Wiki engine on the vault. **Without these settings basic-memory
-> either mutates the vault or gives poor Vietnamese recall.** Verified
-> live 2026-07-20/21 on the 7-page sample vault.
->
-> ⚠️ basic-memory's config is **global** (`~/.basic-memory/config.json`),
-> not per-project (only the project *path* is per-project). These settings
-> therefore affect every project on the machine. Treat this file as the
-> source of truth for what the SNP project needs.
+basic-memory is the read-only wiki engine. The deployed configuration is
+`basic-memory/config.json`; this document explains the security and search
+choices without replacing that file as the source of truth.
 
-## Install
+## Replica path and write boundary
 
-```powershell
-pip install --prefer-binary basic-memory
+The `vault-replica` volume is produced by host-sync. basic-memory mounts it
+read-only and opens the project at:
+
+```text
+/vault-replica/current/wiki
 ```
 
-`--prefer-binary` is **required**: without it pip tries to build litellm's
-source tarball, which needs a Rust toolchain and fails. `--prefer-binary`
-pulls the litellm wheel instead.
+`current` is an atomic pointer to a validated commit snapshot. Do not register
+the developer checkout, mount a repository read-write, or give basic-memory Git
+credentials.
 
-CLI shims land in `%APPDATA%\Python\Python3xx\Scripts\` (`basic-memory.exe`,
-`bm.exe`) — add to PATH or call by full path.
+The following settings prevent vault mutation:
 
-## Register the vault
-
-```powershell
-bm project add snp-wiki <repo>\wiki
-bm project default snp-wiki
-```
-
-## Required config (`~/.basic-memory/config.json`)
-
-| Setting | Value | Why |
+| Setting | Current value | Purpose |
 |---|---|---|
-| `disable_permalinks` | `true` | **Critical.** By default basic-memory writes a `permalink` into every file's frontmatter on sync. That mutates the vault (violates "vault = source of truth", R-2.5) and, in a sandboxed/read-only vault, the write fails and **entity import aborts**. Disabling → 0 file writes, `sources[]` preserved. |
-| `ensure_frontmatter_on_sync` | `false` | Stops ongoing frontmatter normalization/rewrite. Same rationale — keep the vault pristine. |
-| `semantic_embedding_provider` | `litellm` | **Settled decision.** Routes embeddings through the litellm library to bge-m3, unifying wiki-search with the RAG embedder (design §2.2 ideal). The default `fastembed` + `bge-small-en-v1.5` is English-only → poor Vietnamese recall (Gate 4), and FastEmbed has no bge-m3. |
-| `semantic_embedding_model` | `ollama/bge-m3` | The Gate-4-validated multilingual model. litellm reaches Ollama at its default `localhost:11434` — **local, no egress** (preserves R-8.2's intent; see refinement note below). |
-| `semantic_embedding_dimensions` | `1024` | bge-m3's output dim. **Required** for the litellm provider with a non-default model (the vector table schema is created before the first embedding response). |
-| `semantic_min_similarity` | `0.35` | basic-memory's chunked scoring runs lower than raw cosine (both bge-m3 and mpnet score ~0.45–0.65 here); the default `0.55` filters out correct pages. At 0.35, all Vietnamese test paraphrases return the right page @1. Revisit as the corpus grows. |
+| `disable_permalinks` | `true` | Prevent generated permalink frontmatter |
+| `ensure_frontmatter_on_sync` | `false` | Prevent frontmatter normalization |
+| project path | `/vault-replica/current/wiki` | Consume only the published replica |
 
-> **R-8.2 refinement.** R-8.2 as written mandates *in-process FastEmbed*.
-> We deviate: embeddings go through litellm → **local Ollama** (bge-m3).
-> This preserves R-8.2's actual guarantee (local, no network egress) and
-> satisfies R-8.1 (routed via LiteLLM), while gaining the unified bge-m3
-> embedder Gate 4 selected. Cost accepted: a local embed call per query
-> (latency) and wiki-search now depends on Ollama being up. On a bounded
-> ~100–500 page wiki this is fine; revisit if query latency matters.
+`wiki/index.md` is generated navigation and is excluded through `.bmignore` so
+it does not dominate semantic results.
 
-## Required `.bmignore` addition (`~/.basic-memory/.bmignore`)
+## Embeddings
 
+Wiki search uses FastEmbed in-process:
+
+| Setting | Current value |
+|---|---|
+| provider | `fastembed` |
+| model | `BAAI/bge-small-en-v1.5` |
+| dimensions | `384` |
+| `semantic_min_similarity` | `0.35` |
+
+This is intentionally separate from PostgreSQL RAG embeddings, which are
+1024-dimensional and routed through LiteLLM. Never describe these indexes as
+sharing a model or vector dimension. The basic-memory container runs FastEmbed
+in-process and is deliberately never given the LiteLLM master credential, so a
+model reachable only through the gateway is not available to wiki search.
+
+### Known limitation — this model is English-only (open decision, 2026-08-19)
+
+`bge-small-en-v1.5` is an English model, and wiki search is step 1 of the
+`AGENTS.md` query workflow: a page that does not surface here is a page the
+agent never reads. The Phase 0 Gate 4 spike measured this exact model at
+recall@1 `0.625` on Vietnamese paraphrases and concluded it should be replaced;
+**that replacement was never implemented**, and the gap was undocumented until
+now. Re-probed live on 2026-08-19: `"dual layer memory architecture"` ranks its
+own exact-title page **5th** (1.019) behind an unrelated page (1.254), and a
+Vietnamese query returns large score ties (0.6603 ×3, 0.5619 ×5).
+
+Whether to adopt a multilingual model or to accept this cost is an **open owner
+decision**, recorded as `OD-1` in
+[`ARCHITECTURE_STATUS.md`](ARCHITECTURE_STATUS.md). It is not a config edit:
+changing the model also changes `semantic_embedding_dimensions`, invalidates the
+existing SQLite search index, and requires a full re-index plus a re-run of the
+Gate 4 probe set. The spike's own record is
+[`spikes/GATE_RESULTS.md`](../spikes/GATE_RESULTS.md), whose banner explains why
+the model it recommended is not deployable as measured.
+
+## Startup and readiness
+
+The container waits for host-sync to become ready, then starts the
+streamable-HTTP MCP server on port 8765. On startup, basic-memory scans the
+published wiki, imports pages, resolves `[[wikilinks]]`, and creates its local
+search index.
+
+```bash
+docker compose ps
+docker compose logs host-sync basic-memory
+curl -fsS http://127.0.0.1:9000/ready
 ```
-index.md
+
+If no pages appear, first confirm that `/ready` reports a published commit and
+that the replica's `current/wiki` exists. Then inspect basic-memory logs for
+frontmatter or index errors. Do not mutate the replica to repair an authored
+page; fix the source branch, pass vault lint, merge it, and let host-sync publish
+the new commit.
+
+## Verification
+
+Run the authoritative vault contract before publishing changes:
+
+```bash
+python scripts/gen_index.py --check
 ```
 
-`wiki/index.md` is a **generated navigation aggregate** (gen_index.py) that
-concatenates every page summary. Indexed, it matches *every* query and
-crowds out the real pages. Exclude it so the engine only surfaces real
-knowledge pages.
-
-## Run the engine (sync + MCP)
-
-There is **no `bm sync` command** in 0.22. File→entity sync happens in the
-**MCP server's startup lifespan**:
-
-```powershell
-bm mcp --transport streamable-http --host 127.0.0.1 --port 8765 --project snp-wiki
-```
-
-- On startup it does a full initial scan → imports files as entities →
-  resolves `[[wikilinks]]` into graph relations → embeds chunks.
-- `bm reindex` does **not** import files (it only rebuilds indexes over
-  existing entities). Don't rely on it for initial load.
-- If a prior `status`/`reindex` polluted the scan state so sync reports
-  "0 changes" with 0 entities, `bm reset` (drop tables) then start the
-  server fresh.
-
-## Verification (what "working" looks like)
-
-```
-bm project info snp-wiki   → Entities 7, Relations 13, Chunks ~62
-bm tool search-notes "cách lấy mật khẩu tài khoản dịch vụ có SPN"
-                           → techniques/kerberoasting.md as top hit
-```
-
-Verified 2026-07-21: 5/5 Vietnamese paraphrase queries return the correct
-page @1 (kerberoasting, asrep-roasting, adcs-esc8, acme-corp,
-active-directory).
-
-## Embedding decision — SETTLED (2026-07-21)
-
-**Chosen: bge-m3 via LiteLLM** (`semantic_embedding_provider: litellm`,
-`model: ollama/bge-m3`). basic-memory supports a `litellm` embedding
-provider (`repository/litellm_provider.py`), confirmed working: 6/6
-Vietnamese paraphrase queries return the correct page @1.
-
-Rationale: design §2.2's stated ideal (unify wiki-search + RAG on one
-model), the Gate-4-validated model, and it stays local/no-egress. On this
-small vault bge-m3 and mpnet tied on recall (both @1) — the deciding
-factor was architectural unification, not small-vault recall. See the
-R-8.2 refinement note above for the accepted trade-off. The FastEmbed
-mpnet path remains a documented fallback if in-process/offline embedding
-is ever required.
+Every non-generated Markdown page, including `archive.md` and `log.md`, must
+satisfy the same frontmatter and ordered-heading contract. `wiki/index.md` must
+be regenerated by `scripts/gen_index.py`, never edited by hand.

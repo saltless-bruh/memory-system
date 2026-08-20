@@ -3,9 +3,9 @@
 # Three routes, all terminating on Cloud APIs via LiteLLM.
 # If a call cannot be served by one of these, it must fail.
 # Consumers:
-#   snp-embed  → Scout-DIY summary embedding (R-2.4) + RAG-Anything VDB
-#   snp-llm    → RAG-Anything entity/relation extraction
-#   snp-vlm    → RAG-Anything image/table → text (R-3.4)
+#   snp-embed  → Scout-DIY summaries + PostgreSQL pgvector chunks
+#   snp-llm    → compile-on-demand page extraction
+#   snp-vlm    → supported multimodal extraction workloads
 #
 # NOT routed here (by design, do not "fix" this):
 #   · basic-memory FastEmbed — in-process, local, no egress (R-8.2)
@@ -20,6 +20,7 @@ model_list:
   - model_name: snp-embed
     litellm_params:
       model: os.environ/LITELLM_EMBED_MODEL
+      dimensions: 1024
     model_info:
       mode: embedding
 
@@ -41,12 +42,11 @@ model_list:
       supports_vision: true
 
 litellm_settings:
-  # Local-first: no usage reporting off-box. Required for R-8.1.
+  # Disable LiteLLM telemetry; provider calls still follow configured cloud routes.
   telemetry: false
   drop_params: true
   request_timeout: 600
-  # No fallback list on purpose — a missing local model must surface as
-  # an error, not quietly reroute somewhere with egress.
+  # No fallback list on purpose: a provider/model failure must surface.
   num_retries: 2
 
 general_settings:

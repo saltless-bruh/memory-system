@@ -1,318 +1,225 @@
-# 🧠 SNP Memory System (V2)
+# SNP Memory System
 
-<div align="center">
+SNP is a self-hosted, dual-layer memory system for coding agents and engineering
+teams. Git-backed Markdown pages provide a compact knowledge map; PostgreSQL 16
+with pgvector stores searchable, verbatim source chunks. Agents search the wiki
+first and call Scout only when they need source evidence.
 
-![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL_16-336791?style=for-the-badge&logo=postgresql&logoColor=white)
-![Model Context Protocol](https://img.shields.io/badge/MCP-Enabled-00ADD8?style=for-the-badge&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/Tests-169%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)
+> Before operating on the vault, read [`AGENTS.md`](AGENTS.md). It is the
+> authoritative query, page, citation, and PR-first contract. See
+> [`docs/ARCHITECTURE_STATUS.md`](docs/ARCHITECTURE_STATUS.md) for the status of
+> older blueprints and proposals.
 
-<p align="center">
-  <b>Self-hosted dual-layer Git + pgvector architecture for autonomous AI coding agents and engineering organizations.</b><br>
-  Combines Git-native compiled knowledge graphs with PostgreSQL 16 <code>pgvector</code> hybrid retrieval, fail-closed Row-Level Security, and automated CI/CD link healing.
-</p>
+## Architecture
 
-[Architecture](#-system-architecture) •
-[Key Features](#-key-features--v2-upgrades) •
-[Quickstart](#-quickstart--bootstrap) •
-[Agent MCP Setup](#-agent-mcp-integration) •
-[Skills Inventory](#-progressive-disclosure-agent-skills) •
-[Benchmarks](#-stress-test-benchmarks) •
-[Security Model](#-security--guardrails)
+```text
+Agent -- search_notes/read_note --> basic-memory --> read-only replica wiki
+Agent -- authenticated rag_fetch --> Scout --> PostgreSQL 16 + pgvector/RLS
+                                             ^
+raw/ --> sync-job (ingest identity) ----------+
 
-</div>
-
----
-
-> [!IMPORTANT]
-> **ATTENTION AI CODING AGENTS**: Before searching the vault, reading pages, or modifying code in this repository, you must review the operational contract:
-> 1. **Primary Handbook & Rules**: [`AGENTS.md`](AGENTS.md) — The mechanical rules (R-1 through R-8) for query workflows, frontmatter schemas, address minting, and PR-first commits.
-> 2. **Agent Guide & Error Playbook**: [`packages/snp-agent/instructions/agent_guide.instructions.md`](packages/snp-agent/instructions/agent_guide.instructions.md) — Fast-track setup, Do's & Don'ts, and troubleshooting tables.
-
----
-
-## 🌟 Overview
-
-The **SNP Memory System** solves the fundamental problem of agent context management: **knowledge drift and context window bloat**. Instead of feeding massive raw document dumps into LLM context windows, SNP implements a **two-tier memory architecture**:
-
-1. **Layer 1: Knowledge Vault (`wiki/`)**: Human- and agent-curated Markdown pages stored in Git. Provides a dense, interconnected mental map with strict frontmatter schemas and relational `[[wikilinks]]`.
-2. **Layer 2: Data Vault (`raw/` & PostgreSQL)**: Original unstructured artifacts (PDFs, RFCs, CSVs, source code) indexed into **PostgreSQL 16 + pgvector** with full-text search (BM25 / `tsvector`) and database-level **Row-Level Security (RLS)**.
-3. **Scout MCP Bridge**: A fail-closed Model Context Protocol service that exposes `rag_fetch` to retrieve verbatim source evidence with strict citation scoring and prompt-injection neutralization.
-
-```
-  YOU (AGENT) ──MCP search/read──►  basic-memory   (the wiki: navigate & read compiled map)
-  YOU (AGENT) ──MCP rag_fetch────►  Scout          (the RAG bridge: pull verbatim quotes)
-                                      └─────────►  PostgreSQL 16 + pgvector (RLS)
+Cloud model APIs <-- LiteLLM <-- Scout, sync-job, and authoring utilities
+Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
+                                           --> atomic current pointer
 ```
 
-> 🎯 **The Golden Rule**: *The wiki tells you where to go; RAG gives you the verbatim source. Never mix the two jobs.*
+- `wiki/` is compiled, reviewable knowledge stored in Git.
+- `raw/` contains original evidence. `sync-job` parses and indexes it under a
+  checked-in document ACL map, `raw/.acl.yaml` (`RAW_ACL_FILE`). Ingestion has
+  no department of its own: the first matching rule decides a document's
+  `allowed_depts`, **a file matching no rule is not indexed at all**, and an
+  unreadable policy publishes nothing. There is deliberately no fallback to the
+  public `all` ACL.
+- Scout exposes one retrieval tool, `rag_fetch`, and never synthesizes an
+  answer from retrieved text.
+- PostgreSQL RLS applies the authenticated caller's canonical departments:
+  `redteam`, `blueteam`, `ai_eng`, and `infra`.
+- `rag_app_role` is the least-privilege query identity. `rag_ingest_role` is
+  the least-privilege ingestion identity. Migration administration is confined
+  to the one-shot migration/provisioning service.
+- `host-sync` publishes immutable commit snapshots into the `vault-replica`
+  volume. `basic-memory` reads `/vault-replica/current/wiki` read-only; no
+  developer working tree is mounted into that service.
 
----
+Wiki search and source retrieval use distinct embedding indexes. The wiki uses
+in-process FastEmbed (`BAAI/bge-small-en-v1.5`, 384 dimensions). PostgreSQL RAG
+uses the Cloud API route configured through LiteLLM (1024 dimensions). The wiki
+model is English-only and its measured recall cost is an open owner decision —
+see "Known limitation" in
+[`docs/basic-memory-setup.md`](docs/basic-memory-setup.md).
 
-## 🏗️ System Architecture
+The golden rule is simple: **the wiki tells you where to go; RAG gives you the
+verbatim source.**
 
-```mermaid
-graph TD
-    subgraph Agent_Layer ["1. Autonomous Agent Layer"]
-        Agent["AI Coding Agent / IDE<br><i>(Cursor / Claude / Gemini / Windsurf)</i>"]
-    end
+## Quick start
 
-    subgraph Knowledge_Layer ["2. Knowledge Vault (Wiki)"]
-        BM["basic-memory (Port 8765)<br><i>FastEmbed In-Process Vector Search (:ro)</i>"]
-        Gitea["Gitea VCS (Port 3000)<br><i>Git Source of Truth (wiki/*.md)</i>"]
-        HostSync["snp-host-sync (Port 9000)<br><i>HMAC-SHA256 Webhook Auto-Puller (:rw)</i>"]
-    end
-
-    subgraph Data_Layer ["3. Data Vault (RAG & Security)"]
-        Scout["Scout Bridge (Port 8080)<br><i>Fail-Closed rag_fetch MCP Tool</i>"]
-        PG[("PostgreSQL 16 + pgvector<br><i>HNSW Cosine Index + Department RLS</i>")]
-        RawDocs["raw/ Data Warehouse<br><i>PDFs, RFCs, Code, Benchmarks</i>"]
-    end
-
-    subgraph Gateway_Layer ["4. Model Gateway & CI/CD"]
-        LiteLLM["LiteLLM Proxy (Port 4000)<br><i>AI Gateway (Gemini / OpenAI / Anthropic)</i>"]
-        HealerBot["Gitea CI Auto-Healer Bot<br><i>Automated Address Drift Healer + pip-audit</i>"]
-    end
-
-    Agent -- "1. search_notes / read_note" --> BM
-    Agent -- "2. rag_fetch(path, hint)" --> Scout
-    Scout -- "3. SET LOCAL scout.current_depts + HNSW Query" --> PG
-    PG -. "4. Filtered Chunks" .-> Scout
-    Scout -- "5. Quoted Context & Citations" --> Agent
-
-    Gitea -- "Push Webhook (HMAC-SHA256)" --> HostSync
-    HostSync -- "git fetch & git reset --hard" --> BM
-    Gitea -. "PR Verification & Scheduled Sweep" .-> HealerBot
-    HealerBot -- "Re-mints Drifted Addresses via pgvector" --> Gitea
-```
-
----
-
-## ⚡ Key Features & V2 Upgrades
-
-| Capability | V1 Architecture (Legacy) | V2 Architecture (Current Production) |
-|---|---|---|
-| **RAG Storage** | `RAG-Anything` (Monolithic mock) | **PostgreSQL 16 + pgvector** with HNSW indexing and GIN full-text search. |
-| **Access Control** | Application-level filter (Bypassed) | **Database-Level Row-Level Security (RLS)** via Department Sets (`scout.current_depts`). |
-| **Wiki Security** | `basic-memory` with direct Git awareness | **Zero-Credential `basic-memory`** (`:ro` mount) + **Host-Sync Webhook** (`host-sync` on port 9000). |
-| **Embedding Engine** | Remote API egress for wiki search | **FastEmbed In-Process Engine** (`BAAI/bge-small-en-v1.5`, 384 dims) inside basic-memory container. |
-| **CI/CD Auto-Healer** | Manual address repair scripts | **Gitea Actions Auto-Healer Bot** (`scout/healer.py --ci`) with `pip-audit` security gates. |
-| **Branch Protection** | Unchecked local commits | **Protected Branch Guard** (`main`/`master` strictly refused by CI healer; PR-first workflow). |
-| **Token Economy** | Full context dumping | **92.36% Token Reduction** (13.10x compression multiplier vs full vault dump). |
-| **Code Quality** | Basic test suite | **159 Passing Tests** (`pytest`, strict `mypy`, `ruff`, 0 vulnerabilities). |
-
----
-
-## 🚀 Quickstart & Bootstrap
-
-### 1. Prerequisites
-- **Docker & Docker Compose** (v24.0+)
-- **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/)
-- Cloud API Key (e.g. `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`)
-
-### 2. Single-Command Bootstrap
+Prerequisites are Docker with Compose, Python 3.12+, `uv`, and credentials for
+the enabled OpenAI, Anthropic, or Gemini routes.
 
 ```bash
-# 1. Clone repository and run automated bootstrap
-git clone https://github.com/your-org/snp-memory-system.git
-cd snp-memory-system
 ./scripts/bootstrap.sh
-
-# 2. Configure API keys in .env
-cp .env.example .env
-nano .env  # Add your GEMINI_API_KEY or OPENAI_API_KEY
-
-# 3. Start the Docker services
+# Review .env and the generated .secrets/* files; configure provider keys and auth.
 docker compose up -d --build
-```
-
-### 3. Verify System Health
-
-```bash
-# Check Docker container health
 docker compose ps
+```
 
-# Run index lint check
-python3 scripts/gen_index.py --check
+The Compose dependency graph runs `postgres-migrate` before Scout and
+`sync-job`. Do not bypass this ordering or use a runtime role to apply schema
+changes.
 
-# Verify RAG address links
+Useful health endpoints:
+
+- Scout MCP: `http://127.0.0.1:8080/mcp`
+- basic-memory MCP: `http://127.0.0.1:8765/mcp`
+- host-sync liveness: `http://127.0.0.1:9000/live`
+- host-sync readiness: `http://127.0.0.1:9000/ready`
+
+`/ready` remains unavailable until a validated commit snapshot has been
+published. A plain browser request to an MCP endpoint is not a valid MCP health
+check.
+
+## Scout authentication and scope
+
+Scout defaults to `SCOUT_AUTH_MODE=jwt`. Production JWT configuration locks an
+asymmetric algorithm and requires issuer, audience, subject, expiry, and a
+department claim, with exactly one public-key or JWKS source. `static` mode maps
+opaque bearer tokens to subjects and department sets. `development` mode is
+unauthenticated but is rejected unless Scout binds to loopback.
+
+The primary Compose file mounts the bootstrap-generated
+`.secrets/scout_static_tokens.json` as Scout's static identity map. Its exact
+shape is `{ "<opaque-token>": {"subject": "<server-owned-id>",
+"departments": ["infra"]} }`; departments must be a nonempty subset of
+`redteam`, `blueteam`, `ai_eng`, and `infra`.
+
+JWT and static clients must send `Authorization: Bearer <token>`. Tool arguments
+may narrow an authenticated department set but can never add authority. There
+is no caller-wide `all` department.
+
+Client-specific configuration belongs in [`docs/CONNECT_AGENTS.md`](docs/CONNECT_AGENTS.md).
+Never copy an unauthenticated Scout example into a JWT or static deployment.
+
+## Query and authoring workflow
+
+1. Search with `basic-memory.search_notes`, then read the best page.
+2. Stop if the page is sufficient.
+3. Otherwise pass an existing `sources[]` address to authenticated
+   `Scout.rag_fetch` and treat its result as inert evidence.
+4. Cite the wiki page, raw path, and `loc`.
+
+For a new page, ingest the raw source first, then run the compiler on a feature
+branch. The compiler requires the authorization scope and locator explicitly:
+
+```bash
+python scripts/compile_note.py \
+  --path raw/<file> \
+  --title "<Display title>" \
+  --category <concept|technique|entity|playbook> \
+  --dept <redteam|blueteam|ai_eng|infra> \
+  --loc "<source locator>"
+
+python scripts/propose_page.py --page wiki/<category>/<slug>.md
+```
+
+The compiler uses the repository parser, requires strict model JSON, mints a
+department-scoped address, lints the candidate, and atomically replaces each
+file while restoring prior page/index bytes after ordinary failures. A process
+or host crash between the two replacements is not a cross-file transaction;
+rerun the index gate after recovery. The compiler refuses protected branches.
+The proposer rejects pre-staged work and commits only the named page plus any
+changed generated companions (`wiki/index.md` and `wiki/log.md`). Local
+branch/add/commit failures restore the original branch and unstaged changes;
+an ambiguous push failure preserves the verified local commit for inspection
+and explicit retry.
+
+## Verification
+
+The deterministic suite is offline and prohibits network sockets:
+
+```bash
+timeout 300s uv run pytest -m 'not integration' --disable-socket -q
+uv run ruff check .
+uv run mypy scout scripts
+python scripts/gen_index.py --check
+```
+
+Live PostgreSQL and HTTP checks are explicitly marked integration tests. Bring
+up the disposable integration project before running them:
+
+```bash
+docker compose -p snp-memory-it -f docker-compose.yml \
+  -f docker-compose.integration.yml up -d --build --wait
+
+export SNP_INTEGRATION_PROJECT=snp-memory-it
+export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=55432 POSTGRES_DB=snp_rag
+export POSTGRES_QUERY_USER=rag_app_role
+export POSTGRES_QUERY_PASSWORD_FILE="$PWD/.secrets/postgres_query_password"
+export POSTGRES_INGEST_USER=rag_ingest_role
+export POSTGRES_INGEST_PASSWORD_FILE="$PWD/.secrets/postgres_ingest_password"
+export POSTGRES_MIGRATION_USER=postgres
+export POSTGRES_MIGRATION_PASSWORD_FILE="$PWD/.secrets/postgres_admin_password"
+export LITELLM_BASE_URL=http://127.0.0.1:4000/v1
+# Export LITELLM_MASTER_KEY from your secret store; do not paste it into docs.
+export SCOUT_INTEGRATION_URL=http://127.0.0.1:8080/mcp
+export SCOUT_INTEGRATION_INFRA_TOKEN_FILE="$PWD/.secrets/scout_test_token"
+uv run pytest -m integration --force-enable-socket -q
+```
+
+The integration override publishes PostgreSQL on loopback port `55432` by
+default. Selected live tests fail with the names of missing prerequisites;
+they never skip or fall back to repository credentials.
+
+> **Run those exports in a throwaway shell.** The offline suite is not hermetic
+> with respect to `LITELLM_BASE_URL`: with it exported, `tests/test_chunker.py`
+> reports **7 spurious failures** that look like real regressions
+> (`LITELLM_MASTER_KEY` alone is harmless). Re-run the deterministic gate with
+> `env -u LITELLM_BASE_URL -u LITELLM_MASTER_KEY uv run pytest -m 'not integration'
+> --disable-socket -q`, or open a new shell.
+
+Address verification requires live configured services:
+
+```bash
 uv run python scripts/verify_addresses.py
-
-# Run full test suite
-uv run pytest
 ```
 
----
+An address passes on two independent conditions and no similarity threshold:
+the addressed file must win **rank 1** of the declaring page's
+department-scoped retrieval, and at least **50%** of the hint's content tokens
+must occur in text that file itself returned. `DRIFT` means it lost the rank or
+the hint is not grounded in the file; `FAIL` means the addressed file returned
+no chunks at all. A declared `loc` that no longer matches is reported as an
+advisory `note:` and does not fail the gate.
 
-## 🔌 Agent MCP Integration
-
-The SNP Memory System exposes **two Streamable HTTP MCP endpoints**:
-
-| MCP Service | Endpoint URL | Transport | Primary Purpose |
-|---|---|---|---|
-| **basic-memory** | `http://localhost:8765/mcp` | Streamable HTTP | Navigate and read compiled Wiki knowledge (`search_notes`, `read_note`). |
-| **Scout** | `http://localhost:8080/mcp` | Streamable HTTP | Fetch verbatim, injection-safe quotes from raw source files (`rag_fetch`). |
-
-### Configuration Templates
-
-<details open>
-<summary><b>Claude Code (`~/.claude/config.json` or CLI)</b></summary>
+Its exit codes are total: `0` means all addresses pass, `1` means semantic
+`FAIL`/`DRIFT`, and `2` means infrastructure or configuration failure. The
+closed-loop CI entry point is:
 
 ```bash
-claude mcp add --transport http snp-wiki http://localhost:8765/mcp
-claude mcp add --transport http scout    http://localhost:8080/mcp
-```
-</details>
-
-<details open>
-<summary><b>Cursor / Windsurf / Cline (`.mcp.json`)</b></summary>
-
-```json
-{
-  "mcpServers": {
-    "snp-wiki": {
-      "url": "http://localhost:8765/mcp"
-    },
-    "scout": {
-      "url": "http://localhost:8080/mcp"
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Gemini CLI / Antigravity (`~/.gemini/settings.json`)</b></summary>
-
-```json
-{
-  "mcpServers": {
-    "snp-wiki": {
-      "url": "http://localhost:8765/mcp",
-      "transport": "http"
-    },
-    "scout": {
-      "url": "http://localhost:8080/mcp",
-      "transport": "http"
-    }
-  }
-}
-```
-</details>
-
-*For advanced export tools and client setups, see [`docs/CONNECT_AGENTS.md`](docs/CONNECT_AGENTS.md) or run `python scripts/export_mcp_config.py`.*
-
----
-
-## 📦 Portable Agent Package & Smart Installer
-
-The SNP Memory System includes a self-contained, downstream agent package (`packages/snp-agent/`) designed for instant integration into external repositories (inspired by `gemini-superpowers-antigravity`).
-
-### 1. One-Line Smart Bootstrap (For Any Repository)
-In any target project connecting to an SNP Memory System instance, run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/saltless-bruh/memory-system/main/scripts/install-agent.sh | bash
+uv run python scripts/ci_address_gate.py --mode pr
 ```
 
-* **Non-Destructive**: Merges SNP rules and workflows safely without overwriting existing custom configurations.
-* **Instant Activation**: Open your agent chat (Cursor, Claude Code, Gemini CLI, Antigravity) and enter:
-  ```
-  /snp-reload
-  ```
+Exit `2` never triggers mutation. Exit `1` permits one scoped heal pass on an
+eligible branch, followed by address and vault re-verification. Failed healing
+rolls the wiki back. Scheduled mode starts from a protected base, creates a
+`heal/*` branch, and still requires human PR review.
 
----
+## Documentation
 
-## ⚡ Dual-Mode Slash Commands & Workflows
+- [`AGENTS.md`](AGENTS.md): authoritative agent operating contract
+- [`docs/runbook.md`](docs/runbook.md): deployment and incident operations
+- [`docs/basic-memory-setup.md`](docs/basic-memory-setup.md): current wiki-engine configuration
+- [`docs/DEMO.md`](docs/DEMO.md): current end-to-end demonstration
+- [`docs/ARCHITECTURE_STATUS.md`](docs/ARCHITECTURE_STATUS.md): active/historical document inventory
+- [`docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`](docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md):
+  active proposal for handling sources that ingest cleanly but are not evidence;
+  its findings are factual, its design is not implemented
+- [`packages/snp-agent/`](packages/snp-agent): portable instructions, rules,
+  skills, and workflows. `.agent/` is authoritative; `.claude/` and
+  `packages/snp-agent/` are **tracked byte-for-byte mirrors** of the files they
+  share with it, enforced by `tests/test_agent_package_sync.py` and
+  `tests/test_docs_contract.py`. Edit `.agent/`, then mirror — a one-tree edit
+  fails the suite. (`.claude/` deliberately omits `manifest.json` and
+  `package.json`, which are bundle distribution metadata.)
 
-| Slash Command | Intent & Dual-Mode Behavior |
-|---|---|
-| **`/snp-query [query]`** | Multi-hop search: Reads local `basic-memory` and retrieves verbatim evidence via local or remote Scout MCP (Rule R-5.1). |
-| **`/snp-compile [path]`** | Synthesizes raw docs into AGENTS.md notes with minted pgvector addresses on a PR branch (Rule R-6.3, R-6.4). |
-| **`/snp-ingest [path]`** | Ingests documents into PostgreSQL 16 `pgvector` locally or via Central Ingest REST API. |
-| **`/snp-verify`** | Pre-flight gate: Runs frontmatter schema check (`gen_index.py --check`) and RAG address resolution. |
-| **`/snp-heal`** | Autonomous drift healing: Re-mints invalid citations via pgvector and records audit entries in `wiki/log.md`. |
-| **`/snp-reload`** | Hot-reloads rules, skills, workflows, and confirms MCP endpoint connectivity. |
-
----
-
-## 🤖 Progressive Disclosure Agent Skills
-
-All domain skills are packaged under [`packages/snp-agent/skills/`](packages/snp-agent/skills/):
-
-```
-packages/snp-agent/
-├── rules/snp-memory.md               # Core Operating Invariants (R-5, R-8.5, R-6.3, R-6.4)
-├── workflows/                        # 6 Dual-Mode Slash Commands
-│   ├── snp-query.md
-│   ├── snp-compile.md
-│   ├── snp-ingest.md
-│   ├── snp-verify.md
-│   ├── snp-heal.md
-│   └── snp-reload.md
-├── skills/                           # Progressive Disclosure Skills
-│   ├── snp-search-wiki/              # Search and traverse compiled wiki notes
-│   ├── snp-rag-fetch/                # Fetch verbatim quotes via Scout MCP
-│   ├── snp-compile-wiki/             # Compile raw data into AGENTS.md-compliant notes
-│   ├── snp-ingest-raw-data/          # Transactional ingestion into PostgreSQL 16 pgvector
-│   ├── snp-verify-vault/             # Run schema and RAG address verification gates
-│   ├── snp-auto-heal-vault/          # Re-mint drifted RAG addresses via pgvector in CI/local
-│   ├── snp-export-mcp/               # Export ready-to-paste MCP client configurations
-│   └── snp-bootstrap-system/         # Deploy, verify, and healthcheck Docker stack
-└── instructions/                     # Authoritative contracts & error playbooks
-```
-
----
-
-## 📊 Stress Test Benchmarks
-
-The system was evaluated against the **Unified 9-Scenario Real-World Stress Test Matrix**:
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        SNP V2 STRESS TEST VERIFICATION MATRIX                          │
-├────┬───────────────────────────────────────┬────────────┬──────────────────────────────┤
-│ #  │ SCENARIO NAME                         │ RESULT     │ MEASURED PERFORMANCE         │
-├────┼───────────────────────────────────────┼────────────┼──────────────────────────────┤
-│ 1  │ Needle in a Haystack (NIAH Multi-Loc) │  PASS      │ TTFT: 182.6ms (Row 2, CSV)   │
-│ 2  │ Hard-Negative Discrimination          │  PASS      │ MRR = 1.0000 (Δ > +11.0)     │
-│ 3  │ Multi-Hop Incident Response Traversal │  PASS      │ 3 Hops, 0.69s, 0 early RAG   │
-│ 4  │ Negative Control & Injection Guard    │  PASS      │ status: no_source, 0 leakage │
-│ 5  │ Token Economy & Context Audit         │  PASS      │ 92.36% Token Savings (13.1x) │
-│ 6  │ Drift Fault Injection & Live Auto-Heal│  PASS      │ DRIFT caught -> auto-healed  │
-│ 7  │ Adversarial Lint Gate Drill           │  PASS      │ Exit code 1 (locked index)   │
-│ 8  │ Protected Branch Lockdown             │  PASS      │ Refused on main branch       │
-│ 9  │ Concurrent Webhook Ingress (5 reqs/s) │  PASS      │ 5/5 200 OK (mean: 14.52ms)   │
-└────┴───────────────────────────────────────┴────────────┴──────────────────────────────┘
-```
-
----
-
-## 🛡️ Security & Guardrails
-
-* **Fail-Closed Row-Level Security (RLS)**: Chunks in PostgreSQL enforce strict departmental isolation (`scout.current_depts`). Unauthorized roles receive zero rows.
-* **Prompt Injection Neutralization (R-8.5)**: Output schema contains no `action` or `command` fields. Content from raw files is quoted strictly as passive data.
-* **PR-First Workflow (R-6.4, R-7.3)**: Autonomous agents cannot commit directly to `main`. Changes are proposed on branches, validated by CI linter gates, and merged by humans.
-* **Zero-Credential Read Replica**: `basic-memory` mounts `wiki/` read-only (`:ro`), isolating the Git write path to `host-sync` (HMAC-SHA256 verified).
-
----
-
-## 📚 Documentation & Reference Guides
-
-* **Operational Contract**: [`AGENTS.md`](AGENTS.md)
-* **Agent Onboarding Guide**: [`.agent/instructions/agent_guide.instructions.md`](.agent/instructions/agent_guide.instructions.md)
-* **MCP Client Setup**: [`docs/CONNECT_AGENTS.md`](docs/CONNECT_AGENTS.md)
-* **Operations Runbook**: [`docs/runbook.md`](docs/runbook.md)
-* **Architecture Blueprints**:
-  - [Agent Distribution Package & Dual-Mode Workflows](docs/proposal/Technical_Blueprint_Agent_Package_and_Dual_Mode_Workflows.md)
-  - [Enterprise Layer 1: Knowledge Vault (Gitea & Host-Sync)](docs/proposal/Technical_Blueprint_Enterprise_Knowledge_Vault.md)
-  - [Enterprise Layer 2: Data Vault & RAG Bridge (PostgreSQL 16 RLS)](docs/proposal/Technical_Blueprint_Enterprise_Data_Vault_and_RAG.md)
-* **V2 Architecture Roadmap**: [`docs/SESSION_HANDOVER_AND_V2_ROADMAP.md`](docs/SESSION_HANDOVER_AND_V2_ROADMAP.md)
-
----
-
-<div align="center">
-  <sub>Built with ❤️ for High-Reliability Agentic Systems.</sub>
-</div>
+Documents explicitly marked historical or superseded preserve design context;
+they are not deployment instructions.

@@ -1,5 +1,9 @@
 # Technical Blueprint: CI/CD Pipelines, Auto-Healer, & Observability (Revised)
 
+> **SUPERSEDED PROPOSAL.** The implemented closed-loop gate has explicit 0/1/2
+> verifier semantics and rollback. See `docs/ARCHITECTURE_STATUS.md` and the
+> active runbook rather than executing this blueprint.
+
 **Document Version:** 2.1
 **Status:** Revised for review — supersedes v2.0 (real `--ci` entrypoint, no double-commit, dept-set RLS signal)
 **Target Audience:** DevOps Engineers, SecOps Analysts, Backend Developers

@@ -13,12 +13,23 @@ If you have been tasked with setting up, installing, or fixing the system enviro
 
 ### 1. The Bootstrapping Workflow
 1. **Initialize**: Run `./scripts/bootstrap.sh`. This scaffolds the `.env` file and initializes the directory structure.
-2. **Configure API Keys**: Open the `.env` file and populate it with the required Cloud API keys (e.g., `OPENAI_API_KEY`, `GEMINI_API_KEY`, `LITELLM_MASTER_KEY`). **Do not attempt to install or start local Ollama instances** — the system routes to cloud providers.
-3. **Start the Stack**: Run `docker compose up -d --build` to bring up the 6 core services (LiteLLM, PostgreSQL 16, basic-memory, Scout, sync-job, host-sync).
-4. **Agent Tooling**: Review the `SKILL.md` files located in `.agent/skills/` to understand the specialized tools available to you (e.g., `snp-bootstrap-system`, `snp-export-mcp`, `snp-verify-vault`).
+2. **Configure API Keys**: Open the `.env` file and populate it with the required Cloud API keys (e.g., `OPENAI_API_KEY`, `GEMINI_API_KEY`, `LITELLM_MASTER_KEY`). The system routes to Cloud API providers; no local model daemon is part of this stack.
+3. **Configure identities**: Keep the migration administrator separate from the
+   `rag_app_role` query identity and `rag_ingest_role` ingestion identity. Scout
+   defaults to JWT authentication; static tokens are an explicit alternative,
+   while unauthenticated development mode is loopback-only.
+4. **Start the Stack**: Run `docker compose up -d --build`. The
+   `postgres-migrate` one-shot service must complete before Scout and sync-job;
+   do not start runtime services against a pending schema.
+5. **Agent Tooling**: Review the `SKILL.md` files located in `.agent/skills/` to understand the specialized tools available to you (e.g., `snp-bootstrap-system`, `snp-export-mcp`, `snp-verify-vault`).
 
 ### 2. Wiring Up MCP Clients
 If you need to connect an agent to the live MCP servers, refer to [`docs/CONNECT_AGENTS.md`](docs/CONNECT_AGENTS.md) or use the `snp-export-mcp` skill to automatically generate the `basic-memory` (Port 8765) and `scout` (Port 8080) configurations.
+
+JWT and static Scout clients must supply a bearer token. Its verified identity
+provides a nonempty set of canonical departments (`redteam`, `blueteam`,
+`ai_eng`, `infra`). A tool argument may narrow that set but cannot add
+authority; `all` is a document ACL value, never caller clearance.
 
 ---
 
@@ -78,17 +89,17 @@ a **mechanical contract — do not rename them.**
 
 ```yaml
 ---
-type: technique            # technique | entity | playbook | concept
-title: Kerberoasting       # display name (basic-memory uses this too)
+type: concept              # technique | entity | playbook | concept
+title: PagedAttention      # display name (basic-memory uses this too)
 summary: <ONE sentence>    # REQUIRED. Feeds index.md + the fallback
                            # routing vector. High-density, assertive.
-entities: [kerberoasting, active-directory, service-account]
-department: redteam        # scope hook (redteam | blueteam | ai_eng | infra)
+entities: [paged-attention, vllm, kv-cache]
+department: ai_eng         # scope hook (redteam | blueteam | ai_eng | infra)
 sources:                   # ADDRESS out to RAG — Scout reads this; the
-  - path: raw/reports/acme-2026-final.pdf   # wiki engine ignores it
-    loc:  "p.12-14"
-    hint: "Acme kerberoasting service account SPN"
-last_compiled: 2026-07-20
+  - path: raw/reports/vllm_high_throughput_serving.pdf
+    loc:  "p.2"
+    hint: "PagedAttention KV-Cache Virtual Block Allocation"
+last_compiled: 2026-08-17
 ---
 ```
 
@@ -97,6 +108,12 @@ Rules the linter (`scripts/gen_index.py`) enforces:
 - All of `type, title, summary, entities, department, sources, last_compiled` must be present (missing → lint FAIL).
 - `summary` is **mandatory** and one sentence — it is the routing text.
 - Each `sources[]` element needs `path` + `loc` + `hint` (R-1.4). `path` must exist under `raw/` on disk.
+- `loc` is a **human locator that retrieval does not honor** — `rag_fetch` cites the retrieved
+  chunk's own locator and falls back to this one only when a chunk carries none. It is validated
+  at **mint time** instead: `scripts/mint.py` refuses to mint an address whose `--loc` is not a
+  locator the addressed file actually returns (`LOC_MISMATCH`), so a locator is never invented.
+  `verify_addresses.py` reports a locator that has since gone stale as an advisory `note:` line
+  and does **not** fail the merge on it — a stale locator is a content decision for a human.
 - A concept page with no underlying source uses `sources: []` (valid).
 
 #### Body sections (in this order)
@@ -119,23 +136,35 @@ Rules the linter (`scripts/gen_index.py`) enforces:
 
 ### 5. Minting an address — never hand-write it (R-6.3)
 
-The trap: Raw documents contain specific phrasings and terminology. If your
-`hint` uses different vocabulary than what is indexed in PostgreSQL, the
-address **returns empty, silently** — the path exists, the lint passes,
-but retrieval dead-ends.
+The trap: Raw documents contain specific phrasings and terminology. A `hint`
+written from *your* vocabulary instead of the indexed text does not fail loudly —
+and it does **not** come back empty either. `rag_fetch` passes `path=` to the
+backend, so the addressed file is returned regardless; a mismatched hint only
+changes *which part of it ranks first*. Verified live: a nonsense hint against a
+real path returns `status: "ok"` with the **whole document**. The path exists, the
+lint passes, and you get plausible context from the wrong passage. The hint
+governs **ranking, never existence** — so a bad hint quietly degrades a precise
+citation into "here is the file", and `scripts/verify_addresses.py` at merge time
+is what catches that, not the tool call and not the linter.
 
 So when you compile a page, **do not hand-write the hint — mint it:**
 
 1. The source doc must already be in `raw/` and indexed into PostgreSQL by Nhịp A (`sync_job`).
-2. Run **`python scripts/mint.py --path raw/<file> --hint "<phrase>" [--hint "<alt>" …]`**.
+2. Run **`python scripts/mint.py --path raw/<file> --hint "<phrase>" [--hint "<alt>" …] --department <department> --loc "<locator>"`**.
    It queries PostgreSQL pgvector and returns the first candidate hint that actually retrieves
    the file — a ready-to-paste `sources[]` block that is **verify-PASS by
-   construction** (it reuses the exact check the merge gate runs). Per phrase it
-   reports PASS / **DRIFT** (pulled a different file — narrow it) / **FAIL**
-   (retrieved nothing — is the file indexed?).
-3. Paste the returned block into the page's `sources:`. A hint written from
-   *your* vocabulary instead of indexed embeddings returns empty **silently** — the path
-   exists, lint passes, but retrieval dead-ends.
+   construction** (it reuses the exact check the merge gate runs). A hint passes
+   only when the addressed file **wins rank 1** of everything the page's
+   department may see *and* at least **half the hint's content words appear in
+   that file's own text**; "it showed up somewhere in the top results" is no
+   longer enough. Per phrase it reports PASS / **DRIFT** (another file outranked
+   it, or the phrase is not grounded in the file — narrow it, and take the
+   vocabulary from the source) / **FAIL** (the addressed file returned nothing —
+   is it indexed?) / **LOC_MISMATCH** (the hint works, but `--loc` names a
+   locator the file does not carry; mint prints the real ones).
+3. Paste the returned block into the page's `sources:` unedited. Hand-tuning a
+   minted hint afterwards is not re-checked until merge, and until then it still
+   looks like it "works" — it returns the file, just not the passage you cited.
 4. `scripts/verify_addresses.py` re-checks every address at merge time, so a
    minted address stays PASS end to end (R-6.5).
 
@@ -143,7 +172,8 @@ So when you compile a page, **do not hand-write the hint — mint it:**
 
 - Every wiki change you make goes onto a **branch → Pull Request**. Never
   commit to the main branch, never auto-merge.
-- `write_note` (or a direct commit) lands in the working tree → you run `python scripts/propose_page.py` → open a
+- `write_note` (or a direct edit) lands in the working tree → you run
+  `python scripts/propose_page.py --page wiki/<category>/<slug>.md` → open a
   PR → a human reviews and merges.
 - On merge, the pipeline regenerates `index.md` (`gen_index.py`) and runs
   `verify_addresses.py` (R-6.5). Don't hand-edit `wiki/index.md` — it is
@@ -151,9 +181,10 @@ So when you compile a page, **do not hand-write the hint — mint it:**
 
 ### 7. Embedding note
 
-Wiki-search uses Cloud Embeddings (LiteLLM) unified with PostgreSQL pgvector and FastEmbed in-process models. Write `summary` and
-`entities` assuming semantic (not keyword) retrieval — a good one-sentence
-`summary` in natural Vietnamese or English will be found by meaning.
+Wiki search and PostgreSQL RAG use separate embedding indexes: basic-memory
+uses in-process FastEmbed at 384 dimensions, while PostgreSQL uses the
+1024-dimensional Cloud API route through LiteLLM. Write `summary` and
+`entities` assuming semantic (not keyword) retrieval.
 
 ### 8. Quick checklist before you open a PR
 
@@ -162,4 +193,6 @@ Wiki-search uses Cloud Embeddings (LiteLLM) unified with PostgreSQL pgvector and
 - [ ] Links are `[[wikilink]]` only; no `related:` field.
 - [ ] Body has TL;DR / Technical Specifications / Provenance / Cross-References.
 - [ ] `python scripts/gen_index.py --check` passes locally.
+- [ ] `verify_addresses.py` returns `0` with live services (`1` is semantic
+      drift/failure; `2` is infrastructure/configuration and must not heal).
 - [ ] Change is on a branch + PR, not the main branch.

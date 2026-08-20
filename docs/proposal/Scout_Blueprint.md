@@ -1,5 +1,8 @@
 # Scout — Blueprint (RAG bridge + engine fallback)
 
+> **SUPERSEDED PROPOSAL.** Preserved for design history; current authenticated
+> Scout and pgvector behavior is documented in `docs/ARCHITECTURE_STATUS.md`.
+
 | | |
 |---|---|
 | **Phạm vi** | **CHỈ Scout** — mảnh tự viết nối Wiki ↔ RAG. Nội bộ RAG-Anything (KG/VDB/parse) và nội bộ engine wiki = **hàng xóm**, chỉ vẽ ở đường seam. |

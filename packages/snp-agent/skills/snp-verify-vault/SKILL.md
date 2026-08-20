@@ -23,7 +23,11 @@ This skill validates the mechanical integrity of the SNP Memory System V2. It ex
    ```bash
    uv run python scripts/verify_addresses.py
    ```
-   If any address reports `DRIFT` or `FAIL`, use the `snp-auto-heal-vault` skill to auto-heal the addresses.
+   Exit `0` means PASS, `1` means semantic `DRIFT`/`FAIL`, and `2` means
+   infrastructure/configuration failure. Never heal on exit `2`.
 
 3. **Pre-PR Merge Gate**
-   Both checks MUST return exit code 0 before a branch can be merged to `main`.
+   Run `uv run python scripts/ci_address_gate.py --mode pr` on a feature branch
+   for closed-loop remediation. It performs at most one heal pass on exit `1`,
+   re-verifies lint and addresses, and rolls back failed healing. Both checks
+   MUST return exit code 0 before merge.

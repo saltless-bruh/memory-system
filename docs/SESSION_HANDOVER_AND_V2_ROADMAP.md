@@ -1,5 +1,9 @@
 # SNP Memory System: Comprehensive Session Handover & V2 Architecture Roadmap
 
+> **SUPERSEDED HISTORICAL HANDOVER.** This snapshot predates the implemented
+> Cloud API + PostgreSQL pgvector/RLS architecture. Do not use its commands or
+> topology for current operations; see `docs/ARCHITECTURE_STATUS.md`.
+
 > **Date:** August 16, 2026  
 > **Status:** Phase 1 In Progress (Host-Sync Service Deployed, Webhook Fix Pending)  
 > **Context:** Architectural transition from V1 (Mocked RAG-Anything / Monolith) to V2 (Postgres + pgvector + RLS, Zero-Credential Wiki, Gitea Actions Auto-Healer).

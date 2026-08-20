@@ -1,8 +1,12 @@
 # 🏛️ TECHNICAL BLUEPRINT: Enterprise Knowledge Vault Architecture (Layer 1)
 
-> **Document Status**: Approved Architecture Blueprint  
-> **Target Audience**: Enterprise Systems Architects, Platform Engineers, and DevOps / CI/CD Leads  
+> **SUPERSEDED PROPOSAL.** Preserved for design provenance. Current replica
+> isolation and readiness behavior are documented in the active runbook.
+
+> **Document Status**: Revised Architecture Blueprint (v1.1)
+> **Target Audience**: Enterprise Systems Architects, Platform Engineers, and DevOps / CI/CD Leads
 > **Scope**: Centralized Git VCS (Gitea Cluster), Zero-Downtime Webhook Sync (`host-sync`), CI/CD Verification Gates, Autonomous PR Auto-Healer, and Multi-Replica Zero-Credential `basic-memory`.
+> **Relationship to component specs**: This is the **scaled-deployment view** of Layer 1. The authoritative *component contract* (sync mechanics, zero-credential engine, race handling) is `Technical_Blueprint_Basic_Memory_Gitea.md`; where they overlap, that document governs. See `CHANGELOG_Enterprise_Blueprints.md` for what changed in this revision and why.
 
 ---
 
@@ -14,7 +18,7 @@ In an enterprise deployment across hundreds of engineers and autonomous coding a
 
 1. **Single Source of Truth (Git as State)**: Every fact, architectural playbook, and technical concept is version-controlled, auditable, and bi-temporal.
 2. **PR-First Human-in-the-Loop Governance (R-6.4, R-7.3)**: Autonomous AI agents cannot commit directly to `main`. Every wiki change must be submitted as a Pull Request on a feature branch.
-3. **Zero-Credential Read Replicas**: Client-facing vector search engines (`basic-memory`) mount the compiled repository as read-only (`:ro`) with in-process FastEmbed models, requiring zero cloud API egress and zero database write permissions.
+3. **Zero-Credential Read Replicas**: Client-facing vector search engines (`basic-memory`) mount the compiled repository as read-only (`:ro`) with **in-process, multilingual FastEmbed models**, requiring **zero cloud API egress** and zero database write permissions.
 4. **Deterministic Lint & Address Gates (R-1.3, R-6.5)**: Every PR is strictly gated by CI pipelines that enforce 7-field frontmatter schemas and verify that all RAG address pointers resolve against PostgreSQL.
 
 ---
@@ -40,8 +44,8 @@ graph TD
     end
 
     subgraph Service_Tier ["4. Read-Only Knowledge Serving Tier"]
-        BM1["basic-memory Replica 1 (Port 8765)<br><i>FastEmbed In-Process (:ro mount)</i>"]
-        BM2["basic-memory Replica 2 (Port 8766)<br><i>FastEmbed In-Process (:ro mount)</i>"]
+        BM1["basic-memory Replica 1 (Port 8765)<br><i>FastEmbed bge-m3 In-Process (:ro mount)</i>"]
+        BM2["basic-memory Replica 2 (Port 8766)<br><i>FastEmbed bge-m3 In-Process (:ro mount)</i>"]
         BMN["basic-memory Replica N<br><i>Load-Balanced</i>"]
     end
 
@@ -87,6 +91,8 @@ Every page includes a `department:` scope hook in its frontmatter:
 * `infra`: Kubernetes clusters, PostgreSQL database scaling, networking.
 * `general`: Cross-organization standards and foundational concepts.
 
+> **Recommendation (coherence with Layer 2 RLS):** the wiki's `department` scope and the Data Vault's `allowed_depts` must be driven by **one** SSO-group→department mapping (the single source of truth). A dept's wiki page must only reference Data Vault documents whose `allowed_depts` include that dept — enforce this as a lint (`verify_addresses.py` extension), or a member can see a page whose source `rag_fetch` then denies.
+
 ---
 
 ## 4. Zero-Downtime Webhook Synchronization (`snp-host-sync`)
@@ -124,6 +130,8 @@ The `snp-host-sync` service provides enterprise-grade, lock-safe synchronization
 ### Concurrency Stress Benchmark:
 * **Ingress Throughput**: 5 concurrent signed webhook requests process in **101 ms total** (mean: **14.52 ms** per request).
 * **Collision Protection**: `_sync_lock` guarantees that git fetch/reset commands run sequentially with zero index locks.
+
+> **Note (safety of `git reset --hard`):** this is only safe because the host copy of `wiki/` is a **read replica** — nothing else writes to it. Do not co-locate any writer (manual edits, a CI job) on the synced host path, or `reset --hard` will discard its uncommitted work.
 
 ---
 
@@ -169,18 +177,20 @@ sequenceDiagram
     participant Gitea as Gitea VCS
     participant CI as Gitea Actions Runner
     participant PG as PostgreSQL 16 (pgvector)
-    
+
     Dev->>Gitea: Opens Pull Request on branch 'wiki/add-paged-attention'
     Gitea->>CI: Triggers .gitea/workflows/auto-healer.yaml
     CI->>PG: Runs verify_addresses.py against PostgreSQL
     PG-->>CI: Reports DRIFT: hint 'xyz' pulls wrong doc
-    CI->>PG: Executes scout/healer.py --ci (Queries pgvector for top matching phrase)
-    PG-->>CI: Returns re-minted valid hint 'PagedAttention Engine'
-    CI->>CI: Patches wiki/techniques/paged-attention-engine.md
-    CI->>CI: Appends audit entry to wiki/log.md
-    CI->>Gitea: git commit -m "bot(heal): re-mint drifted address" & git push
-    Gitea-->>Dev: PR updated with passing green checks
+    CI->>CI: Executes scout/healer.py --ci (applies to PR branch; NO commit)
+    CI->>CI: Lint gate: gen_index.py --check (a broken heal fails CI)
+    CI->>PG: (re-mint queried valid hint 'PagedAttention Engine')
+    CI->>CI: Single bot commit patching the .md + wiki/log.md
+    CI->>Gitea: git push origin HEAD:$PR_BRANCH  [skip ci]
+    Gitea-->>Dev: PR updated; human reviews the bot commit before merge
 ```
+
+> **Note:** this matches the shipped `scout/healer.py --ci` (apply-to-PR-branch, guarded off `main`) and the reconciled `.gitea/workflows/auto-healer.yaml` (healer applies → lint gate → *single* workflow commit). See `Technical_Blueprint_Auto_Healer_CICD.md`.
 
 ---
 
@@ -188,6 +198,10 @@ sequenceDiagram
 
 To serve thousands of developers and autonomous agents simultaneously:
 
-1. **In-Process Embeddings**: Each `basic-memory` container runs **FastEmbed** (`BAAI/bge-small-en-v1.5`, 384 dimensions) in memory. No network calls to cloud LLMs are made during wiki search.
+1. **In-Process, Multilingual Embeddings**: Each `basic-memory` container runs **FastEmbed with a multilingual model — `BAAI/bge-m3` (1024 dimensions)** — in memory. No network calls to cloud LLMs are made during wiki search, so the Knowledge Vault path stays **fully egress-free**.
+   - **Why bge-m3, not `bge-small-en-v1.5`:** the corpus is Vietnamese with English technical terms. **Gate 4 (our own spike)** showed the English-only `BAAI/bge-small-en-v1.5` fails on Vietnamese — recall@3 **0.812**, ranking the ESC8 paraphrase **7th** — while **bge-m3 reached 1.0**. `bge-small-en` would silently degrade wiki search on exactly the queries that matter. bge-m3 keeps the local/egress-free property *and* fixes multilingual recall, and matches the Data Vault's bge-m3 (Layer 2), so a hint minted against the RAG uses the same embedding family the wiki was searched with.
+   - **⚠️ Verify before rollout (carries a Gate-4-style check):** confirm your `basic-memory`/FastEmbed build lets you select `bge-m3`. If `basic-memory` pins the FastEmbed model, this becomes a config/gate item — either configure it, or serve wiki search via the DIY fallback engine (`backup-knl-eg`), which can embed with bge-m3. After switching, **re-index** every replica (embeddings change with the model) and re-run the Gate-4 Vietnamese-recall check against the FastEmbed-hosted bge-m3 to confirm parity with the LiteLLM-hosted bge-m3.
 2. **Read-Only Mounting**: Containers mount `/srv/wiki` as `:ro`. Containers possess **zero Git write keys** and **zero database credentials**.
 3. **Horizontal Scalability**: Instances can be scaled horizontally behind an NGINX or Envoy load balancer without session state.
+
+> **Recommendation (dimension consistency):** standardize on **1024-dim / bge-m3** across both layers. The wiki (FastEmbed) and RAG (LiteLLM) are separate indexes and don't *have* to match, but using the same family avoids surprises when a hint minted in the RAG is reasoned about alongside a wiki page, and removes a class of "why does this query behave differently in the wiki vs the RAG" confusion.

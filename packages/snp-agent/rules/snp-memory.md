@@ -11,3 +11,7 @@
 - **Rule R-6.3 (Verifiable Address Minting)**: Never guess or hand-write `sources[].hint`. Hints MUST be minted against vector embeddings using `mint.py` or Scout's minting API.
 - **Rule R-6.4 & R-7.3 (PR-First Governance)**: Never commit or push directly to `main` or `master`. All changes must be authored on a feature branch and submitted via Pull Request for human review.
 - **Rule R-1.5 (Relational Graph Invariant)**: Link related wiki pages exclusively using `[[wikilink-slug]]` in the body. Do not add a `related:` frontmatter field.
+- **Request Scope Boundary**: JWT/static Scout calls use the verified caller's
+  nonempty `Scope.departments` set (`redteam`, `blueteam`, `ai_eng`, `infra`). A
+  tool argument may narrow that set but must never expand it; document ACL
+  `all` is not caller authority.

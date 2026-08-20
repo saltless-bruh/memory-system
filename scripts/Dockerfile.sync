@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
-RUN git config --global --add safe.directory /repo && git config --global --add safe.directory '*'
+RUN git config --global --add safe.directory /vault-replica/repository
 RUN pip install --no-cache-dir fastapi uvicorn
 COPY host_sync.py /app/host_sync.py
 WORKDIR /app

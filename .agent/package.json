@@ -1,0 +1,23 @@
+{
+  "name": "@snp/memory-agent",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "SNP Memory System Agent Bundle with dual-layer Knowledge & Data Vault skills.",
+  "author": "SNP Architecture Team",
+  "license": "MIT",
+  "main": "manifest.json",
+  "scripts": {
+    "verify": "python3 scripts/export_agent_bundle.py --verify",
+    "bundle": "python3 scripts/export_agent_bundle.py --bundle",
+    "sync": "python3 scripts/export_agent_bundle.py --sync"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent-skills",
+    "snp-memory",
+    "pgvector",
+    "rag",
+    "wiki-knowledge-graph"
+  ]
+}

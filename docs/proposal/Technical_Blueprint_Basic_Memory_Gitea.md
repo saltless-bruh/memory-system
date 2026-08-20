@@ -1,5 +1,8 @@
 # Technical Blueprint: Gitea & basic-memory Integration (Zero-Credential Host-Sync)
 
+> **SUPERSEDED PROPOSAL.** The current host-sync uses isolated commit snapshots,
+> an atomic `current` pointer, and readiness gating. See the active runbook.
+
 **Document Version:** 1.1
 **Status:** Revised for review — supersedes v1.0 (honest egress; air-gap claim removed)
 **Target Audience:** Infrastructure Engineers, SecOps Architects

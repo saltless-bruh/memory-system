@@ -1,5 +1,9 @@
 # 📐 TECHNICAL BLUEPRINT: Portable Agent Distribution Package & Dual-Mode Workflows (Local vs. Team)
 
+> **SUPERSEDED PROPOSAL.** Preserve this design record, but use the mirrored
+> `.agent/` and `packages/snp-agent/` files plus `docs/ARCHITECTURE_STATUS.md`
+> for current behavior.
+
 > **Document Status**: Proposal & Architecture Design  
 > **Version**: 2.0.0  
 > **Target Audience**: AI Systems Architects, Platform Engineers, and AI Coding Agent Integrators  

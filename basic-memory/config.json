@@ -1,7 +1,7 @@
 {
   "env": "dev",
   "projects": {
-    "snp-wiki": { "path": "/vault", "mode": "local" }
+    "snp-wiki": { "path": "/vault-replica/current/wiki", "mode": "local" }
   },
   "default_project": "snp-wiki",
   "log_level": "INFO",

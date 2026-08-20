@@ -1,5 +1,8 @@
 # LLM-Wiki — Blueprint (chỉ lớp Wiki)
 
+> **SUPERSEDED PROPOSAL.** Preserved for design history; current architecture
+> and commands are documented in `docs/ARCHITECTURE_STATUS.md`.
+
 | | |
 |---|---|
 | **Phạm vi** | **CHỈ lớp LLM-Wiki** (lớp RAM của SNP Memory System). RAG-Anything, Scout-RAG-bridge, LiteLLM = **hàng xóm**, chỉ vẽ ở đường seam. |

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json.schemastore.org/partial-package.json",
+  "name": "@snp/memory-agent",
+  "version": "2.0.0",
+  "displayName": "SNP Memory System Agent Bundle",
+  "description": "Autonomous Agent Skills, Workflows, Rules, and Dual-Layer Memory Integration for SNP Knowledge & Data Vaults.",
+  "author": "SNP Architecture Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "python": ">=3.12.0"
+  },
+  "mcpServers": {
+    "basic-memory": {
+      "url": "http://localhost:8765/mcp",
+      "transport": "streamable-http",
+      "description": "Layer 1 Knowledge Vault (Wiki) navigation, semantic page search, and note compilation.",
+      "required_tools": [
+        "search_notes",
+        "read_note",
+        "write_note",
+        "list_notes"
+      ]
+    },
+    "scout": {
+      "url": "http://localhost:8080/mcp",
+      "transport": "streamable-http",
+      "description": "Layer 2 Data Vault (PostgreSQL 16 pgvector) RLS-isolated hybrid search and verbatim evidence retrieval.",
+      "required_tools": [
+        "rag_fetch"
+      ]
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "cursor",
+      "claude-code",
+      "gemini-cli",
+      "antigravity",
+      "vscode",
+      "windsurf"
+    ]
+  },
+  "entrypoints": {
+    "rules": "rules/snp-memory.md",
+    "instructions": "instructions/",
+    "skills": "skills/",
+    "workflows": "workflows/"
+  },
+  "rbac": {
+    "departments": [
+      "redteam",
+      "blueteam",
+      "ai_eng",
+      "infra"
+    ],
+    "default_scope": "ai_eng"
+  }
+}

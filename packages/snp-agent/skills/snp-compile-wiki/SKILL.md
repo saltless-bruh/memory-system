@@ -7,29 +7,87 @@ description: >-
 # snp-compile-wiki
 
 ## Purpose
-This skill guides the synthesis of a raw document (`raw/`) into a compiled Knowledge Vault note (`wiki/`) that satisfies the AGENTS.md frontmatter schema and the PR-first invariant.
+This skill guides the synthesis of raw documents (`raw/`) into compiled Knowledge Vault notes (`wiki/`) that satisfy the 7-field frontmatter contract and PR-first governance.
 
-## How to use
+---
 
-1. **Mint a Verifiable RAG Address (R-6.3)**
-   Never guess or hand-write the `sources[].hint` field. Vocabulary in raw files must be verified against PostgreSQL pgvector.
-   Run `scripts/mint.py` with one or more candidate phrases:
-   ```bash
-   python scripts/mint.py --path raw/<file> --hint "<candidate phrase 1>" --hint "<candidate phrase 2>"
-   ```
-   The minter tests each phrase against PostgreSQL pgvector and outputs a paste-ready YAML `sources[]` block upon finding a candidate that returns `PASS`.
+## 1. Mint a Verifiable RAG Address (Rule R-6.3)
 
-2. **Compile the Wiki Page**
-   Use the automated compiler script to generate the structured markdown note:
-   ```bash
-   python scripts/compile_note.py --path raw/<file> --title "<Display Title>" --category <concept|technique|entity|playbook>
-   ```
+Never hand-write `sources[].hint`. Always mint it against PostgreSQL pgvector:
 
-3. **Verify Frontmatter & Index Gate**
-   Run the vault linter in check mode to ensure all 7 required frontmatter fields are present and `summary` is exactly one sentence:
-   ```bash
-   python3 scripts/gen_index.py --check
-   ```
+```bash
+uv run python scripts/mint.py \
+  --path raw/reports/vllm_high_throughput_serving.pdf \
+  --hint "PagedAttention KV-Cache Virtual Block Allocation" \
+  --department ai_eng \
+  --loc "p.2"
+```
 
-4. **Propose via PR (R-6.4, R-7.3)**
-   Commit your changes to a feature branch using `scripts/propose_page.py` or standard git branches, and open a Pull Request. **NEVER** push directly to `main`.
+### Expected Output:
+```yaml
+sources:
+  - path: raw/reports/vllm_high_throughput_serving.pdf
+    loc: "p.2"
+    hint: "PagedAttention KV-Cache Virtual Block Allocation"
+```
+
+---
+
+## 2. Frontmatter Contract & Section Schema (Rule R-1.3)
+
+Every page in `wiki/` (`concepts/`, `techniques/`, `entities/`, `playbooks/`) must have these exact 7 fields and 4 sections:
+
+```markdown
+---
+type: concept              # technique | entity | playbook | concept
+title: PagedAttention Engine
+summary: Allocates non-contiguous physical GPU VRAM blocks for KV-caches to eliminate memory fragmentation.
+entities: [paged-attention, vllm, kv-cache]
+department: ai_eng         # Scope hook (redteam | blueteam | ai_eng | infra)
+sources:                   # ADDRESS out to RAG Data Vault
+  - path: raw/reports/vllm_high_throughput_serving.pdf
+    loc: "p.2"
+    hint: "PagedAttention KV-Cache Virtual Block Allocation"
+last_compiled: 2026-08-19
+---
+
+## TL;DR
+Dense, assertive summary of the compiled technical knowledge — no conversational filler.
+
+## Technical Specifications
+Detailed specifications, algorithms, mathematical formulations, and architectures.
+
+## Provenance
+Direct ties to raw/ sources and reconciliation of conflicting information.
+
+## Cross-References
+Relational links using [[wikilink-slug]] syntax only.
+```
+
+---
+
+## 3. Automated Compilation CLI
+
+```bash
+uv run python scripts/compile_note.py \
+  --path raw/reports/vllm_high_throughput_serving.pdf \
+  --title "PagedAttention Engine" \
+  --category concepts \
+  --dept ai_eng \
+  --loc "p.2"
+```
+
+---
+
+## 4. Lint & PR Proposal (Rules R-6.4, R-7.3)
+
+```bash
+# 1. Check frontmatter schema & index consistency
+uv run python scripts/gen_index.py --check
+
+# 2. Check live RAG address resolution
+uv run python scripts/verify_addresses.py
+
+# 3. Create branch and propose PR (NEVER push directly to main)
+uv run python scripts/propose_page.py --page wiki/concepts/paged-attention-engine.md
+```

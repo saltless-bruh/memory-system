@@ -1,5 +1,8 @@
 # SNP Memory System — Tài liệu Kiến trúc & Đề xuất Kỹ thuật
 
+> **SUPERSEDED PROPOSAL.** Preserved for design history; current architecture
+> and commands are documented in `docs/ARCHITECTURE_STATUS.md`.
+
 | | |
 |---|---|
 | **Version** | 2.3 — thêm hướng V2 cho RAG engine (swappable + RBAC). Xem §5 và `Suggestion_V2_RAG_Replacement.md`. |

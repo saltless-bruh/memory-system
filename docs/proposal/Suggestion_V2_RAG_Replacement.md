@@ -1,5 +1,9 @@
 # Đề xuất V2 — Thay RAG engine (RAG-Anything → backend có RBAC)
 
+> **IMPLEMENTED/SUPERSEDED PROPOSAL.** PostgreSQL pgvector with fail-closed RLS
+> is now the current backend. Preserve this file as decision history only; see
+> `docs/ARCHITECTURE_STATUS.md`.
+
 | | |
 |---|---|
 | **Loại** | Đề xuất kỹ thuật cho **V2** (KHÔNG đổi V1) |

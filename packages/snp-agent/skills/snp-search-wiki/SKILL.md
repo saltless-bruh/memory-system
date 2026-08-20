@@ -8,24 +8,73 @@ description: >-
 # snp-search-wiki
 
 ## Purpose
-This skill teaches you how to navigate the "compiled map" of the SNP Memory System. The wiki (`wiki/*.md`) contains the human and agent-compiled technical specifications, concepts, and architectural decisions. 
+This skill guides you through searching and reading the "compiled map" of the SNP Memory System. The Knowledge Vault (`wiki/*.md`) contains human- and agent-compiled technical specifications, architectural patterns, and cross-references.
 
 ## When to use
-ALWAYS use this skill first when asked a technical question about the system, its infrastructure, or security policies. Never go straight to the raw RAG data without consulting the wiki first.
+**ALWAYS** use this skill first when asked a technical question about the system, its infrastructure, concepts, or security playbooks. Never go straight to raw RAG storage without consulting the wiki first.
 
-## How to use
+---
 
-1. **Search the Wiki**
-   If connected to the `basic-memory` MCP server, use the `search_notes` tool to query for relevant concepts. 
-   Alternatively, use your local search tools (like `grep_search` or `list_dir`) in the `wiki/` directory to find relevant `.md` files.
+## Tool Calling Specification (`basic-memory` MCP)
 
-2. **Read the Compiled Note**
-   Open and read the discovered markdown page. 
-   Focus on the following sections:
-   - **TL;DR**: The high-density summary.
-   - **Technical Specifications**: The compiled knowledge.
-   - **Frontmatter (`sources`)**: This is the address that tells you exactly where the raw data came from.
+* **Server**: `basic-memory` (Port 8765)
+* **Transport**: Streamable HTTP (`http://localhost:8765/mcp`)
 
-3. **Determine next steps**
-   - If the wiki page fully answers the user's question, **STOP**. Answer the user and cite the wiki page `[[page-slug]]`.
-   - If the wiki page lacks the deep technical specifics or you need the raw original verbatim text, extract the `path` and `loc` from the `sources` frontmatter and use the `snp-rag-fetch` skill to fetch the raw data.
+### 1. `search_notes` — Semantic Discovery
+* **Input**:
+```json
+{
+  "query": "PagedAttention GPU memory allocation KV cache fragmentation"
+}
+```
+* **Output**:
+```json
+[
+  {
+    "slug": "concepts/paged-attention-engine",
+    "title": "PagedAttention Engine",
+    "summary": "Allocates non-contiguous physical GPU VRAM blocks for KV-caches to eliminate memory fragmentation in high-throughput LLM serving.",
+    "department": "ai_eng",
+    "score": 0.942
+  }
+]
+```
+
+### 2. `read_note` — Inspect Compiled Knowledge
+* **Input**:
+```json
+{
+  "page_slug": "concepts/paged-attention-engine"
+}
+```
+* **Output**:
+```json
+{
+  "title": "PagedAttention Engine",
+  "frontmatter": {
+    "type": "concept",
+    "summary": "Allocates non-contiguous physical GPU VRAM blocks for KV-caches to eliminate memory fragmentation in high-throughput LLM serving.",
+    "entities": ["paged-attention", "vllm", "kv-cache"],
+    "department": "ai_eng",
+    "sources": [
+      {
+        "path": "raw/reports/vllm_high_throughput_serving.pdf",
+        "loc": "p.2",
+        "hint": "PagedAttention KV-Cache Virtual Block Allocation"
+      }
+    ]
+  },
+  "content": "## TL;DR\n..."
+}
+```
+
+---
+
+## 3-Step Decision Protocol (Rule R-5)
+
+1. **Search Notes**: Call `basic-memory.search_notes(query)` to find top relevant candidate pages. Do not load the entire vault index.
+2. **Read Body & Evaluate**: Read `## Technical Specifications`.
+3. **Sufficiency Evaluation (Rule R-5.1)**:
+   - If the note body answers the question $\rightarrow$ **STOP IMMEDIATELY**.
+   - Respond with citation: `[[concepts/paged-attention-engine]]`. **DO NOT CALL RAG.**
+   - If verbatim proof or raw code implementation is missing $\rightarrow$ proceed with `snp-rag-fetch` using the exact `sources[]` address.

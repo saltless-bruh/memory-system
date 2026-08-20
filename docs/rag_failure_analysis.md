@@ -1,5 +1,9 @@
 # RAG Engine (V1) Evaluation & Failure Analysis Report
 
+> **HISTORICAL POST-MORTEM.** This report intentionally describes the retired
+> V1 RAG engine. It is evidence for the replacement decision, not current
+> deployment guidance; see `docs/ARCHITECTURE_STATUS.md`.
+
 ## Executive Summary
 This document serves as an architectural post-mortem and evaluation report for the SNP Memory System V1. The objective was to evaluate the system against modern (2026) RAG stress tests: **Needle-in-a-Haystack (NIAH)**, **Hard-Negative Mining**, and **Automated Framework Metrics (Ragas)**.
 

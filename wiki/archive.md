@@ -10,8 +10,11 @@ last_compiled: 2026-07-19
 
 ## TL;DR
 
-Trang bị **superseded** hoặc không còn đúng **không bị xoá** — chúng được ghi
-nhận ở đây để chuỗi tri thức truy được (ai bỏ, khi nào, vì sao). Cơ chế
+Trang bị **superseded** hoặc không còn đúng **không bị xoá** mà được lưu tại đây.
+
+## Technical Specifications
+
+Các trang được ghi nhận để chuỗi tri thức truy được ai bỏ, khi nào và vì sao. Cơ chế
 `supersedes:` có cấu trúc là việc của **V2** (proposal §5, mục 6); ở V1 đây chỉ
 là chỗ ghi tay tối thiểu.
 

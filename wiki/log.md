@@ -13,7 +13,7 @@ last_compiled: 2026-07-19
 Git giữ **lịch sử chính xác** (ai/gì/khi nào). Trang này giữ **ngữ cảnh** mà diff
 không nói được: vì sao đổi, quyết định gate ra sao. Ngắn gọn, mới nhất lên đầu.
 
-## Log
+## Technical Specifications
 
 - **2026-07-19** — Khởi tạo vault Phase 0: 3 technique (kerberoasting, asrep-roasting,
   adcs-esc8), 2 entity (active-directory, acme-corp). Dựng khung repo + Compose

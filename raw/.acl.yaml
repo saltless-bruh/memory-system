@@ -1,0 +1,85 @@
+# Document ACL map for the `raw/` evidence corpus.
+#
+# WHAT THIS IS
+#   `allowed_depts` on every row in `rag_documents` comes from here. PostgreSQL
+#   RLS (`config/postgres/migrations/002_rls_and_roles.sql`) then admits a chunk
+#   only when the document's ACL is `all` or overlaps the caller's verified
+#   departments. This file is therefore the ingest-side half of that policy —
+#   the retrieval half enforces it, but it can only enforce what is written here.
+#
+# HOW IT IS READ
+#   * Paths are relative to the corpus root (`raw/`), POSIX separators.
+#   * `**` spans any number of directories; `*` and `?` stay inside one segment.
+#   * FIRST MATCHING RULE WINS, so a file-specific rule must precede the
+#     directory rule it refines.
+#   * A file that matches NO rule is NOT INGESTED. There is no default and no
+#     fallback to `all`; adding a file to `raw/` without adding a rule here
+#     leaves it invisible to every caller, including an authenticated one.
+#   * `all` is the *public document* ACL — it means "any authenticated caller",
+#     never "any department". It is not used anywhere below on purpose: a
+#     uniformly `all` corpus makes RLS unable to tell one department from
+#     another (audit finding M1). Grant it only to genuinely public evidence.
+#   * Hidden files (this one included) are corpus policy, not corpus content,
+#     and are never ingested.
+#
+# CANONICAL DEPARTMENTS (scout/policy.py:CANONICAL_DEPARTMENTS)
+#   redteam · blueteam · ai_eng · infra
+#
+# THE INVARIANT TO PRESERVE
+#   A wiki page's `department:` must appear in the ACL of every document its
+#   `sources[]` cite, or `scripts/verify_addresses.py` will report FAIL for that
+#   address: the page promises evidence the reader's scope cannot retrieve.
+#   Check `wiki/**/*.md` frontmatter before narrowing a rule.
+
+version: 1
+
+rules:
+  # ── Operated by infra, authored by ai_eng ─────────────────────────────
+  # The gateway routing table: ai_eng owns the routes, infra reroutes them
+  # during an outage. Cited by wiki/playbooks/llm-outage-failover.md (infra)
+  # and by two ai_eng pages.
+  - path: architecture/model_routing_config.json
+    departments: [ai_eng, infra]
+
+  # The cluster manifest infra applies and ai_eng specifies.
+  # Cited by wiki/entities/vllm-inference-cluster.md (ai_eng).
+  - path: architecture/k8s_vllm_deployment.yaml
+    departments: [ai_eng, infra]
+
+  # Runbooks are executed by infra and written with ai_eng. Cited by
+  # wiki/playbooks/llm-outage-failover.md (infra) and
+  # wiki/techniques/tensor-parallel-serving.md (ai_eng).
+  - path: runbooks/**
+    departments: [ai_eng, infra]
+
+  # ── Shared with the defensive security function ───────────────────────
+  # The agentic-memory RFC carries the injection-boundary design blueteam
+  # relies on. Cited by wiki/techniques/indirect-injection-defense.md and
+  # wiki/playbooks/prompt-injection-incident-response.md (both blueteam) and
+  # by wiki/concepts/agentic-dual-layer-memory.md (ai_eng).
+  - path: architecture/agentic_memory_systems_rfc.md
+    departments: [ai_eng, blueteam]
+
+  # ── ai_eng-only engineering evidence ──────────────────────────────────
+  # Serving research, engine source, telemetry schema, benchmark data, and
+  # architecture/dashboard imagery. No page outside ai_eng cites these, so no
+  # other department is granted them — this is the boundary `docs/DEMO.md`
+  # demonstrates with the infra-scoped token.
+  - path: architecture/**
+    departments: [ai_eng]
+  - path: code/**
+    departments: [ai_eng]
+  - path: data/**
+    departments: [ai_eng]
+  - path: images/**
+    departments: [ai_eng]
+  - path: reports/**
+    departments: [ai_eng]
+  # Published research papers. Peer-reviewed external evidence, readable by
+  # engineering and blue team; nothing here is operationally sensitive.
+  - path: papers/**
+    departments: [ai_eng, blueteam]
+
+  # NOTE: raw/security/ holds no evidence yet and has no rule. Anything dropped
+  # there stays unindexed until its department is decided here — which is the
+  # intended fail-closed behavior, not an oversight.

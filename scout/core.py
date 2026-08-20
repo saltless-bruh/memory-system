@@ -43,9 +43,8 @@ def normalize_path(path: str) -> str:
 def post_filter(chunks: Iterable[RagChunk], path: str) -> list[RagChunk]:
     """Keep only chunks whose `file_path` matches `path` (R-4.3).
 
-    This is Scout's authoritative guard and runs for **every** backend — even
-    one that claims to pre-filter — because RAG-Anything merges the whole
-    corpus and has no ``path_filter``. Results are sorted by descending score.
+    This is Scout's authoritative guard and runs for **every** backend, even
+    one that claims to pre-filter. Results are sorted by descending score.
 
     Args:
         chunks: Raw chunks from a backend.
@@ -70,8 +69,8 @@ async def rag_fetch(
     """Resolve one address to verbatim quotes + citations (R-4.1, R-4.3–R-4.5).
 
     Args:
-        backend: Any `RagBackend` adapter (RAG-Anything today; R2R/pgvector
-            in V2). Scout does not care which — that is R-4.8.
+        backend: Any `RagBackend` adapter. Production uses PostgreSQL with
+            pgvector, while tests may inject an offline fake.
         address: The `sources[]` pointer to resolve.
         scope: Caller RBAC context; passed through to the backend (V1 ignores
             it, V2 enforces it — R-4.8).

@@ -1,269 +1,317 @@
-"""scout/healer.py — Continuous Address Drift Auto-Healer (Step 2), PR-first.
-
-Two triggers, both PR-first (a human reviews before anything reaches `main`):
-
-  • DEFAULT mode (scheduled sweep / local) — for drift in ALREADY-MERGED
-    content. Opens its OWN heal branch + PR: branch off current → apply hint
-    edits on the branch → log → lint → commit `wiki/` → push (opt-in) → print
-    the PR command → return to the original branch. `main` is never mutated.
-
-  • CI mode (`--ci`) — for drift found in an analyst's IN-FLIGHT PR, invoked by
-    Gitea Actions. Applies the heals to the CURRENT PR branch's working tree
-    (no new branch, no commit); the workflow lints, commits, and pushes to the
-    PR branch, where the human reviews the bot commit before merging to `main`.
-    Guarded: refuses to run on a protected branch, so it can never touch `main`.
-
-Why not overwrite in place on `main`: the vault is PR-first + pristine by
-invariant (R-6.4). Re-minting is verified (the new hint still retrieves the
-addressed file), but a human still reviews — mint's top-1 path check misses a
-stale `loc` or a semantically-off-but-valid match, and provenance integrity is
-the whole point of the system.
-
-INVOCATION
-----------
-    python scout/healer.py --ci                 # CI: apply to current PR branch
-    python scout/healer.py --push               # scheduled: open a heal PR
-    python scout/healer.py --dry-run            # preview, write nothing
-Library (run_system.py):
-    await verify_and_heal_vault(backend)                 # local heal branch
-    await verify_and_heal_vault(backend, ci_mode=True)   # apply to current branch
-"""
+"""Scoped address-heal computation and transactional working-tree application."""
 
 from __future__ import annotations
 
+import inspect
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-from scout import vault  # noqa: E402
-from scout.types import Address, RagBackend  # noqa: E402
-from scripts.mint import MintStatus, mint_address  # noqa: E402
-from scripts.propose_page import (  # noqa: E402
-    PROTECTED_BRANCHES,
-    current_branch,
-    git,
-    run_lint,
-    wiki_changes,
-)
-from scripts.verify_addresses import (  # noqa: E402
+from scout import vault
+from scout.types import Address, RagBackend, ScopedAddress
+from scripts.mint import MintStatus, mint_address
+from scripts.propose_page import PROTECTED_BRANCHES, current_branch
+from scripts.verify_addresses import (
+    VerifyReport,
     VerifyStatus,
     _collect_addresses,
     verify_all,
 )
 
-WIKI_DIR = REPO_ROOT / "wiki"
-LOG_FILE = WIKI_DIR / "log.md"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOG_FILE = REPO_ROOT / "wiki" / "log.md"
+UNRESOLVED_BRANCHES = frozenset({"", "HEAD", "unknown"})
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ProposedHeal:
-    """One drifted address whose re-mint succeeded — a proposal, not a write."""
+    """One page/source-specific, verified replacement proposal."""
 
     page: vault.Page
-    old_address: Address
+    scoped_address: ScopedAddress
     new_address: Address
-    trigger: str  # "DRIFT" or "FAIL"
+    trigger: str
+
+    @property
+    def old_address(self) -> Address:
+        return self.scoped_address.address
+
+
+_FENCE_RE = re.compile(r"^---\s*$")
+_TOP_LEVEL_KEY_RE = re.compile(r"^([A-Za-z_][\w.-]*):")
+_SOURCES_KEY_RE = re.compile(r"^sources:")
+_ITEM_START_RE = re.compile(r"^(\s*)-(?:\s|$)")
+#: One mapping key inside a `sources[]` item. The optional ``- `` is part of
+#: the captured prefix so a key written as the item's first line (``- hint:``)
+#: round-trips with its dash intact. YAML does not require `path:` to come
+#: first, so this matches any key at any position (m7).
+_ITEM_KEY_RE = re.compile(r"^(\s*(?:-\s+)?)([A-Za-z_][\w.-]*):\s*(.*?)\s*$")
+
+
+def _unquote(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "'\"":
+        return stripped[1:-1]
+    return stripped
+
+
+def _frontmatter_span(lines: list[str]) -> tuple[int, int] | None:
+    """Line range ``[start, end)`` of the YAML frontmatter body, or ``None``.
+
+    Scoping every later scan to this range is what stops a fenced YAML code
+    block in the page *body* from shifting the `sources[]` index (m7) —
+    AGENTS.md itself contains such a block.
+    """
+    if not lines or not _FENCE_RE.match(lines[0].rstrip("\n")):
+        return None
+    for index in range(1, len(lines)):
+        if _FENCE_RE.match(lines[index].rstrip("\n")):
+            return (1, index)
+    return None
+
+
+def _sources_span(lines: list[str], frontmatter: tuple[int, int]) -> tuple[int, int] | None:
+    """Line range ``[start, end)`` of the block nested under ``sources:``."""
+    start, end = frontmatter
+    for index in range(start, end):
+        if not _SOURCES_KEY_RE.match(lines[index]):
+            continue
+        for following in range(index + 1, end):
+            if _TOP_LEVEL_KEY_RE.match(lines[following]):
+                return (index + 1, following)
+        return (index + 1, end)
+    return None
+
+
+def _item_spans(lines: list[str], sources: tuple[int, int]) -> list[tuple[int, int]]:
+    """Line range of each `sources[]` list item, in declaration order.
+
+    Only dashes at the list's own indentation start a new item, so a nested
+    sequence inside one entry cannot be mistaken for a sibling.
+    """
+    start, end = sources
+    item_indent: int | None = None
+    starts: list[int] = []
+    for index in range(start, end):
+        match = _ITEM_START_RE.match(lines[index])
+        if match is None:
+            continue
+        indent = len(match.group(1))
+        if item_indent is None:
+            item_indent = indent
+        if indent == item_indent:
+            starts.append(index)
+    return [
+        (line, starts[position + 1] if position + 1 < len(starts) else end)
+        for position, line in enumerate(starts)
+    ]
+
+
+def _item_key(
+    lines: list[str], span: tuple[int, int], key: str
+) -> tuple[int, str, str] | None:
+    """Find `key` anywhere in one item; returns ``(line, prefix, raw value)``."""
+    for index in range(*span):
+        match = _ITEM_KEY_RE.match(lines[index].rstrip("\n"))
+        if match is not None and match.group(2) == key:
+            return (index, match.group(1), match.group(3))
+    return None
 
 
 def apply_heal_edit(
-    page: vault.Page, old_address: Address, new_address: Address
+    page: vault.Page, scoped_address: ScopedAddress, new_address: Address
 ) -> bool:
-    """Replace the old hint with the new hint in the page file (working tree)."""
-    import re
+    """Replace only the hint in the declared `sources[]` list item.
 
+    Fails closed — returns ``False`` without writing — whenever the file no
+    longer looks the way the address says it does.
+    """
     text = page.path.read_text(encoding="utf-8")
-    pattern = re.compile(rf"(hint:\s*)(['\"]?){re.escape(old_address.hint)}\2")
-    if not pattern.search(text):
+    lines = text.splitlines(keepends=True)
+    frontmatter = _frontmatter_span(lines)
+    if frontmatter is None:
         return False
-    safe_new = new_address.hint.replace('"', '\\"')
-    page.path.write_text(
-        pattern.sub(lambda m: f'{m.group(1)}"{safe_new}"', text, count=1),
-        encoding="utf-8",
-    )
+    sources = _sources_span(lines, frontmatter)
+    if sources is None:
+        return False
+    items = _item_spans(lines, sources)
+    if scoped_address.source_index >= len(items):
+        return False
+    span = items[scoped_address.source_index]
+
+    declared_path = _item_key(lines, span, "path")
+    if declared_path is None or _unquote(declared_path[2]) != scoped_address.address.path:
+        return False
+    declared_hint = _item_key(lines, span, "hint")
+    if declared_hint is None or _unquote(declared_hint[2]) != scoped_address.address.hint:
+        return False
+
+    index, prefix, _ = declared_hint
+    safe_hint = new_address.hint.replace("\\", "\\\\").replace('"', '\\"')
+    newline = "\n" if lines[index].endswith("\n") else ""
+    lines[index] = f'{prefix}hint: "{safe_hint}"{newline}'
+    page.path.write_text("".join(lines), encoding="utf-8")
     return True
+
+
+#: A freshly created heal log must satisfy `scout.vault.lint_page` on its first
+#: line of output, or the very next `gen_index.py --check` fails on a page the
+#: healer itself wrote (m7): seven frontmatter fields, a canonical type and
+#: department, a one-sentence summary, and the four ordered body headings.
+#:
+#: `title` and `summary` deliberately match the vault's own `wiki/log.md`,
+#: because `wiki/index.md` lists this page by exactly those two values — a
+#: recreated log that renamed itself would leave the generated index stale and
+#: fail the same `--check` for a different reason.
+_LOG_TEMPLATE = """---
+type: concept
+title: Change Log
+summary: Nhật ký thay đổi ở mức vault; bổ sung cho lịch sử Git bằng ghi chú \
+người-đọc-được về các quyết định lớn.
+entities: [changelog]
+department: redteam
+sources: []
+last_compiled: {today}
+---
+
+## TL;DR
+
+Vault-level change log. Every automated hint replacement lands here first;
+none of them is merged without a human reading it.
+
+## Technical Specifications
+
+One line per heal, in the order applied: UTC timestamp, the verification status
+that triggered it, the page slug, and the old and new hint.
+
+## Provenance
+
+Recreated by `scout/healer.py` because no log page existed. No RAG source backs
+this page.
+
+## Cross-References
+
+_(none)_
+
+"""
 
 
 def append_heal_to_log(
     page_slug: str, old_hint: str, new_hint: str, trigger: str
 ) -> None:
-    """Record a proposed heal in wiki/log.md (committed as part of the change)."""
-    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    entry = (
-        f"- [{ts}] AUTO-HEAL ({trigger}): {page_slug} — "
-        f"hint {old_hint!r} -> {new_hint!r} (bot fix, pending review)\n"
-    )
+    """Append one heal record, creating a lint-valid log page if none exists."""
+    now = datetime.now(UTC)
     if not LOG_FILE.exists():
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LOG_FILE.write_text("# Auto-Healer Log\n\n", encoding="utf-8")
-    with LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(entry)
+        LOG_FILE.write_text(
+            _LOG_TEMPLATE.format(today=now.date().isoformat()), encoding="utf-8"
+        )
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    with LOG_FILE.open("a", encoding="utf-8") as stream:
+        stream.write(
+            f"- [{timestamp}] AUTO-HEAL ({_one_line(trigger)}): "
+            f"{_one_line(page_slug)} — hint {_one_line(old_hint)!r} -> "
+            f"{_one_line(new_hint)!r} (pending review)\n"
+        )
+
+
+def _one_line(value: str) -> str:
+    """Collapse newlines so one record can never forge a body heading."""
+    return " ".join(value.split())
+
+
+def _snapshot(paths: set[Path]) -> dict[Path, bytes | None]:
+    return {path: path.read_bytes() if path.exists() else None for path in paths}
+
+
+def _restore(snapshot: dict[Path, bytes | None]) -> None:
+    for path, content in snapshot.items():
+        if content is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
 
 
 def apply_heals_in_place(heals: list[ProposedHeal], *, dry_run: bool = False) -> int:
-    """CI mode: apply heals to the CURRENT branch — no branch, no commit, no push.
-
-    Guarded so it can only run on a PR branch, never on `main`. The workflow
-    lints, commits, and pushes; the human reviews the bot commit in the PR.
-    """
+    """Apply proposals transactionally; never commit, push, or reset Git state."""
     branch = current_branch()
-    if branch in PROTECTED_BRANCHES:
-        print(
-            f"Refusing CI heal on protected branch '{branch}'. CI mode applies to "
-            f"a PR branch only (a human reviews the bot commit before merge)."
-        )
+    if branch in PROTECTED_BRANCHES or branch in UNRESOLVED_BRANCHES:
+        print("Refusing heal outside a resolved non-protected branch.")
         return 1
-
     if not heals:
-        print("No drifted addresses - nothing to apply.")
         return 0
-
     if dry_run:
-        print(f"[dry-run] Would apply to current branch '{branch}':")
-        for h in heals:
-            print(
-                f"  - {h.page.slug} [{h.trigger}] "
-                f"{h.old_address.hint!r} -> {h.new_address.hint!r}"
-            )
         return 0
 
-    applied = 0
-    for h in heals:
-        if apply_heal_edit(h.page, h.old_address, h.new_address):
+    owned_paths = {heal.page.path for heal in heals} | {LOG_FILE}
+    snapshot = _snapshot(owned_paths)
+    try:
+        for heal in heals:
+            if not apply_heal_edit(
+                heal.page, heal.scoped_address, heal.new_address
+            ):
+                raise RuntimeError("declared source entry no longer matches")
             append_heal_to_log(
-                h.page.slug, h.old_address.hint, h.new_address.hint, h.trigger
+                heal.page.slug,
+                heal.old_address.hint,
+                heal.new_address.hint,
+                heal.trigger,
             )
-            applied += 1
-            print(
-                f"  applied: {h.page.slug} [{h.trigger}] "
-                f"{h.old_address.hint!r} -> {h.new_address.hint!r}"
-            )
-    print(
-        f"Applied {applied} heal(s) to the working tree on '{branch}' "
-        f"(uncommitted - CI will lint, commit, and push to the PR branch)."
-    )
+    except Exception:  # noqa: BLE001 - any partial healer write must roll back
+        _restore(snapshot)
+        return 1
     return 0
 
 
-def propose_heals(
-    heals: list[ProposedHeal],
-    *,
-    remote: str = "origin",
-    push: bool = False,
-    base: str = "main",
-    dry_run: bool = False,
-) -> int:
-    """Default mode: route heals through a NEW branch + PR. Never mutate `main`."""
-    if not heals:
-        print("No drifted addresses - nothing to propose.")
-        return 0
-
-    pre_existing = wiki_changes()
-    if pre_existing and not dry_run:
-        print("Refusing to propose - wiki/ has uncommitted changes:")
-        for c in pre_existing:
-            print(f"  - {c}")
-        print("Commit or stash them first, then re-run the healer.")
-        return 1
-
-    import subprocess
-
-    original_branch = current_branch()
-    original_commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], text=True
-    ).strip()
-    branch = f"heal/addresses-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
-
-    print(f"Proposed heals: {len(heals)}")
-    for h in heals:
-        print(
-            f"  - {h.page.slug}: [{h.trigger}] "
-            f"{h.old_address.hint!r} -> {h.new_address.hint!r}"
+async def compute_heals(
+    backend: RagBackend,
+    pages: list[vault.Page],
+    addresses: list[ScopedAddress],
+    reports: list[VerifyReport],
+) -> list[ProposedHeal]:
+    """Purely compute verified page/source-specific replacements."""
+    page_by_identity = {(page.rel, page.slug): page for page in pages}
+    reports_by_identity = {report.scoped_address: report for report in reports}
+    heals: list[ProposedHeal] = []
+    for scoped in addresses:
+        report = reports_by_identity.get(scoped)
+        if report is None or report.status is VerifyStatus.PASS:
+            continue
+        page = page_by_identity.get((scoped.page_path, scoped.page_slug))
+        if page is None or not scoped.address.loc:
+            continue
+        candidates = [page.title, page.summary, *page.entities]
+        candidates = [candidate for candidate in dict.fromkeys(candidates) if candidate]
+        result = await mint_address(
+            backend,
+            scoped.address.path,
+            candidates,
+            department=scoped.department,
+            loc=scoped.address.loc,
         )
-
-    if dry_run:
-        tail = ", push, open PR" if push else " (local only)"
-        print(f"\n[dry-run] Would branch {branch}, apply, lint, commit{tail}.")
-        return 0
-
-    if original_branch in PROTECTED_BRANCHES:
-        print(
-            f"On protected branch '{original_branch}': branching off it (never committed here)."
-        )
-
-    git("checkout", "-b", branch)
-    committed = False
-    result = 1
-    try:
-        applied = 0
-        for h in heals:
-            if apply_heal_edit(h.page, h.old_address, h.new_address):
-                append_heal_to_log(
-                    h.page.slug, h.old_address.hint, h.new_address.hint, h.trigger
+        if result.status is MintStatus.MINTED and result.address is not None:
+            heals.append(
+                ProposedHeal(
+                    page=page,
+                    scoped_address=scoped,
+                    new_address=result.address,
+                    trigger=report.status.name,
                 )
-                applied += 1
-        if applied == 0:
-            raise RuntimeError("no hint line matched any page - nothing to apply")
-
-        print("\n[lint] python scripts/gen_index.py --check ...")
-        if not run_lint():
-            raise RuntimeError("lint failed - a broken heal never becomes a PR (R-6.5)")
-
-        git("add", "--", "wiki")
-        git(
-            "commit",
-            "-m",
-            f"heal: propose {applied} address re-mint(s) - review before merge",
-            "--no-verify",
-        )
-        committed = True
-        print(f"committed {applied} heal(s) to {branch}")
-
-        if push:
-            git("push", "-u", remote, branch)
-            print(f"pushed {remote}/{branch}")
-            print("\nOpen the PR (do NOT auto-merge - R-6.4):")
-            print(f"  gh pr create --base {base} --head {branch} --fill")
-        else:
-            print("\nLocal branch only. To propose:")
-            print(
-                f"  git push -u {remote} {branch} && "
-                f"gh pr create --base {base} --head {branch} --fill"
             )
-        result = 0
-    except Exception as exc:  # noqa: BLE001 - any failure must leave main pristine
-        if committed:
-            print(
-                f"\nCommit is on local branch {branch}, but a later step failed "
-                f"({exc}). Push it manually if you want the PR."
-            )
-        else:
-            print(f"\nABORTED - main left pristine: {exc}")
-    finally:
-        if not committed:
-            git("checkout", "--", "wiki", check=False)
-        if current_branch() != original_branch:
-            if original_branch == "HEAD":
-                git("checkout", original_commit, check=False)
-            else:
-                git("checkout", original_branch, check=False)
-        if not committed:
-            git("branch", "-D", branch, check=False)
-
-    return result
+    return heals
 
 
-def _build_address_to_page(pages: Any) -> dict[Address, vault.Page]:
-    mapping: dict[Address, vault.Page] = {}
-    for page in pages:
-        for src in page.sources:
-            if isinstance(src, dict) and src.get("path") and src.get("hint"):
-                loc = str(src["loc"]) if src.get("loc") else None
-                addr = Address(path=str(src["path"]), hint=str(src["hint"]), loc=loc)
-                mapping[addr] = page
-    return mapping
+async def _close_backend(backend: RagBackend) -> None:
+    close = getattr(backend, "close", None)
+    if close is None:
+        return
+    result: Any = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 async def verify_and_heal_vault(
@@ -275,122 +323,50 @@ async def verify_and_heal_vault(
     base: str = "main",
     dry_run: bool = False,
 ) -> int:
-    """Verify all addresses and PROPOSE heals for DRIFT/FAIL (never auto-apply to main).
-
-    ci_mode=False -> open a new heal branch + PR (scheduled/local).
-    ci_mode=True  -> apply to the current PR branch (Gitea Actions commits + pushes).
-    """
-    if ci_mode:
-        branch = current_branch()
-        if branch in PROTECTED_BRANCHES:
-            print(
-                f"Refusing CI heal on protected branch '{branch}'. CI mode applies to "
-                f"a PR branch only (a human reviews the bot commit before merge)."
-            )
-            return 1
-
-    pages = list(vault.load_pages())
-    addresses = _collect_addresses(pages)
-    if not addresses:
-        return 0
-
-    reports = await verify_all(backend, addresses)
-    address_to_page = _build_address_to_page(pages)
-
-    heals: list[ProposedHeal] = []
-    for report in reports:
-        if report.status not in (VerifyStatus.DRIFT, VerifyStatus.FAIL):
-            continue
-        found_addr = next(
-            (a for a in addresses if a.path == report.path and a.hint == report.hint),
-            None,
-        )
-        if not found_addr:
-            continue
-        page = address_to_page.get(found_addr)
-        if not page:
-            continue
-
-        candidates: list[str] = []
-        title = str(page.frontmatter.get("title", ""))
-        if title:
-            candidates.append(title)
-        summary = str(page.frontmatter.get("summary", ""))
-        if summary:
-            candidates.append(summary[:50])
-            candidates.append(summary)
-        entities = page.frontmatter.get("entities", [])
-        if isinstance(entities, list):
-            candidates.extend(str(e) for e in entities if e)
-
-        mint_result = await mint_address(
-            backend, report.path, candidates, loc=found_addr.loc
-        )
-        if mint_result.status == MintStatus.MINTED and mint_result.address:
-            heals.append(
-                ProposedHeal(
-                    page=page,
-                    old_address=found_addr,
-                    new_address=mint_result.address,
-                    trigger=report.status.name,
-                )
-            )
-
-    if ci_mode:
+    """Compute and apply only; the CI gate owns branch/commit/push operations."""
+    del remote, push, base
+    try:
+        if ci_mode:
+            branch = current_branch()
+            if branch in PROTECTED_BRANCHES or branch in UNRESOLVED_BRANCHES:
+                return 1
+        pages = list(vault.load_pages())
+        addresses = _collect_addresses(pages)
+        if not addresses:
+            return 0
+        reports = await verify_all(backend, addresses)
+        heals = await compute_heals(backend, pages, addresses, reports)
         return apply_heals_in_place(heals, dry_run=dry_run)
-    return propose_heals(heals, remote=remote, push=push, base=base, dry_run=dry_run)
+    finally:
+        await _close_backend(backend)
 
 
 def _build_backend() -> RagBackend:
-    """Construct the RAG backend for standalone/CI runs.
-
-    Defaults to V2 PostgreSQL + pgvector (PgVectorRlsBackend).
-    """
     import os
 
     kind = os.environ.get("HEALER_BACKEND", "pgvector").lower()
-    if kind == "pgvector":
-        from scout.backends.pgvector import PgVectorRlsBackend
+    if kind != "pgvector":
+        raise SystemExit(f"unknown HEALER_BACKEND={kind!r}")
+    from scout.backends.pgvector import PgVectorRlsBackend
 
-        return PgVectorRlsBackend()
-    if kind == "fake":
-        from scout.backends.fake import FakeRagBackend
-
-        return FakeRagBackend(chunks=[])
-    raise SystemExit(f"unknown HEALER_BACKEND={kind!r}")
+    return PgVectorRlsBackend()
 
 
 if __name__ == "__main__":
     import argparse
     import asyncio
 
-    ap = argparse.ArgumentParser(description="Address drift healer (PR-first).")
-    ap.add_argument(
-        "--ci",
-        action="store_true",
-        help="CI mode: apply heals to the current PR branch (no new branch/commit; "
-        "the workflow commits + pushes, a human reviews).",
-    )
-    ap.add_argument(
-        "--push",
-        action="store_true",
-        help="Default mode only: push the heal branch and print the PR command.",
-    )
-    ap.add_argument(
-        "--dry-run", action="store_true", help="Show proposed heals; write nothing."
-    )
-    ap.add_argument("--base", default="main", help="PR base branch (default mode).")
-    args = ap.parse_args()
-
-    backend = _build_backend()
-    raise SystemExit(
-        asyncio.run(
+    parser = argparse.ArgumentParser(description="Apply scoped address heals")
+    parser.add_argument("--ci", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    try:
+        exit_code = asyncio.run(
             verify_and_heal_vault(
-                backend,
-                ci_mode=args.ci,
-                push=args.push,
-                base=args.base,
-                dry_run=args.dry_run,
+                _build_backend(), ci_mode=args.ci, dry_run=args.dry_run
             )
         )
-    )
+    except Exception:  # noqa: BLE001 - backend failures may include credentials
+        print("INFRASTRUCTURE ERROR: healer could not complete.")
+        exit_code = 2
+    raise SystemExit(exit_code)

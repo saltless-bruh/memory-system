@@ -10,12 +10,12 @@ Implements `RagBackend` protocol with:
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Sequence
 
 import asyncpg
 
-from scout.chunker import LiteLLMBatchEmbedder
+from scout.chunker import AsyncEmbedder, LiteLLMBatchEmbedder
+from scout.config import postgres_settings
 from scout.types import RagBackend, RagChunk, Scope
 
 
@@ -29,28 +29,27 @@ class PgVectorRlsBackend(RagBackend):
         database: str | None = None,
         user: str | None = None,
         password: str | None = None,
-        embedder: LiteLLMBatchEmbedder | None = None,
+        embedder: AsyncEmbedder | None = None,
         pool: asyncpg.Pool | None = None,
     ) -> None:
-        self.host = host or os.environ.get("POSTGRES_HOST", "localhost")
-        self.port = port or int(os.environ.get("POSTGRES_PORT", "5432"))
-        self.database = database or os.environ.get("POSTGRES_DB", "snp_rag")
-        self.user = user or os.environ.get("POSTGRES_APP_USER", "rag_app_role")
-        self.password = password or os.environ.get(
-            "POSTGRES_APP_PASSWORD", "rag_app_secret"
-        )
+        self.host = host
+        self.port = port
+        self.database = database
+        self.user = user
+        self.password = password
         self.embedder = embedder or LiteLLMBatchEmbedder()
         self._pool = pool
 
     async def _get_pool(self) -> asyncpg.Pool:
         """Lazily creates and returns the connection pool."""
         if self._pool is None:
+            settings = postgres_settings("query")
             self._pool = await asyncpg.create_pool(
-                host=self.host,
-                port=self.port,
-                database=self.database,
-                user=self.user,
-                password=self.password,
+                host=self.host or settings.host,
+                port=self.port or settings.port,
+                database=self.database or settings.database,
+                user=self.user or settings.user,
+                password=self.password or settings.password,
                 min_size=2,
                 max_size=20,
             )
@@ -66,16 +65,7 @@ class PgVectorRlsBackend(RagBackend):
         """Extracts and sanitizes allowed department string from caller Scope."""
         if scope is None:
             return ""
-
-        depts: set[str] = set()
-        if scope.roles:
-            depts.update(scope.roles)
-        if scope.team:
-            depts.add(scope.team)
-        if scope.clearance:
-            depts.add(scope.clearance)
-
-        return ",".join(sorted(depts))
+        return ",".join(sorted(scope.departments))
 
     async def retrieve(
         self,
@@ -90,7 +80,9 @@ class PgVectorRlsBackend(RagBackend):
             return ()
 
         # 1. Generate query embedding for dense search
-        embeddings = self.embedder.embed_texts([hint])
+        # Production retrieval uses the gateway's native async transport so a
+        # slow embedding request cannot stall unrelated FastMCP requests.
+        embeddings = await self.embedder.aembed_texts([hint])
         if not embeddings:
             return ()
         query_vec = embeddings[0]

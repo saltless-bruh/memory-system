@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from scout.backends.pgvector import PgVectorRlsBackend
+from scout.chunker import LiteLLMBatchEmbedder
 from scout.ingest import get_pg_connection, ingest_document
 from scout.types import Scope
 
@@ -43,9 +44,7 @@ async def run_hard_negatives() -> bool:
         f2.write(hard_negative_text)
         neg_path = Path(f2.name)
 
-    from scout.chunker import LiteLLMBatchEmbedder
-
-    embedder = LiteLLMBatchEmbedder(allow_mock=True)
+    embedder = LiteLLMBatchEmbedder()
     backend = PgVectorRlsBackend(embedder=embedder)
     conn = await get_pg_connection()
     doc_ids: list[str] = []
@@ -72,7 +71,7 @@ async def run_hard_negatives() -> bool:
         query = "Protocol 99X quantum encryption three-way handshake"
         chunks = await backend.retrieve(
             hint=query,
-            scope=Scope(roles=frozenset(["all"])),
+            scope=Scope(departments=frozenset({"infra"})),
             k=5,
         )
 

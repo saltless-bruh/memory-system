@@ -14,8 +14,8 @@ The flow:
     4. Else -> hand the page's `sources[]` addresses to Scout, which
        retrieves + post-filters + cites (R-5.4). Scout never reads the vault.
 
-Both the wiki engine and the RAG backend are injected behind Protocols, so
-this works over basic-memory or Scout-DIY, and RAG-Anything or any V2 engine.
+Both the wiki engine and retrieval backend are injected behind Protocols, so
+the flow can use basic-memory or Scout-DIY and production pgvector or a fake.
 """
 
 from __future__ import annotations

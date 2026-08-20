@@ -17,6 +17,7 @@ specs/
 # ── Secrets ──────────────────────────────────────────────────────────
 .env
 .env.agent_local
+.secrets/
 config/litellm/.litellm_secrets.yaml
 
 # ── Local Agent Configuration ─────────────────────────────────────────
@@ -40,8 +41,16 @@ venv/
 .coverage.*
 htmlcov/
 
-# ── Editor / tooling / OS ────────────────────────────────────────────
+# ── Agent contract mirror ────────────────────────────────────────────
+# `.claude/{instructions,rules,skills,workflows}` is a TRACKED byte-for-byte
+# mirror of `.agent/` (enforced by tests/test_agent_package_sync.py). Do not
+# ignore it: an untracked mirror silently drifts from the authoritative
+# `.agent/` contract and the drift never reaches code review.
+# Only Claude Code's per-machine state below is ignored.
 .claude/settings.local.json
+.claude/*.local.json
+
+# ── Editor / tooling / OS ────────────────────────────────────────────
 .vscode/
 .idea/
 .obsidian/workspace.json
@@ -49,3 +58,16 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Build artifacts and local run logs
+dist/
+e2e_demo/
+
+# Inbox for files awaiting triage. The PDF here is byte-identical to the copy
+# under raw/papers/, which is the tracked one; keeping both would duplicate
+# 2.5 MB in history forever. Notes and policies in this folder stay tracked.
+docs/news-file_need-check/*.pdf
+
+# Extracted figures and tables. Regenerated deterministically from raw/ by
+# `snpmemory extract`; byte-identical every run, so there is nothing to preserve.
+derived/

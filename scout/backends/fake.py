@@ -1,8 +1,7 @@
 """In-memory RAG backend — for tests and as the swappability reference.
 
-`FakeRagBackend` implements `RagBackend` with no external dependency, which is
-what lets Scout core be tested fully offline (no RAG-Anything, no network) and
-is the concrete demonstration that the engine is a swappable slot (R-4.8).
+`FakeRagBackend` implements `RagBackend` with no external dependency, allowing
+Scout core to be tested fully offline without a network or database.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ class FakeRagBackend:
     Attributes:
         chunks: The corpus this fake "retrieves" from.
         record_scope: Captures the last `scope` seen, so tests can assert the
-            RBAC hook is threaded through even though V1 ignores it (R-4.8).
+            authenticated scope is threaded through the orchestration layer.
     """
 
     chunks: list[RagChunk] = field(default_factory=list)

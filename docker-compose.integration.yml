@@ -1,0 +1,25 @@
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${SNP_INTEGRATION_POSTGRES_PORT:-55432}:5432"
+
+  postgres-migrate:
+    environment:
+      SNP_INTEGRATION_PROJECT: snp-memory-it
+
+  scout:
+    environment:
+      SCOUT_AUTH_MODE: static
+      SCOUT_AUTH_BASE_URL: http://127.0.0.1:8080/mcp
+      SCOUT_STATIC_TOKENS_FILE: /run/secrets/scout_static_tokens_json
+    secrets:
+      - scout_static_tokens_json
+
+  host-sync:
+    environment:
+      GIT_SYNC_URL: file:///source-repo
+      GIT_BRANCH: ${SNP_INTEGRATION_GIT_BRANCH:-main}
+      GIT_CONFIG_GLOBAL: /etc/snp/integration.gitconfig
+    volumes:
+      - ./:/source-repo:ro
+      - ./config/host-sync.integration.gitconfig:/etc/snp/integration.gitconfig:ro

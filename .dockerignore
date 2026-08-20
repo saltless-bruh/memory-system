@@ -1,0 +1,11 @@
+.git
+.env
+.secrets
+.venv
+artifacts
+raw
+wiki
+tests
+__pycache__
+*.pyc
+*.db

@@ -1,159 +1,120 @@
-"""Comprehensive test suite for PgVectorRlsBackend (Hybrid Search & RLS Isolation)."""
+"""Offline unit tests for PgVectorRlsBackend query building and scope resolution."""
 
 from __future__ import annotations
 
-import tempfile
-from collections.abc import AsyncGenerator
-from pathlib import Path
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
 
 from scout.backends.pgvector import PgVectorRlsBackend
-from scout.chunker import LiteLLMEmbedder
-from scout.core import rag_fetch
-from scout.ingest import get_pg_connection, ingest_document
-from scout.types import Address, FetchStatus, Scope
+from scout.types import Scope
+from tests.fakes import FakeEmbedder
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def setup_test_documents() -> AsyncGenerator[None, None]:
-    """Ingests isolated fixture documents for PgVector tests and cleans them up."""
-    try:
-        conn = await get_pg_connection()
-    except Exception as e:
-        pytest.skip(f"Postgres not reachable: {e}")
+def test_resolve_depts_empty_scope() -> None:
+    backend = PgVectorRlsBackend(embedder=FakeEmbedder())
+    assert backend._resolve_depts(None) == ""
 
-    embedder = LiteLLMEmbedder(allow_mock=True)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        tcp_doc = tmp_path / "rfc793-tcp.md"
-        tcp_doc.write_text(
-            "# RFC 793 TCP\n\nTCP three-way handshake sliding window flow control and reliable delivery.",
-            encoding="utf-8",
-        )
-        tls_doc = tmp_path / "rfc8446-tls13.md"
-        tls_doc.write_text(
-            "# RFC 8446 TLS 1.3\n\nTLS 1.3 1-RTT handshake AEAD ciphers and encrypted extensions.",
-            encoding="utf-8",
-        )
-
-        res_tcp = await ingest_document(
-            file_path=tcp_doc,
-            allowed_depts=["all", "networking"],
-            conn=conn,
-            base_dir=tmp_path,
-            embedder=embedder,
-        )
-        res_tls = await ingest_document(
-            file_path=tls_doc,
-            allowed_depts=["all", "security"],
-            conn=conn,
-            base_dir=tmp_path,
-            embedder=embedder,
-        )
-
-        try:
-            yield
-        finally:
-            await conn.execute(
-                "DELETE FROM rag_documents WHERE source_uri IN ($1, $2);",
-                res_tcp["source_uri"],
-                res_tls["source_uri"],
-            )
-            await conn.close()
+def test_resolve_depts_uses_only_canonical_departments() -> None:
+    backend = PgVectorRlsBackend(embedder=FakeEmbedder())
+    scope = Scope(departments=frozenset(["infra", "ai_eng"]))
+    resolved = backend._resolve_depts(scope)
+    dept_set = set(resolved.split(","))
+    assert dept_set == {"ai_eng", "infra"}
 
 
 @pytest.mark.asyncio
-async def test_pgvector_hybrid_search_retrieval() -> None:
-    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
-
-    try:
-        scope = Scope(roles=frozenset(["all", "networking"]))
-        chunks = await backend.retrieve(
-            hint="TCP three-way handshake sliding window flow control",
-            path="rfc793-tcp.md",
-            scope=scope,
-            k=3,
-        )
-        assert len(chunks) > 0
-        assert any("rfc793-tcp.md" in c.file_path for c in chunks)
-        assert all(c.score > 0 for c in chunks)
-    finally:
-        await backend.close()
+async def test_retrieve_empty_hint_returns_empty() -> None:
+    backend = PgVectorRlsBackend(embedder=FakeEmbedder())
+    assert await backend.retrieve("") == ()
+    assert await backend.retrieve("   ") == ()
 
 
 @pytest.mark.asyncio
-async def test_pgvector_pre_filter_path() -> None:
-    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
-    try:
-        scope = Scope(roles=frozenset(["all", "security"]))
-        chunks = await backend.retrieve(
-            hint="TLS 1.3 1-RTT handshake AEAD ciphers",
-            path="rfc8446-tls13.md",
-            scope=scope,
-            k=5,
-        )
-        assert len(chunks) > 0
-        for chunk in chunks:
-            assert "rfc8446-tls13.md" in chunk.file_path
-    finally:
-        await backend.close()
+async def test_retrieve_mock_pool_executes_hybrid_query() -> None:
+    mock_conn = MagicMock()
+    mock_conn.execute = AsyncMock()
+
+    mock_tx = MagicMock()
+    mock_tx.__aenter__ = AsyncMock(return_value=mock_tx)
+    mock_tx.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.transaction.return_value = mock_tx
+
+    mock_rows = [
+        {
+            "chunk_id": "c1",
+            "chunk_text": "Sample chunk text",
+            "source_uri": "raw/reports/acme.pdf",
+            "metadata": json.dumps({"loc": "p.12"}),
+            "rrf_score": 0.032,
+        }
+    ]
+    mock_conn.fetch = AsyncMock(return_value=mock_rows)
+
+    mock_acquire = MagicMock()
+    mock_acquire.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_acquire.__aexit__ = AsyncMock(return_value=None)
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = mock_acquire
+
+    backend = PgVectorRlsBackend(embedder=FakeEmbedder(), pool=mock_pool)
+    scope = Scope(departments=frozenset(["infra"]))
+
+    chunks = await backend.retrieve(
+        hint="test search query",
+        path="raw/reports/acme.pdf",
+        scope=scope,
+        k=5,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].text == "Sample chunk text"
+    assert chunks[0].file_path == "raw/reports/acme.pdf"
+    assert chunks[0].loc == "p.12"
+    assert chunks[0].score == 0.032
+
+    # Verify session setting was set with resolved depts
+    mock_conn.execute.assert_called_once()
+    args = mock_conn.execute.call_args[0]
+    assert "set_config('scout.current_depts'" in args[0]
+    assert args[1] == "infra"
 
 
 @pytest.mark.asyncio
-async def test_pgvector_rls_security_fail_closed() -> None:
-    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
+async def test_retrieve_does_not_block_event_loop_while_embedding() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingEmbedder(FakeEmbedder):
+        async def aembed_texts(self, texts: list[str]) -> list[list[float]]:
+            started.set()
+            await release.wait()
+            return self.embed_texts(texts)
+
+    mock_conn = MagicMock()
+    mock_conn.execute = AsyncMock()
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_tx = MagicMock()
+    mock_tx.__aenter__ = AsyncMock(return_value=mock_tx)
+    mock_tx.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.transaction.return_value = mock_tx
+    mock_acquire = MagicMock()
+    mock_acquire.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_acquire.__aexit__ = AsyncMock(return_value=None)
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = mock_acquire
+
+    backend = PgVectorRlsBackend(embedder=BlockingEmbedder(), pool=mock_pool)
+    task = asyncio.create_task(backend.retrieve("query"))
     try:
-        # Case A: Missing/empty scope -> Fail-Closed (0 chunks)
-        empty_chunks = await backend.retrieve(
-            hint="TCP three-way handshake",
-            path="rfc793-tcp.md",
-            scope=None,
-            k=3,
-        )
-        assert len(empty_chunks) == 0
-
-        # Case B: Non-matching scope -> 0 chunks
-        unauthorized_scope = Scope(roles=frozenset(["unauthorized_dept"]))
-        unauth_chunks = await backend.retrieve(
-            hint="TCP three-way handshake",
-            path="rfc793-tcp.md",
-            scope=unauthorized_scope,
-            k=3,
-        )
-        assert len(unauth_chunks) == 0
-
-        # Case C: Authorized scope -> Successfully retrieved
-        authorized_scope = Scope(roles=frozenset(["all"]))
-        auth_chunks = await backend.retrieve(
-            hint="TCP three-way handshake",
-            path="rfc793-tcp.md",
-            scope=authorized_scope,
-            k=3,
-        )
-        assert len(auth_chunks) > 0
+        await asyncio.wait_for(started.wait(), timeout=1)
+        # This coroutine can still run while the synchronous HTTP embedder is busy.
+        await asyncio.sleep(0)
+        assert not task.done()
     finally:
-        await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_pgvector_scout_core_rag_fetch_live_address() -> None:
-    backend = PgVectorRlsBackend(embedder=LiteLLMEmbedder(allow_mock=True))
-    try:
-        address = Address(
-            path="rfc793-tcp.md",
-            hint="TCP three-way handshake sliding window flow control",
-            loc="Section Key Specifications",
-        )
-        scope = Scope(roles=frozenset(["all"]))
-        result = await rag_fetch(backend, address, scope=scope, k=3)
-
-        assert result.status == FetchStatus.OK
-        assert len(result.context) > 0
-        assert len(result.citations) > 0
-        assert "rfc793-tcp.md" in result.citations[0].file_path
-        assert "rfc793-tcp.md" in result.context[0].file_path
-    finally:
-        await backend.close()
+        release.set()
+    assert await task == []

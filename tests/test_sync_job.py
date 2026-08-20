@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-import io
-import json
+import urllib.error
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
+from scout.ingest import DEFAULT_ACL_FILENAME
 from scout.sync_job import (
     HttpRagIndexer,
     IndexOutcome,
     PgVectorDirectIndexer,
     RagIndexer,
+    SyncFailure,
+    _async_main,
+    _is_transient,
     sync_once,
     watch,
 )
@@ -25,12 +30,35 @@ def test_pgvector_direct_indexer_is_a_rag_indexer() -> None:
     assert isinstance(PgVectorDirectIndexer(), RagIndexer)
 
 
-async def test_pgvector_direct_indexer_runs_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_http_4xx_is_permanent_but_5xx_is_transient() -> None:
+    from scout.chunker import EmbeddingError
+
+    def wrapped(code: int) -> EmbeddingError:
+        error = urllib.error.HTTPError(
+            url="https://gateway.invalid/embeddings",
+            code=code,
+            msg="synthetic",
+            hdrs=Message(),
+            fp=None,
+        )
+        try:
+            raise EmbeddingError("redacted") from error
+        except EmbeddingError as exc:
+            return exc
+
+    assert not _is_transient(wrapped(401))
+    assert not _is_transient(wrapped(422))
+    assert _is_transient(wrapped(503))
+
+
+async def test_pgvector_direct_indexer_runs_ingest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     calls: list[dict[str, Any]] = []
 
     async def fake_ingest(
         dir_path: Path,
-        allowed_depts: list[str],
+        acl: Any,
         dry_run: bool = False,
         embedder: Any = None,
         **kwargs: Any,
@@ -38,23 +66,47 @@ async def test_pgvector_direct_indexer_runs_ingest(monkeypatch: pytest.MonkeyPat
         calls.append(
             {
                 "dir_path": dir_path,
-                "allowed_depts": allowed_depts,
+                "acl": acl,
                 "dry_run": dry_run,
                 "embedder": embedder,
             }
         )
         return [{"status": "ingested_ok", "source_uri": "raw/test.md"}]
 
-
     monkeypatch.setattr("scout.ingest.ingest_directory", fake_ingest)
-    indexer = PgVectorDirectIndexer(raw_dir=Path("raw/test"), allowed_depts=("redteam", "all"))
+
+    # The indexer carries no department of its own; it resolves one from the
+    # ACL map beside the corpus (audit M1 — the old hardcoded ("all",) default).
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / DEFAULT_ACL_FILENAME).write_text(
+        'version: 1\nrules:\n  - path: "reports/**"\n    departments: [redteam]\n',
+        encoding="utf-8",
+    )
+
+    indexer = PgVectorDirectIndexer(raw_dir=raw_dir)
     outcome = await indexer.index()
 
     assert outcome.ok is True
     assert outcome.status == "ingested_1_files"
     assert len(calls) == 1
-    assert calls[0]["dir_path"] == Path("raw/test")
-    assert calls[0]["allowed_depts"] == ["redteam", "all"]
+    assert calls[0]["dir_path"] == raw_dir
+    assert calls[0]["acl"].departments_for(raw_dir / "reports" / "x.md") == ["redteam"]
+    # a file the map does not cover resolves to None, never to `all`
+    assert calls[0]["acl"].departments_for(raw_dir / "unmapped" / "y.md") is None
+
+
+async def test_pgvector_direct_indexer_publishes_nothing_without_a_readable_acl(
+    tmp_path: Path,
+) -> None:
+    """A missing policy must stop the ingest, never fall back to `all` (M1)."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()  # deliberately no .acl.yaml
+
+    outcome = await PgVectorDirectIndexer(raw_dir=raw_dir).index()
+
+    assert outcome.ok is False
+    assert outcome.status == "error:AclPolicyError"
 
 
 # ── fakes ─────────────────────────────────────────────────────────────────
@@ -84,44 +136,38 @@ def test_fake_indexer_is_a_rag_indexer() -> None:
 
 # ── HttpRagIndexer (wire) ─────────────────────────────────────────────────
 @pytest.fixture
-def patched_urlopen(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Patch urllib.request.urlopen to capture the request and return a body."""
+def http_transport() -> tuple[dict[str, Any], httpx.MockTransport]:
     seen: dict[str, Any] = {"status": "indexed", "raw_dir": "/data/raw"}
 
-    class _CM:
-        def __enter__(self) -> io.BytesIO:
-            return io.BytesIO(
-                json.dumps({"status": seen["status"], "raw_dir": "/data/raw"}).encode()
-            )
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        return httpx.Response(
+            200,
+            json={"status": seen["status"], "raw_dir": "/data/raw"},
+        )
 
-        def __exit__(self, *a: object) -> None:
-            return None
-
-    def fake_urlopen(req: Any, timeout: float | None = None) -> _CM:
-        seen["url"] = req.full_url
-        seen["method"] = req.get_method()
-        seen["timeout"] = timeout
-        return _CM()
-
-    monkeypatch.setattr("scout.sync_job.urllib.request.urlopen", fake_urlopen)
-    return seen
+    return seen, httpx.MockTransport(handler)
 
 
 async def test_http_indexer_posts_to_index_and_reports_ok(
-    patched_urlopen: dict[str, Any],
+    http_transport: tuple[dict[str, Any], httpx.MockTransport],
 ) -> None:
-    outcome = await HttpRagIndexer(base_url="http://rag:8000", timeout=5.0).index()
+    seen, transport = http_transport
+    outcome = await HttpRagIndexer(
+        base_url="http://rag:8000", timeout=5.0, transport=transport
+    ).index()
     assert outcome == IndexOutcome(ok=True, status="indexed")
-    assert patched_urlopen["url"].endswith("/index")
-    assert patched_urlopen["method"] == "POST"
-    assert patched_urlopen["timeout"] == 5.0
+    assert seen["url"].endswith("/index")
+    assert seen["method"] == "POST"
 
 
 async def test_http_indexer_reports_not_ok_on_unexpected_status(
-    patched_urlopen: dict[str, Any],
+    http_transport: tuple[dict[str, Any], httpx.MockTransport],
 ) -> None:
-    patched_urlopen["status"] = "error"
-    outcome = await HttpRagIndexer().index()
+    seen, transport = http_transport
+    seen["status"] = "error"
+    outcome = await HttpRagIndexer(transport=transport).index()
     assert outcome.ok is False and outcome.status == "error"
 
 
@@ -155,6 +201,42 @@ async def test_sync_once_without_regen_is_fine() -> None:
     indexer = FakeIndexer()
     out = await sync_once(indexer)
     assert out.ok is True and indexer.calls == 1
+
+
+async def test_sync_once_retries_only_retryable_failures() -> None:
+    outcomes = iter(
+        [
+            IndexOutcome(False, "network", retryable=True),
+            IndexOutcome(False, "network", retryable=True),
+            IndexOutcome(True, "indexed"),
+        ]
+    )
+
+    @dataclass
+    class SequenceIndexer:
+        calls: int = 0
+
+        async def index(self) -> IndexOutcome:
+            self.calls += 1
+            return next(outcomes)
+
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    indexer = SequenceIndexer()
+    result = await sync_once(indexer, base_delay=0.5, sleep=fake_sleep)
+    assert result.ok
+    assert indexer.calls == 3
+    assert delays == [0.5, 1.0]
+
+
+async def test_sync_once_does_not_retry_permanent_failure() -> None:
+    indexer = FakeIndexer(IndexOutcome(False, "invalid", retryable=False))
+    result = await sync_once(indexer)
+    assert not result.ok
+    assert indexer.calls == 1
 
 
 # ── watch: one reindex per change batch ───────────────────────────────────
@@ -227,11 +309,16 @@ async def test_watch_initial_sync_with_empty_stream() -> None:
     assert indexer.calls == 1
 
 
+async def test_watch_raises_after_failed_batch() -> None:
+    indexer = FakeIndexer(IndexOutcome(False, "database", retryable=False))
+    with pytest.raises(SyncFailure, match="watched"):
+        await watch(indexer, changes=_batches(1))
+
+
 async def test_async_main_executes_cold_start_sync(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    from scout.sync_job import _async_main
-
     order: list[str] = []
 
     async def fake_sync_once(indexer: Any, *, regen: Any = None) -> IndexOutcome:
@@ -254,7 +341,35 @@ async def test_async_main_executes_cold_start_sync(
     monkeypatch.setattr("scout.sync_job.watch", fake_watch)
 
     indexer = FakeIndexer()
-    await _async_main(indexer, Path("raw"))
+    await _async_main(indexer, Path("raw"), tmp_path / "ready")
 
     assert order == ["sync_once", "watch(initial_sync=False)"]
 
+
+async def test_async_main_clears_readiness_on_cold_start_failure(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "ready"
+    marker.write_text("stale", encoding="utf-8")
+    indexer = FakeIndexer(IndexOutcome(False, "invalid", retryable=False))
+    with pytest.raises(SystemExit) as caught:
+        await _async_main(indexer, tmp_path, marker)
+    assert caught.value.code == 1
+    assert not marker.exists()
+
+
+async def test_async_main_clears_readiness_on_watched_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "ready"
+
+    async def failing_watch(*args: object, **kwargs: object) -> int:
+        assert marker.exists()
+        raise SyncFailure("watched synchronization failed")
+
+    monkeypatch.setattr("scout.sync_job.watch", failing_watch)
+    with pytest.raises(SystemExit) as caught:
+        await _async_main(FakeIndexer(), tmp_path, marker)
+    assert caught.value.code == 1
+    assert not marker.exists()

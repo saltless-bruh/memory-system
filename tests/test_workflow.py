@@ -143,8 +143,9 @@ async def test_descend_with_no_sources_is_no_source() -> None:
 
 async def test_scope_threaded_through() -> None:
     inner = _rag_with_chunk("x")
-    await answer_query(_wiki(), inner, "q", need_rag=True, scope=Scope(team="rt"))
-    assert inner.record_scope == Scope(team="rt")
+    scope = Scope(departments=frozenset({"redteam"}))
+    await answer_query(_wiki(), inner, "q", need_rag=True, scope=scope)
+    assert inner.record_scope == scope
 
 
 # ── T-3.5: concurrency (R-5.3) ────────────────────────────────────────────

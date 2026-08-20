@@ -25,68 +25,87 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # PR path: heal drift on the analyst's PR branch (bot commit -> human review)
+  # PR path: trusted base code treats the PR checkout only as untrusted data.
+  # No Python, dependency metadata, workflow, action, or shell file from the PR
+  # checkout is ever executed on this secret-bearing self-hosted runner.
   # ---------------------------------------------------------------------------
   pr-heal:
-    if: github.event_name == 'pull_request' && !contains(github.event.head_commit.message, '[skip ci]')
+    if: github.event_name == 'pull_request'
     runs-on: self-hosted
     env:
       HEALER_BACKEND: pgvector
       POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'postgres' }}
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ${{ vars.POSTGRES_DB || 'snp_rag' }}
-      POSTGRES_USER: ${{ vars.POSTGRES_USER || 'postgres' }}
-      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres_master_secret' }}
+      POSTGRES_QUERY_USER: rag_app_role
+      POSTGRES_QUERY_PASSWORD: ${{ secrets.POSTGRES_QUERY_PASSWORD }}
       LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'http://litellm:4000/v1' }}
       LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://internal-telemetry:4317"
     steps:
-      - name: Checkout PR branch
+      - name: Checkout immutable trusted base code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact untrusted PR objects without executing them
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.BOT_TOKEN }}
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-source
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install uv and dependencies
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync
+      - name: Install trusted base dependencies
+        working-directory: trusted
+        run: uv sync --frozen --extra dev
 
-      - name: Security vulnerability audit (pip-audit)
-        run: uv run --with pip-audit pip-audit
+      - name: Validate and materialize wiki-only PR data
+        working-directory: trusted
+        run: >-
+          uv run python scripts/materialize_pr_wiki.py import
+          --source ../pr-source
+          --destination .
+          --base-sha ${{ github.event.pull_request.base.sha }}
+          --head-sha ${{ github.event.pull_request.head.sha }}
 
-      - name: Verify addresses
-        run: |
-          if ! uv run python scripts/verify_addresses.py; then
-            echo "DRIFT_DETECTED=true" >> "$GITHUB_ENV"
-          fi
+      - name: Create isolated trusted validation branch
+        working-directory: trusted
+        run: git switch -c "trusted/pr-${{ github.run_id }}"
 
-      - name: Heal (CI mode - applies to this PR branch, no commit)
-        if: env.DRIFT_DETECTED == 'true'
-        run: uv run python scout/healer.py --ci
+      - name: Verify, heal once, and close the loop
+        working-directory: trusted
+        run: uv run python scripts/ci_address_gate.py --mode pr
 
-      - name: Post-heal address verification gate
-        if: env.DRIFT_DETECTED == 'true'
-        run: uv run python scripts/verify_addresses.py
-
-      - name: Lint gate (a broken heal fails CI - nothing gets pushed)
-        if: env.DRIFT_DETECTED == 'true'
-        run: uv run python scripts/gen_index.py --check
+      - name: Export verified Markdown bytes without copying executable files
+        working-directory: trusted
+        run: >-
+          uv run python scripts/materialize_pr_wiki.py export
+          --source .
+          --destination ../pr-source
 
       - name: Commit and push bot fix (single commit to the PR branch)
-        if: env.DRIFT_DETECTED == 'true'
+        working-directory: pr-source
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
         run: |
           git config user.name  "SNP Vault Healer Bot"
           git config user.email "bot@snp-memory.local"
-          git add wiki/
+          git add -- wiki/
           if git diff --cached --quiet; then
             echo "Healer produced no changes to commit."
           else
             git commit -m "bot: auto-heal drifted RAG citation(s) [skip ci]"
-            git push origin "HEAD:${{ github.head_ref }}"
+            git push origin "HEAD:${PR_HEAD_REF}"
           fi
 
   # ---------------------------------------------------------------------------
@@ -100,8 +119,8 @@ jobs:
       POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'postgres' }}
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ${{ vars.POSTGRES_DB || 'snp_rag' }}
-      POSTGRES_USER: ${{ vars.POSTGRES_USER || 'postgres' }}
-      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres_master_secret' }}
+      POSTGRES_QUERY_USER: rag_app_role
+      POSTGRES_QUERY_PASSWORD: ${{ secrets.POSTGRES_QUERY_PASSWORD }}
       LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'http://litellm:4000/v1' }}
       LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://internal-telemetry:4317"
@@ -120,7 +139,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install uv and dependencies
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync --extra dev
 
       - name: Security vulnerability audit (pip-audit)
         run: uv run --with pip-audit pip-audit
@@ -130,5 +149,26 @@ jobs:
           git config user.name  "SNP Vault Healer Bot"
           git config user.email "bot@snp-memory.local"
 
-      - name: Sweep and open a heal PR (default mode; healer branches + pushes)
-        run: uv run python scout/healer.py --push --base main
+      - name: Choose scheduled heal branch
+        run: echo "HEAL_BRANCH=heal/addresses-${{ github.run_id }}" >> "$GITHUB_ENV"
+
+      - name: Verify, heal, reverify, commit, and push branch
+        run: uv run python scripts/ci_address_gate.py --mode scheduled --branch "$HEAL_BRANCH"
+
+      - name: Detect whether a heal branch was created
+        run: |
+          if git show-ref --verify --quiet "refs/heads/$HEAL_BRANCH"; then
+            echo "HEAL_CREATED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Open human-reviewed heal pull request
+        if: env.HEAL_CREATED == 'true'
+        env:
+          GITEA_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          payload=$(python -c 'import json,os; print(json.dumps({"base":"main","head":os.environ["HEAL_BRANCH"],"title":"heal: repair verified RAG addresses","body":"Automated scoped address repair. Human review and merge are required."}))')
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: token $GITEA_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/pulls"

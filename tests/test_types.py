@@ -47,9 +47,21 @@ def test_core_dataclasses_are_frozen() -> None:
 
 
 def test_scope_defaults_immutable() -> None:
-    s = Scope()
-    assert s.roles == frozenset()
-    assert s.team is None and s.clearance is None
+    s = Scope(departments=frozenset({"infra"}))
+    assert s.departments == frozenset({"infra"})
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        s.departments = frozenset({"redteam"})  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "departments",
+    [frozenset(), frozenset({"all"}), frozenset({"unknown"})],
+)
+def test_scope_rejects_empty_wildcard_or_unknown_departments(
+    departments: frozenset[str],
+) -> None:
+    with pytest.raises(ValueError):
+        Scope(departments=departments)
 
 
 def test_ragchunk_meta_defaults_independent() -> None:

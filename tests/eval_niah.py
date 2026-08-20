@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from scout.backends.pgvector import PgVectorRlsBackend
+from scout.chunker import LiteLLMBatchEmbedder
 from scout.ingest import get_pg_connection, ingest_document
 from scout.types import Scope
 
@@ -45,9 +46,7 @@ async def run_niah_depth(depth_pct: int) -> bool:
         f.write(content)
         temp_path = Path(f.name)
 
-    from scout.chunker import LiteLLMBatchEmbedder
-
-    embedder = LiteLLMBatchEmbedder(allow_mock=True)
+    embedder = LiteLLMBatchEmbedder()
     backend = PgVectorRlsBackend(embedder=embedder)
     conn = await get_pg_connection()
     doc_id: str | None = None
@@ -68,7 +67,7 @@ async def run_niah_depth(depth_pct: int) -> bool:
         chunks = await backend.retrieve(
             hint=query,
             path=ingest_res.get("source_uri"),
-            scope=Scope(roles=frozenset(["all"])),
+            scope=Scope(departments=frozenset({"infra"})),
             k=3,
         )
 
@@ -97,7 +96,8 @@ async def run_niah() -> bool:
     for d in depths:
         passed = await run_niah_depth(d)
         status = "✅ PASS" if passed else "❌ FAIL"
-        print(f"[{status}] Depth {d}%: Needle retrieved successfully.")
+        outcome = "needle retrieved" if passed else "needle NOT retrieved"
+        print(f"[{status}] Depth {d}%: {outcome}.")
         if not passed:
             all_passed = False
 

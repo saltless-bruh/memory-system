@@ -1,47 +1,28 @@
 #!/usr/bin/env python3
-"""propose_page.py — PR-first write path for the wiki (T-1.5 → R-7.3, R-6.4).
-
-basic-memory's `write_note` (and a human editing in an IDE) only writes
-Markdown files into the working tree. It has no git awareness. This script
-is the bridge that enforces the project's **PR-first** rule: an
-agent/automated change must land on a **branch + Pull Request**, never
-directly on the main branch, and must pass lint before it is proposed.
-
-Flow:
-  1. Refuse to proceed if there are no wiki changes, or if we would be
-     committing onto the protected main branch.
-  2. Lint the vault (scripts/gen_index.py --check) — a broken page never
-     becomes a PR (R-6.5).
-  3. Create a branch `wiki/<slug>-<UTC>`, commit only `wiki/` changes.
-  4. Push and print the PR-create command (Gitea API or `gh`). We STOP
-     there — a human reviews and merges (no auto-merge, R-6.4).
-
-Humans have two other paths (no script needed): technical members edit via
-Git directly (R-7.1); non-Git members edit via the Gitea Web UI, which
-creates a commit (R-7.2). This script is specifically the agent/automation
-path.
-
-Usage:
-    python scripts/propose_page.py --title "Kerberoasting"      # real run
-    python scripts/propose_page.py --dry-run                    # show plan
-    python scripts/propose_page.py --title X --remote origin --push
-"""
+"""Create a PR-first commit containing one named page and generated companions."""
 
 from __future__ import annotations
 
 import argparse
 import subprocess
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROTECTED_BRANCHES = {"main", "master"}
+GENERATED_COMPANIONS = ("wiki/index.md", "wiki/log.md")
 
 
 def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=check
+        ["git", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=60,
     )
 
 
@@ -49,110 +30,196 @@ def current_branch() -> str:
     return git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
 
-def wiki_changes() -> list[str]:
-    """Paths under wiki/ that are modified/added/untracked."""
-    out = git("status", "--porcelain", "--", "wiki").stdout.splitlines()
-    return [ln[3:].strip() for ln in out if ln.strip()]
+def _normalize_page(raw_page: str) -> str:
+    supplied = Path(raw_page)
+    if supplied.is_absolute() or not supplied.parts or supplied.parts[0] != "wiki":
+        raise ValueError("--page must be a repository-relative path beneath wiki/")
+    root = REPO_ROOT.resolve(strict=False)
+    wiki = (root / "wiki").resolve(strict=False)
+    resolved = (root / supplied).resolve(strict=False)
+    try:
+        resolved.relative_to(wiki)
+    except ValueError as exc:
+        raise ValueError("--page must resolve beneath wiki/") from exc
+    if resolved.suffix.lower() != ".md" or resolved.name in {"index.md", "log.md"}:
+        raise ValueError("--page must name a content Markdown page")
+    if not resolved.is_file():
+        raise ValueError("--page does not exist")
+    return resolved.relative_to(root).as_posix()
+
+
+def _porcelain_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    for line in output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        paths.append(path.strip('"'))
+    return paths
+
+
+def wiki_changes(paths: Sequence[str] | None = None) -> list[str]:
+    """Return changed wiki paths, optionally restricted to an exact path set."""
+    pathspec = tuple(paths) if paths is not None else ("wiki",)
+    output = git(
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        *pathspec,
+    ).stdout
+    return _porcelain_paths(output)
+
+
+def _staged_paths() -> set[str]:
+    output = git("diff", "--cached", "--name-only").stdout
+    return {line.strip() for line in output.splitlines() if line.strip()}
 
 
 def slugify(title: str) -> str:
-    keep = "".join(c if c.isalnum() else "-" for c in title.lower())
+    keep = "".join(
+        character if character.isalnum() else "-" for character in title.lower()
+    )
     return "-".join(filter(None, keep.split("-")))[:40] or "page"
 
 
 def run_lint() -> bool:
-    """Gate the PR on the vault linter (T-1.2)."""
-    r = subprocess.run(
+    result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "gen_index.py"), "--check"],
         cwd=REPO_ROOT,
+        check=False,
+        timeout=60,
     )
-    return r.returncode == 0
+    return result.returncode == 0
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--title", default="", help="page title (names the branch)")
-    ap.add_argument("--remote", default="origin")
-    ap.add_argument(
-        "--push",
-        action="store_true",
-        help="push the branch (default: local branch only)",
+def run_verify() -> bool:
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "verify_addresses.py")],
+        cwd=REPO_ROOT,
+        check=False,
+        timeout=300,
     )
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--base", default="main", help="PR target branch")
-    args = ap.parse_args()
+    return result.returncode == 0
 
-    changes = wiki_changes()
-    if not changes:
+
+def _rollback_created_branch(
+    *, base_branch: str, proposal_branch: str, selected: Sequence[str]
+) -> bool:
+    """Restore selected changes to the original branch after a local failure."""
+    reset = git("reset", "--mixed", "HEAD", "--", *selected, check=False)
+    if reset.returncode != 0:
+        return False
+    switched = git("switch", base_branch, check=False)
+    if switched.returncode != 0:
+        return False
+    deleted = git("branch", "-D", proposal_branch, check=False)
+    return deleted.returncode == 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--page", required=True, help="exact wiki page to propose")
+    parser.add_argument("--title", default="", help="page title used in branch/commit")
+    parser.add_argument("--remote", default="origin")
+    parser.add_argument("--push", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--base", default="main", help="PR target branch")
+    args = parser.parse_args(argv)
+
+    try:
+        page = _normalize_page(args.page)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    allowed = (page, *GENERATED_COMPANIONS)
+    changes = wiki_changes(allowed)
+    if page not in changes:
+        print(f"Named page has no working-tree change: {page}")
+        return 1
+    selected = tuple(path for path in allowed if path in changes)
+    staged = _staged_paths()
+    if staged:
         print(
-            "No wiki/ changes to propose. Edit a page first "
-            "(write_note or an IDE edit), then re-run."
+            "Refusing to propose while staged paths exist: "
+            + ", ".join(sorted(staged))
         )
         return 1
 
+    base_now = current_branch()
     branch = (
-        f"wiki/{slugify(args.title or Path(changes[0]).stem)}-"
+        f"wiki/{slugify(args.title or Path(page).stem)}-"
         f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     )
-    base_now = current_branch()
-
     print(f"Base branch:  {base_now}")
     print(f"New branch:   {branch}")
-    print(f"Wiki changes: {len(changes)}")
-    for c in changes:
-        print(f"  - {c}")
+    print("Proposal paths:")
+    for changed in selected:
+        print(f"  - {changed}")
 
-    # Safety: never commit the change directly onto a protected branch —
-    # that is the whole point of PR-first.
-    if base_now in PROTECTED_BRANCHES:
+    if args.dry_run:
         print(
-            f"\nOn protected branch '{base_now}': will branch off it "
-            f"(never commit the change here)."
+            "[dry-run] Would lint, verify, create a branch, and commit only these paths."
         )
-
-    print("\n[1/3] Lint (gen_index.py --check) ...")
-    if args.dry_run:
-        print("      (dry-run: skipped)")
-    elif not run_lint():
-        print("LINT FAILED — not proposing. Fix the page and re-run (R-6.5).")
-        return 1
-
-    if args.dry_run:
-        print("\n[dry-run] Would run:")
-        print(f"  git checkout -b {branch}")
-        print("  git add wiki/")
-        print(f"  git commit -m 'wiki: propose {args.title or branch}'")
-        if args.push:
-            print(f"  git push -u {args.remote} {branch}")
-        print("  → then open a PR (STOP; human reviews & merges)")
         return 0
 
-    print("\n[2/3] Branch + commit ...")
-    git("checkout", "-b", branch)
-    git("add", "--", "wiki")
-    git("commit", "-m", f"wiki: propose {args.title or branch}", "--no-verify")
-    print(f"      committed to {branch}")
+    if not run_lint():
+        print("LINT FAILED — working tree and branch are unchanged.")
+        return 1
+    if not run_verify():
+        print("ADDRESS VERIFICATION FAILED — working tree and branch are unchanged.")
+        return 1
 
-    print("\n[3/3] PR ...")
+    branch_created = False
+    try:
+        git("checkout", "-b", branch)
+        branch_created = True
+        git("add", "--", *selected)
+        git(
+            "commit",
+            "--only",
+            "-m",
+            f"wiki: propose {args.title or Path(page).stem}",
+            "--no-verify",
+            "--",
+            *selected,
+        )
+    except (OSError, subprocess.SubprocessError):
+        if branch_created:
+            restored = _rollback_created_branch(
+                base_branch=base_now,
+                proposal_branch=branch,
+                selected=selected,
+            )
+            if restored:
+                print("PROPOSAL FAILED — restored the original branch and unstaged changes.")
+            else:
+                print(
+                    "PROPOSAL FAILED — automatic recovery was incomplete; "
+                    f"inspect local branch {branch}."
+                )
+        else:
+            print("PROPOSAL FAILED — branch creation did not complete.")
+        return 1
+    print(f"Committed exact proposal scope to {branch}")
+
     if args.push:
-        git("push", "-u", args.remote, branch)
-        print(f"      pushed to {args.remote}/{branch}")
-        print("\nOpen the PR (do NOT auto-merge — R-6.4):")
+        try:
+            git("push", "-u", args.remote, branch)
+        except (OSError, subprocess.SubprocessError):
+            print(
+                "PUSH FAILED OR WAS AMBIGUOUS — preserved the verified local "
+                f"commit on {branch}; inspect the remote, then retry explicitly."
+            )
+            return 1
+        print("Open a PR for human review; do not auto-merge:")
         print(f"  gh pr create --base {args.base} --head {branch} --fill")
-        print(
-            f"  # or Gitea: POST /api/v1/repos/<owner>/<repo>/pulls "
-            f"(head={branch}, base={args.base})"
-        )
     else:
-        print("      local branch only. To propose:")
-        print(
-            f"        git push -u {args.remote} {branch}  &&  gh pr create "
-            f"--base {args.base} --head {branch} --fill"
-        )
-    print(
-        "\nDONE. A human reviews and merges. On merge, run gen_index.py + "
-        "verify_addresses.py (R-6.5)."
-    )
+        print(f"Push with: git push -u {args.remote} {branch}")
+        print(f"Then open a PR against {args.base}; a human reviews and merges.")
     return 0
 
 

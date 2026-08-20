@@ -91,7 +91,7 @@ async def test_rag_fetch_prefers_chunk_loc_over_address_loc(
 
 async def test_rag_fetch_threads_scope_to_backend(backend: FakeRagBackend) -> None:
     """RBAC hook (R-4.8): scope must reach the backend even though V1 ignores it."""
-    scope = Scope(roles=frozenset({"redteam"}), team="redteam")
+    scope = Scope(departments=frozenset({"redteam"}))
     addr = Address(path="raw/reports/acme.pdf", hint="kerberoasting")
     await rag_fetch(backend, addr, scope=scope)
     assert backend.record_scope == scope

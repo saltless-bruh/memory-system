@@ -1,0 +1,24 @@
+title = "SNP Memory System secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "snp-openai-compatible-token"
+description = "OpenAI-compatible token with a 20-character or longer suffix"
+regex = '''\bsk-[A-Za-z0-9_-]{20,}\b'''
+
+# Placeholder exceptions require both an approved example path and a visibly fake
+# value. There are no fixture, password-name, or repository-wide exemptions.
+[allowlist]
+description = "Documented example values in example configuration only"
+condition = "AND"
+regexTarget = "match"
+paths = [
+    '''^\.env\.example$''',
+    '''^docker-compose\.yml$''',
+]
+regexes = [
+    '''^sk-local-dev-[a-z0-9-]+$''',
+    '''^sk-placeholder-[a-z0-9-]+$''',
+]

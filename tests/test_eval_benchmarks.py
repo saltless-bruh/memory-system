@@ -7,6 +7,8 @@ import pytest
 from tests.eval_hard_negatives import run_hard_negatives
 from tests.eval_niah import run_niah_depth
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_benchmark_niah_middle_depth() -> None:

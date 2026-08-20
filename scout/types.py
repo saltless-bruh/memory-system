@@ -1,9 +1,9 @@
 """Core types and the RAG-backend interface for Scout (R-4, R-4.8).
 
-This module is the **stable contract** that makes the RAG engine a swappable
-slot (design.md §2.3). `scout.core` and the agent-facing layer depend only on
-what is defined here — never on RAG-Anything's specific API. Each RAG engine
-is an adapter under `scout.backends` implementing `RagBackend`.
+This module is the **stable contract** between Scout core and its retrieval
+backend. `scout.core` and the agent-facing layer depend only on what is
+defined here. Production retrieval uses the PostgreSQL + pgvector adapter;
+tests can supply an offline adapter implementing `RagBackend`.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
+
+from scout.policy import PolicyValidationError, validate_caller_departments
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,19 +33,43 @@ class Address:
 
 
 @dataclass(frozen=True, slots=True)
-class Scope:
-    """Caller access context — the RBAC hook (R-4.8).
+class ScopedAddress:
+    """One page source with stable page/source identity and authorization scope."""
 
-    Present in the interface from V1 but **not enforced** by the V1 backend
-    (RAG-Anything cannot do row-level RBAC). A V2 backend (R2R / pgvector+RLS)
-    reads this to restrict which chunks the caller may retrieve. Carrying it
-    from day one means V2 enforces something already flowing through, rather
-    than a signature change everywhere. See Suggestion_V2_RAG_Replacement.md.
+    page_path: str
+    page_slug: str
+    source_index: int
+    department: str
+    address: Address
+
+    def __post_init__(self) -> None:
+        if not self.page_path or not self.page_slug:
+            raise ValueError("scoped address requires page path and slug")
+        if self.source_index < 0:
+            raise ValueError("source index must be nonnegative")
+        try:
+            validated = validate_caller_departments([self.department])
+        except PolicyValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        object.__setattr__(self, "department", next(iter(validated)))
+
+
+@dataclass(frozen=True, slots=True)
+class Scope:
+    """Authenticated caller departments passed to the RLS backend.
+
+    Caller scopes are always nonempty and contain only canonical departments.
+    The document ACL value ``all`` is never caller authority.
     """
 
-    roles: frozenset[str] = frozenset()
-    team: str | None = None
-    clearance: str | None = None
+    departments: frozenset[str]
+
+    def __post_init__(self) -> None:
+        try:
+            validated = validate_caller_departments(self.departments)
+        except PolicyValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        object.__setattr__(self, "departments", validated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +146,8 @@ class FetchResult:
 class RagBackend(Protocol):
     """The swappable RAG engine contract (R-4.8).
 
-    Every RAG engine — RAG-Anything (V1), R2R or pgvector+RLS (V2) — is an
-    adapter implementing this one async method. Scout core depends on this
-    Protocol, not on any engine's API, so swapping the engine is "add an
-    adapter", not a rewrite.
+    Every retrieval backend is an adapter implementing this one async method.
+    Scout core depends on this Protocol, not on a vendor-specific API.
 
     Implementations MUST return **verbatim** passages (the equivalent of
     ``only_need_context=True``) and MUST NOT synthesize answers.
@@ -141,11 +165,9 @@ class RagBackend(Protocol):
 
         Args:
             hint: The phrase to match (from an `Address`).
-            path: Optional source-file constraint. A backend that can pre-filter
-                (R2R/pgvector) should; RAG-Anything cannot, so Scout post-filters
-                regardless (R-4.3).
-            scope: Caller RBAC context. V1 backends ignore it; V2 backends
-                enforce it (R-4.8).
+            path: Optional source-file constraint. Capable backends should
+                pre-filter; Scout still post-filters every result (R-4.3).
+            scope: Authenticated caller departments for backend RLS enforcement.
             k: Max passages to return.
 
         Returns:

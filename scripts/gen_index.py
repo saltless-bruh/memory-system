@@ -32,7 +32,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -90,7 +92,7 @@ def collect_lint(pages: list[vault.Page]) -> vault.LintResult:
 
 def render_index(pages: list[vault.Page]) -> str:
     """Deterministically render wiki/index.md from page summaries."""
-    content_pages = [p for p in pages if p.slug not in {"index", "archive", "log"}]
+    content_pages = pages
 
     by_type: dict[str, list[vault.Page]] = defaultdict(list)
     for p in content_pages:
@@ -130,6 +132,35 @@ def render_index(pages: list[vault.Page]) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _atomic_write_index(content: str) -> None:
+    """Durably replace the generated index without exposing partial bytes."""
+    INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{INDEX_PATH.name}.",
+            suffix=".tmp",
+            dir=INDEX_PATH.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, INDEX_PATH)
+        temporary = None
+        directory_fd = os.open(INDEX_PATH.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def main() -> int:
@@ -200,7 +231,7 @@ def main() -> int:
         )
     else:
         try:
-            INDEX_PATH.write_text(new_index, encoding="utf-8")
+            _atomic_write_index(new_index)
             print(
                 f"\nwiki/index.md regenerated ({len(pages)} pages). "
                 f"{len(lint.warnings)} warning(s)."

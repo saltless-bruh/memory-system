@@ -15,14 +15,11 @@ built here is purely derived and rebuildable, never the source of truth.
 Embedding is behind an injected `Embedder` Protocol (mirrors
 `scout.types.RagBackend`'s swappable-adapter style, R-4.8). `FakeEmbedder`
 below is a deterministic, offline, dependency-free implementation used by
-tests. `LiteLLMEmbedder` is the production implementation: it wraps bge-m3
-via the LiteLLM chokepoint at ``http://localhost:4000`` (model tag
-``snp-embed`` -> ``ollama/bge-m3``, see `config/litellm/config.yaml`) — the
-SAME model used for RAG, chosen to unify Vietnamese recall between
-wiki-search and RAG (design.md §2.2, gate R-8.4.4). It is constructed and
-injected by the caller at runtime; this module makes no network call at
-import time (the request is built lazily inside `LiteLLMEmbedder.embed`), so
-importing and testing this module never requires network access.
+tests. `LiteLLMEmbedder` is the production implementation: it calls the
+OpenAI-compatible embedding route exposed by the LiteLLM cloud-provider
+gateway. It is constructed and injected by the caller at runtime; this module
+makes no network call at import time and closes every asynchronous HTTP client
+deterministically.
 
 Vault-reading is behind a small injectable seam: `ScoutDiyEngine.pages` is
 either a ready `Sequence[PageLike]` or a zero-arg callable returning one, so
@@ -33,8 +30,6 @@ is the convenience constructor that wires the real vault via
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import hashlib
 import json
 import math
@@ -43,8 +38,12 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 from typing import Protocol, runtime_checkable
 
+import httpx
+
+from scout.chunker import EmbeddingError
 from scout.core import normalize_path
 from scout.types import RagBackend
 
@@ -119,6 +118,21 @@ class PageLike(Protocol):
 PageSupplier = Sequence[PageLike] | Callable[[], Sequence[PageLike]]
 
 
+def _entities_text(value: object) -> str:
+    if isinstance(value, list):
+        return ",".join(str(entity) for entity in sorted(value, key=str))
+    return str(value)
+
+
+def _fts_fingerprint(page_id: str, title: str, summary: str, entities: str) -> str:
+    canonical = json.dumps(
+        [page_id, title, summary, entities],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class _VaultModule(Protocol):
     """The slice of `spikes._lib.vault` this module relies on.
 
@@ -166,96 +180,149 @@ class _IndexedPage:
     vector: tuple[float, ...]
 
 
-@dataclass(slots=True)
-class FakeEmbedder:
-    """Deterministic, offline `Embedder` for tests (token-hash bag-of-words).
-
-    Hashes each lowercased whitespace token into one of `dims` buckets with
-    `hashlib.sha1` (stable across runs and processes, unlike Python's salted
-    `hash()`) and accumulates term counts. Same text always yields the same
-    vector, with no model or network dependency — which is what lets cosine
-    ranking be tested fully offline.
-
-    Attributes:
-        dims: Vector width. Larger reduces hash collisions between distinct
-            tokens; the default is ample for small test corpora.
-    """
-
-    dims: int = 64
-
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """Hash-embed each text; text with no tokens yields an all-zero vector."""
-        return [self._embed_one(t) for t in texts]
-
-    def _embed_one(self, text: str) -> list[float]:
-        import hashlib
-
-        vec = [0.0] * self.dims
-        for token in text.lower().split():
-            digest = hashlib.sha1(token.encode("utf-8")).hexdigest()
-            idx = int(digest, 16) % self.dims
-            vec[idx] += 1.0
-        return vec
+def _required_litellm_api_key() -> str:
+    value = os.environ.get("LITELLM_MASTER_KEY", "").strip()
+    if not value:
+        raise ValueError("LITELLM_MASTER_KEY is required")
+    return value
 
 
 @dataclass(slots=True)
 class LiteLLMEmbedder:
-    """Production `Embedder`: bge-m3 via the LiteLLM chokepoint (R-8.1).
+    """Production embedder using LiteLLM's OpenAI-compatible cloud gateway.
 
     Wraps LiteLLM's OpenAI-compatible ``POST /v1/embeddings`` at
-    `base_url` (default ``http://localhost:4000``, see
-    `config/litellm/config.yaml`), routing through the `model` tag
-    (default ``snp-embed`` -> ``ollama/bge-m3`` on a local Ollama — no cloud
-    egress). Never constructed by the test suite; the HTTP request is built
-    only inside `embed`, at call time, so nothing here reaches the network
-    during import or collection.
+    `base_url`, routing through the configured cloud-provider `model` tag.
+    Standalone calls create and close one async client. The async context
+    manager reuses a client and closes it on exit.
 
     Attributes:
         base_url: LiteLLM base URL.
         model: LiteLLM `model_list[].model_name` tag to embed with.
-        api_key: LiteLLM master key (bearer auth); defaults from
-            the `LITELLM_MASTER_KEY` environment variable.
+        api_key: LiteLLM master key (bearer auth), required from
+            `LITELLM_MASTER_KEY` unless passed explicitly.
+        dim: Required vector width for every returned embedding.
         timeout: Per-request timeout in seconds.
     """
 
     base_url: str = "http://localhost:4000"
     model: str = "snp-embed"
-    api_key: str = field(
-        default_factory=lambda: os.environ.get(
-            "LITELLM_MASTER_KEY", "sk-local-dev-change-me"
-        )
-    )
+    api_key: str = field(default_factory=_required_litellm_api_key, repr=False)
+    dim: int = 1024
     timeout: float = 300.0
+    transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+    _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.base_url = self.base_url.rstrip("/")
+        if not self.base_url:
+            raise ValueError("LiteLLM base_url is required")
+        if not self.model.strip():
+            raise ValueError("LiteLLM embedding model is required")
+        if not self.api_key.strip():
+            raise ValueError("LITELLM_MASTER_KEY is required")
+        if self.dim < 1:
+            raise ValueError("LiteLLM embedding dimension must be positive")
+        if self.timeout <= 0:
+            raise ValueError("LiteLLM timeout must be positive")
+
+    def _new_client(self) -> httpx.AsyncClient:
+        timeout = httpx.Timeout(self.timeout, connect=min(10.0, self.timeout))
+        return httpx.AsyncClient(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=timeout,
+            transport=self.transport,
+        )
+
+    async def __aenter__(self) -> LiteLLMEmbedder:
+        if self._client is None:
+            self._client = self._new_client()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the reusable HTTP client; safe to call repeatedly."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def close(self) -> None:
+        """Compatibility alias for callers that consume a ``close`` hook."""
+        await self.aclose()
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """POST `texts` to LiteLLM `/v1/embeddings`; return vectors in order.
+        """POST texts asynchronously and return response vectors by index."""
+        if not texts:
+            return []
+        owned_client = self._client is None
+        client = self._client or self._new_client()
+        try:
+            try:
+                response = await client.post(
+                    "/v1/embeddings",
+                    json={"model": self.model, "input": list(texts)},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                raise EmbeddingError("LiteLLM embedding call failed") from exc
 
-        Runs the blocking HTTP call in a worker thread (`asyncio.to_thread`)
-        so it does not block the event loop.
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("data"), list
+            ):
+                raise EmbeddingError("malformed embedding response data")
+            data = payload["data"]
+            if len(data) != len(texts):
+                raise EmbeddingError("embedding batch cardinality mismatch")
 
-        Raises:
-            urllib.error.URLError: On a connection or HTTP-level failure.
-            KeyError: If the response payload is missing expected fields.
-        """
-        return await asyncio.to_thread(self._embed_sync, list(texts))
+            indexed: dict[int, list[float]] = {}
+            for item in data:
+                if not isinstance(item, dict):
+                    raise EmbeddingError("malformed embedding response item")
+                index = item.get("index")
+                raw_vector = item.get("embedding")
+                if isinstance(index, bool) or not isinstance(index, int):
+                    raise EmbeddingError("embedding response index must be an integer")
+                if index in indexed:
+                    raise EmbeddingError("embedding response contains a duplicate index")
+                if not isinstance(raw_vector, list):
+                    raise EmbeddingError("embedding response vector must be an array")
 
-    def _embed_sync(self, texts: list[str]) -> list[list[float]]:
-        import json
-        import urllib.request
+                vector: list[float] = []
+                for value in raw_vector:
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        raise EmbeddingError(
+                            "embedding response vector contains a non-numeric value"
+                        )
+                    try:
+                        number = float(value)
+                    except OverflowError as exc:
+                        raise EmbeddingError(
+                            "embedding response vector contains a non-finite value"
+                        ) from exc
+                    if not math.isfinite(number):
+                        raise EmbeddingError(
+                            "embedding response vector contains a non-finite value"
+                        )
+                    vector.append(number)
+                if len(vector) != self.dim:
+                    raise EmbeddingError("embedding response dimension mismatch")
+                indexed[index] = vector
 
-        body = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base_url}/v1/embeddings",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
-            payload = json.load(resp)
-        ranked = sorted(payload["data"], key=lambda d: d["index"])
-        return [item["embedding"] for item in ranked]
+            if set(indexed) != set(range(len(texts))):
+                raise EmbeddingError("embedding response indices do not match the request")
+            return [indexed[index] for index in range(len(texts))]
+        finally:
+            if owned_client:
+                await client.aclose()
 
 
 @dataclass(slots=True)
@@ -284,6 +351,34 @@ class ScoutDiyEngine:
     _index: list[_IndexedPage] | None = field(default=None, init=False, repr=False)
     _fts_conn: sqlite3.Connection | None = field(default=None, init=False, repr=False)
 
+    def __enter__(self) -> ScoutDiyEngine:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    async def __aenter__(self) -> ScoutDiyEngine:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the derived SQLite index; safe to call repeatedly."""
+        connection, self._fts_conn = self._fts_conn, None
+        if connection is not None:
+            connection.close()
+
     @classmethod
     def from_vault(
         cls,
@@ -305,6 +400,7 @@ class ScoutDiyEngine:
             A `ScoutDiyEngine` whose `pages` seam calls
             `scout.vault.load_pages` on first use.
         """
+
         def _load() -> Sequence[PageLike]:
             from typing import cast
 
@@ -329,15 +425,19 @@ class ScoutDiyEngine:
             return self._index
 
         search_db_path = self.cache_path.parent / "search.db"
-        if getattr(self, "_fts_conn", None) is None:
+        if self._fts_conn is None:
+            connection: sqlite3.Connection | None = None
             try:
                 self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-                self._fts_conn = sqlite3.connect(search_db_path)
-                self._fts_conn.execute(
+                connection = sqlite3.connect(search_db_path)
+                connection.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS fts_index USING fts5(page_id UNINDEXED, title, summary, entities);"
                 )
-                self._fts_conn.commit()
+                connection.commit()
+                self._fts_conn = connection
             except sqlite3.Error:
+                if connection is not None:
+                    connection.close()
                 self._fts_conn = None
 
         source = self.pages
@@ -358,12 +458,7 @@ class ScoutDiyEngine:
 
         for i, p in enumerate(pages):
             summary = str(p.frontmatter.get("summary", ""))
-            entities = p.frontmatter.get("entities", [])
-
-            if isinstance(entities, list):
-                entities_str = ",".join(str(e) for e in sorted(entities))
-            else:
-                entities_str = str(entities)
+            entities_str = _entities_text(p.frontmatter.get("entities", []))
 
             hash_input = f"{summary}::{entities_str}".encode()
             h = hashlib.sha256(hash_input).hexdigest()
@@ -383,27 +478,42 @@ class ScoutDiyEngine:
             with self.cache_path.open("w", encoding="utf-8") as f:
                 json.dump(cache_data, f)
 
-        # Synchronize and rebuild FTS index if search.db was missing/recreated
+        # FTS has its own content fingerprint. Vector reuse depends only on the
+        # routing text; FTS reconciliation also includes slug and title.
         if self._fts_conn is not None:
             try:
-                cursor = self._fts_conn.execute("SELECT page_id FROM fts_index")
-                existing_page_ids = {row[0] for row in cursor.fetchall()}
+                cursor = self._fts_conn.execute(
+                    "SELECT page_id, title, summary, entities FROM fts_index"
+                )
+                existing_records: dict[str, list[tuple[str, str, str, str]]] = {}
+                for row in cursor.fetchall():
+                    record = tuple(str(value) for value in row)
+                    if len(record) != 4:
+                        continue
+                    existing_records.setdefault(record[0], []).append(record)
             except sqlite3.Error:
-                existing_page_ids = set()
+                existing_records = {}
 
+            current_page_ids = {p.slug for p in pages}
+            deleted_ids = set(existing_records) - current_page_ids
             fts_updated = False
-            for p in pages:
-                if p.slug not in existing_page_ids or uncached_summaries:
+            try:
+                for del_id in deleted_ids:
+                    self._fts_conn.execute(
+                        "DELETE FROM fts_index WHERE page_id = ?", (del_id,)
+                    )
+                    fts_updated = True
+
+                for p in pages:
                     page_id = p.slug
                     title = str(p.frontmatter.get("title", ""))
                     summary_str = str(p.frontmatter.get("summary", ""))
-                    entities = p.frontmatter.get("entities", [])
-                    entities_str = (
-                        ",".join(str(e) for e in sorted(entities))
-                        if isinstance(entities, list)
-                        else str(entities)
-                    )
-                    try:
+                    entities_str = _entities_text(p.frontmatter.get("entities", []))
+                    desired = (page_id, title, summary_str, entities_str)
+                    stored = existing_records.get(page_id, [])
+                    if len(stored) != 1 or _fts_fingerprint(
+                        *stored[0]
+                    ) != _fts_fingerprint(*desired):
                         self._fts_conn.execute(
                             "DELETE FROM fts_index WHERE page_id = ?", (page_id,)
                         )
@@ -412,12 +522,11 @@ class ScoutDiyEngine:
                             (page_id, title, summary_str, entities_str),
                         )
                         fts_updated = True
-                    except sqlite3.Error:
-                        pass
 
-            if fts_updated:
-                with contextlib.suppress(sqlite3.Error):
+                if fts_updated:
                     self._fts_conn.commit()
+            except sqlite3.Error:
+                self._fts_conn.rollback()
 
         index = [
             _IndexedPage(

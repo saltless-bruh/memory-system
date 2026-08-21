@@ -25,10 +25,9 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from scout.cli.declarations import DECLARED
-from scout.cli.invoke import invoke
 from scout.cli.mcp_policy import DEFAULT_VERIFY_STAGE, VERIFY_TOOL, stages
 from scout.cli.mcp_policy import standalone_tools as _standalone_tools
-from scout.cli.mcp_result import to_tool_result
+from scout.cli.mcp_result import run_tool
 from scout.cli.registry import CommandSpec, Effect
 
 SERVER_NAME = "snpmemory"
@@ -87,7 +86,7 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
         detail: Annotated[bool, "Return every field instead of a summary."] = False,
     ) -> dict[str, Any]:
         spec = stage_specs[stage]
-        return to_tool_result(invoke(spec), detail=detail)
+        return run_tool(spec, detail=detail)
 
     standalone = _standalone_tools()
 
@@ -110,15 +109,13 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
         out: Annotated[str | None, "Write the plan here instead of returning it."] = None,
         detail: Annotated[bool, "Return every field instead of a summary."] = False,
     ) -> dict[str, Any]:
-        return to_tool_result(
-            invoke(
-                plan_spec,
-                path,
-                dept=dept,
-                category=category,
-                max_depth=max_depth,
-                out=out,
-            ),
+        return run_tool(
+            plan_spec,
+            path,
+            dept=dept,
+            category=category,
+            max_depth=max_depth,
+            out=out,
             detail=detail,
         )
 
@@ -136,22 +133,41 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
     def compile_plan(
         plan: Annotated[str, "Path to an approved article plan."],
         confirm: Annotated[bool, "Must be true to write anything."] = False,
+        background: Annotated[
+            bool, "Return a handle immediately instead of blocking for minutes."
+        ] = False,
         dry_run: Annotated[bool, "Prepare and judge, but publish nothing."] = False,
         skip_groundedness: Annotated[bool, "Write unverified prose. Not advised."] = False,
         allow_uncertain: Annotated[bool, "Proceed past pre-flight warnings."] = False,
         detail: Annotated[bool, "Return every field instead of a summary."] = False,
     ) -> dict[str, Any]:
-        return to_tool_result(
-            invoke(
-                compile_spec,
-                plan,
-                confirm=confirm,
-                dry_run=dry_run,
-                skip_groundedness=skip_groundedness,
-                allow_uncertain=allow_uncertain,
-            ),
+        return run_tool(
+            compile_spec,
+            plan,
+            confirm=confirm,
+            background=background,
+            dry_run=dry_run,
+            skip_groundedness=skip_groundedness,
+            allow_uncertain=allow_uncertain,
             detail=detail,
         )
+
+    status_spec = standalone.get("compile_status") or by_name["compile-status"]
+
+    @server.tool(
+        name="compile_status",
+        description=(
+            _describe(status_spec)
+            + " Poll this after compile_plan(background=true). States: not_started, "
+            "running, stalled, staged, complete."
+        ),
+        annotations=annotations_for(status_spec, title="Compile status"),
+    )
+    def compile_status(
+        handle: Annotated[str, "The handle compile_plan returned (its plan path)."],
+        detail: Annotated[bool, "Return every field instead of a summary."] = False,
+    ) -> dict[str, Any]:
+        return run_tool(status_spec, handle, detail=detail)
 
     return server
 

@@ -79,6 +79,13 @@ command(
     errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
 )
 command(
+    "compile-status",
+    "Report a background batch's progress from its plan and staging directory.",
+    "scout.cli.commands.compile:compile_status",
+    outcomes=_SEMANTIC,
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
+)
+command(
     "check",
     "Run every verification in order and stop at the first failure.",
     "scout.cli.commands.verify:check",

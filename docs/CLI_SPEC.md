@@ -172,10 +172,12 @@ installed.
 | `snpmemory mint --path --hint --dept --loc` | mint a verify-PASS address | `1` no hint works |
 | `snpmemory compile --path --title --category --dept --loc` | compile a draft page | `7` page exists / protected branch |
 | `snpmemory plan-articles <path> --dept [--category] [--max-depth] [--out]` | propose a decomposition from the source's own headings; no model call, byte-stable output | `1` no numbered headings |
-| `snpmemory compile-plan <plan> [--dry-run] [--no-resume] [--allow-uncertain]` | compile every article in an approved plan; writes nothing unless all pass | `1` an article cannot mint or ground |
+| `snpmemory compile-plan <plan> --confirm [--background] [--dry-run] [--no-resume] [--allow-uncertain]` | compile every article in an approved plan; writes nothing unless all pass | `1` an article cannot mint or ground · `5` no `--confirm` |
 | `snpmemory propose --page` | PR-first commit | `7` pre-staged work |
 | `snpmemory ingest --path │ --dir` | index into pgvector | |
 | `snpmemory extract --path │ --dir` | figures + tables → `derived/` | `3` path outside `raw/` |
+| `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started |
+| `snpmemory mcp [--list-tools]` | serve these operations to an agent over stdio | |
 | `snpmemory verify-vault` | frontmatter + index lint | `1` lint errors |
 | `snpmemory verify-addresses` | address merge gate | `1` drift/fail |
 | `snpmemory verify-groundedness` | faithfulness gate | `1` unsupported claims |

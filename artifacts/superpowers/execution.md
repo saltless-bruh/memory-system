@@ -1255,3 +1255,43 @@ Fixed by loading the implementation at registration and carrying the real signat
 is safe because every command module already keeps heavy imports inside its functions —
 now enforced by a test that loads all commands in a subprocess and fails if any
 environment variable appears.
+
+### Step 7 — task handles
+- Files: `scout/cli/tasks.py` (new), `tests/test_tasks.py` (new),
+  `scout/cli/commands/compile.py`, `scripts/compile_plan.py`, `scout/cli/declarations.py`,
+  `scout/cli/mcp_policy.py`, `scout/mcp/local_server.py`
+- No new task store: the plan file lists the articles and staging holds each page the
+  moment it is judged, so status is computed by reading what Step 3 already writes.
+  The handle is the plan path, so two runs on one plan collide detectably.
+- `.run.json` carries the pid; a pid that is gone reports `stalled`, never `running`.
+- `compile-plan --background` starts a detached run and returns a handle;
+  `compile-status` polls it.
+- Verify: `pytest tests/test_tasks.py -q` → 10 passed.
+
+### Step 9 — documents
+- Files: `docs/ARCHITECTURE_STATUS.md`, `docs/CONNECT_AGENTS.md`, `docs/CLI_SPEC.md`
+- The authority model now sits in the architecture baseline, and three new entries were
+  added to its **prohibited claims**: the local server must never be described as
+  network-reachable, authenticated, or safe over HTTP, and no tool other than `rag_fetch`
+  is a door into RAG.
+- Verify: `grep -rniE 'snpmemory mcp.*(http|remote|port|listen)'` finds no affirmative
+  claim.
+
+### Step 10 — live verification against a real MCP client
+- `ruff check .` and `mypy scout scripts` clean; `pytest -q` → **772 passed**.
+- `git diff --stat scout/mcp_server.py` empty — the deployed server is untouched.
+- Drove `build_server()` through a real `fastmcp.Client` over JSON-RPC:
+  `tools/list` → 4 tools; `verify(stage=vault)` → ok/exit 0/pass;
+  `compile_status` → `complete 3/3`; `compile_plan` without `confirm` → refused.
+
+**Two defects the live run exposed, both mine:**
+
+1. **A `CliError` escaped raw at the MCP boundary.** The dispatcher catches those; the tool
+   wrapper did not, so a *routine* refusal (`compile_plan` without `confirm`) reached the
+   client as an unhandled exception with a traceback attached — a crash to the agent, and
+   internals on the wire. Added `run_tool`, which translates `CliError` into a
+   `ToolFailure` carrying the kind and exit code. Verified live: `traceback leaked: False`.
+2. **`compile_status` reported `complete: 0/3`.** `done` counted staged files, but a
+   successful publish deletes the staging directory, so a finished batch under-reported to
+   zero — an agent would read it as nothing having happened. `done` now counts published
+   pages once a batch is complete. Verified live: `complete 3/3`.

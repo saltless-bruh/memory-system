@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scout import vault  # noqa: E402
 from scout.backends.pgvector import PgVectorRlsBackend  # noqa: E402
+from scout.cli.tasks import write_run_marker  # noqa: E402
 from scout.types import RagBackend  # noqa: E402
 from scripts.compile_note import (  # noqa: E402
     CATEGORY_PLURALS,
@@ -233,6 +235,9 @@ def compile_plan(
 
     staging = staging_dir(plan_path)
     staging.mkdir(parents=True, exist_ok=True)
+    # Record who is working, so `compile-status` can tell a live compile from a
+    # crashed one rather than reporting a dead run as still in progress.
+    write_run_marker(plan_path, pid=os.getpid())
 
     prepared: list[PreparedPage] = []
     for article in articles:

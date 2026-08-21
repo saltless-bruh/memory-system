@@ -103,6 +103,7 @@ def compile_plan(
     plan: str,
     *,
     confirm: bool = False,
+    background: bool = False,
     dry_run: bool = False,
     skip_groundedness: bool = False,
     no_resume: bool = False,
@@ -124,6 +125,12 @@ def compile_plan(
         raise confirmation_required(
             f"compile-plan writes pages to the vault from {plan}", flag="--confirm"
         )
+
+    if background:
+        # A batch runs for minutes. A caller that blocks — an MCP client
+        # especially — times out and retries, re-spending the quota the
+        # staging checkpoint exists to protect. Hand back a handle instead.
+        return _start_background(plan, skip_groundedness, allow_uncertain)
 
     try:
         pages = _compile_plan(
@@ -149,4 +156,86 @@ def compile_plan(
         data={"plan": plan, "dry_run": dry_run, "published": published},
         summary=f"{verb} {len(published)} page(s) from {plan}",
         messages=tuple(published),
+    )
+
+
+def _start_background(
+    plan: str, skip_groundedness: bool, allow_uncertain: bool
+) -> CommandResult:
+    """Launch the batch detached and return immediately with its handle."""
+    import subprocess
+    import sys
+
+    from scout.cli.tasks import TaskState, status_for
+
+    plan_path = Path(plan)
+    existing = status_for(plan_path)
+    if existing.state is TaskState.RUNNING:
+        return CommandResult(
+            exit_code=ExitCode.SEMANTIC_FAILURE,
+            data={"handle": existing.handle, **existing.to_dict()},
+            summary=f"already running (pid {existing.pid}) — nothing started",
+        )
+
+    argv = [
+        sys.executable,
+        "-m",
+        "scripts.compile_plan",
+        "--plan",
+        plan,
+    ]
+    if skip_groundedness:
+        argv.append("--skip-groundedness")
+    if allow_uncertain:
+        argv.append("--allow-uncertain")
+
+    log_path = plan_path.with_suffix(".log")
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(  # noqa: S603 - argv is built here, not user text
+            argv,
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    status = status_for(plan_path)
+    return CommandResult(
+        exit_code=ExitCode.SUCCESS,
+        data={
+            "handle": plan_path.as_posix(),
+            "pid": process.pid,
+            "log": log_path.as_posix(),
+            "total": status.total,
+            "state": "starting",
+        },
+        summary=(
+            f"started {status.total} article(s) in the background — "
+            f"poll compile-status with handle {plan_path.as_posix()}"
+        ),
+    )
+
+
+def compile_status(
+    handle: str,
+    *,
+    config: Injected = None,
+) -> CommandResult:
+    """Report a batch's progress, computed from the plan and its staging."""
+    from scout import vault
+    from scout.cli.tasks import TaskState, status_for
+
+    cfg: Config = config
+    cfg.require_repo()
+
+    status = status_for(Path(handle), wiki_dir=vault.WIKI_DIR)
+    unfinished = status.state in {TaskState.STALLED, TaskState.NOT_STARTED}
+    return CommandResult(
+        exit_code=(
+            ExitCode.SEMANTIC_FAILURE
+            if unfinished and status.total
+            else ExitCode.SUCCESS
+        ),
+        data=status.to_dict(),
+        summary=f"{status.state.value}: {status.done}/{status.total} — {status.detail}",
     )

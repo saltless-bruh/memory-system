@@ -84,3 +84,31 @@ def test_summary_mode_truncates_long_lists_but_reports_the_count() -> None:
 
     full = to_tool_result(result, detail=True)
     assert full["warnings"] == [f"w{i}" for i in range(50)]
+
+
+def test_a_raised_cli_error_becomes_a_tool_failure_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal is routine. It must not reach the client as a crash.
+
+    Commands signal refusals by raising `CliError`; the dispatcher catches
+    those. Without the same catch at the MCP boundary, `compile_plan` without
+    `confirm` arrived as an unhandled exception with a traceback attached.
+    """
+    from scout.cli.errors import confirmation_required
+    from scout.cli.mcp_result import run_tool
+    from scout.cli.registry import CommandSpec
+
+    def _raise(**_kwargs: object) -> CommandResult:
+        raise confirmation_required("writes pages", flag="--confirm")
+
+    spec = CommandSpec(name="fake", summary="s", target="x:y")
+    monkeypatch.setattr(CommandSpec, "load", lambda _self: _raise)
+    monkeypatch.setattr("scout.cli.invoke.resolve_config", lambda _p: None)
+
+    with pytest.raises(ToolFailure) as caught:
+        run_tool(spec)
+
+    assert caught.value.kind == "confirmation_required"
+    assert caught.value.exit_code == 5
+    assert "--confirm" in str(caught.value)

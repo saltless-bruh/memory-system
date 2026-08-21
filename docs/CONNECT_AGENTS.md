@@ -115,3 +115,39 @@ endpoint as well.
 If Scout rejects a valid-looking token, check server auth mode, issuer,
 audience, expiry/not-before, and the canonical department claim. A tool's
 department argument may narrow the token departments but cannot expand them.
+
+## Which server does what
+
+This system exposes **two** MCP surfaces. They are not interchangeable, and an agent
+normally wants both.
+
+| Server | Transport | Tools | Use it for |
+|---|---|---|---|
+| `scout` | Streamable HTTP, authenticated | `rag_fetch` | verbatim evidence from the Data Vault |
+| `snpmemory mcp` | **stdio, local** | `verify`, `plan_articles`, `compile_plan`, `compile_status` | operating the vault: checking it, decomposing a source, compiling pages |
+
+`rag_fetch` remains the **only** door into RAG. The local server does not retrieve; it
+runs this repository's own commands.
+
+### Authority — read before deploying
+
+`snpmemory mcp` has **exactly the authority of the user who launches it**. There is no
+token, no scope check, and no network listener: it speaks stdio to the agent that
+started it. That is what makes it safe on a developer machine and unsafe anywhere else.
+
+Do **not** put it behind a reverse proxy or expose it on a port. Serving these tools
+remotely needs an OAuth 2.1 design with audience validation, because a server that
+accepts a token it was not issued becomes a usable proxy for stolen tokens.
+
+`compile_plan` writes pages. It carries `destructiveHint` so a client can prompt, and it
+refuses outright without `confirm: true` for clients that do not.
+
+### Running it
+
+```bash
+snpmemory mcp --list-tools    # what an agent will see
+snpmemory mcp                 # serve over stdio
+```
+
+A long compile should be started with `background: true`; it returns a handle
+immediately, and `compile_status` reports progress read from the staging directory.

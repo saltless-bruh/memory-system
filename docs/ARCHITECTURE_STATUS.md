@@ -62,6 +62,20 @@ not an operations manual.
   Body prose containing `##`, `[[`, `---`, or control characters is rejected at
   validation, so generated text can never break heading order or create an
   unvalidated wikilink (R-1.5).
+- Two MCP surfaces exist and they are not interchangeable.
+  **`scout`** is the deployed one: a container on Streamable HTTP with exactly one
+  tool, `rag_fetch`, behind request-scoped JWT/static authentication. It remains the
+  only door into RAG.
+  **`snpmemory mcp`** is a local **stdio** server exposing this repository's own
+  operations (`verify`, `plan_articles`, `compile_plan`, `compile_status`), generated
+  from the command declarations in `scout/cli/declarations.py`.
+  It carries **exactly the authority of the user who launches it** — no token, no
+  scope check, no listener. That is why it is stdio-only. Serving it over HTTP would
+  require an OAuth 2.1 design with audience validation; a server that accepts a token
+  it was not issued is the confused-deputy failure the MCP guidance exists to prevent.
+  Tool effects come from each command's declared `Effect`, so `readOnlyHint` and
+  `destructiveHint` cannot disagree with what a command actually does. A command with
+  no exposure decision in `scout/cli/mcp_policy.py` fails the test suite.
 - Offline tests run with sockets disabled. Live PostgreSQL and authenticated
   HTTP tests carry the `integration` marker.
 - Address verification returns `0` for PASS, `1` for semantic drift/failure,
@@ -154,7 +168,10 @@ Active instructions must not describe:
   `0.033`, so none can be stated as a similarity;
 - a mismatched `hint` returning empty or "dead-ending" — `rag_fetch` pre-filters
   by `path`, so the addressed file is returned regardless;
-- the Phase 0 Gate 4 model as deployed for wiki search.
+- the Phase 0 Gate 4 model as deployed for wiki search;
+- the local `snpmemory mcp` server as network-reachable, authenticated, or safe to
+  expose over HTTP — it is stdio-only and unauthenticated by design;
+- any MCP tool other than `rag_fetch` as a door into RAG.
 
 When architecture changes, update implementation and active documents together,
 then re-run the stale-claim search described in the review plan. Preserve old

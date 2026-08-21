@@ -36,7 +36,7 @@ def test_the_tool_surface_is_smaller_than_the_command_surface() -> None:
     """Tool-list bloat degrades selection; collapsing the verify family is why."""
     tool_names = set(standalone_tools()) | {"verify"}
     assert len(tool_names) < len(DECLARED)
-    assert tool_names == {"verify", "plan_articles", "compile_plan"}
+    assert tool_names == {"verify", "plan_articles", "compile_plan", "compile_status"}
 
 
 def test_verify_stages_cover_the_whole_family() -> None:

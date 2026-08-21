@@ -96,3 +96,22 @@ def to_tool_result(result: CommandResult, *, detail: bool = False) -> dict[str, 
         summary=result.summary,
         data=data,
     ).to_dict()
+
+
+def run_tool(spec: Any, *args: Any, detail: bool = False, **kwargs: Any) -> dict[str, Any]:
+    """Invoke a command and map it onto an MCP tool return.
+
+    Commands signal refusals and configuration problems by raising `CliError` —
+    the dispatcher catches those and renders one envelope. The MCP boundary
+    needs the same catch, or a routine refusal (`compile_plan` without
+    `confirm`) reaches the client as an unhandled exception with a traceback
+    attached, which both looks like a crash and leaks internals.
+    """
+    from scout.cli.errors import CliError
+    from scout.cli.invoke import invoke
+
+    try:
+        result = invoke(spec, *args, **kwargs)
+    except CliError as exc:
+        raise ToolFailure(exc.to_result()) from None
+    return to_tool_result(result, detail=detail)

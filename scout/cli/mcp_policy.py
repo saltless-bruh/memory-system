@@ -77,6 +77,7 @@ POLICIES: tuple[ToolPolicy, ...] = (
     ),
     ToolPolicy("plan-articles", Exposure.TOOL, tool="plan_articles"),
     ToolPolicy("compile-plan", Exposure.TOOL, tool="compile_plan"),
+    ToolPolicy("compile-status", Exposure.TOOL, tool="compile_status"),
 )
 
 _BY_COMMAND = {policy.command: policy for policy in POLICIES}

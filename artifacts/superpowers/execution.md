@@ -1172,3 +1172,53 @@ source files the owner has chosen to replace. No code defect remains open from t
   crashed the retry path it exists to protect. Now caught.
 - Verify: `pytest -q` → **703 passed**, 21 pre-existing live-integration env errors.
   `ruff check .` and `mypy scout scripts` clean.
+
+### Steps 4–5 — deterministic decomposition + editable plan
+- Files: `scripts/plan_articles.py` (new), `tests/test_plan_articles.py` (new)
+- Extracts numbered headings from the source, dedups repeats (ToC and running headers
+  re-emit them), orders numerically (`2.2 < 2.10 < 10`, not lexicographically), and emits a
+  JSON plan. **No model call.**
+- On the real paper: **15 proposed articles**, and the rendered plan is **byte-identical
+  across 3 runs** (sha256 equal). That is P2's answer — the skeleton is stable because it
+  is never regenerated, not because generation was made deterministic (it cannot be).
+- A source with no numbered headings raises rather than guessing, naming the need for a
+  hand-written plan.
+- Verify: `pytest tests/test_plan_articles.py -q` → 13 passed.
+
+### Step 6a — split preparation from publication
+- Files: `scripts/compile_note.py`
+- `compile_note` became `prepare_page` (mint → retrieve → generate → judge, writes nothing)
+  plus `publish_page`; `compile_note` is now the thin composition of the two. Staging is
+  impossible without this split.
+- `extra_known_slugs` lets a batch declare slugs that do not exist on disk yet.
+- Verify: all 42 existing compile tests still pass — behaviour preserved.
+
+### Steps 6–9 — batch orchestration
+- Files: `scripts/compile_plan.py` (new), `tests/test_compile_plan.py` (new)
+- Pre-flight mints every article **before any generation**; a failure stops the batch with
+  nothing written. Honest caveat in the code: pre-flight mints from the title alone, which
+  is *sufficient* but not *necessary* — compilation also tries a model-generated hint — so
+  a failure is reported as UNCERTAIN and `--allow-uncertain` proceeds.
+- All slugs collected before pass 2, so article 1 may link to article 5 (P3).
+- Pages are prepared into a staging directory and only a fully prepared batch is published;
+  a partial publish is compensated in reverse order and a compensation that itself fails is
+  escalated as needing human attention rather than swallowed (P5, saga not transaction).
+- Each staged page is checkpointed the moment it is prepared, because that page cost two
+  generations and a judge call.
+- Verify: `pytest tests/test_compile_plan.py -q` → 11 passed. Full suite **728 passed**.
+
+### Step 11 — live batch
+- Hand-edited the 15-article plan down to 3 substantive sections and declared cross-links —
+  which is step 5's verification: the compiler honoured the edit, not the default.
+- Dry run: pre-flight 3/3 PASS, 3 pages prepared and judged, **nothing written**.
+- Real run **resumed from staging and spent zero model calls**, then published 3 pages.
+- `verify_addresses.py` → **5 PASS · 0 FAIL · 0 DRIFT**.
+- `gen_index.py --check` → clean.
+- Cross-links resolve in **both directions** across all three pages.
+- Staging directory removed after a successful publish.
+- Investigated a missing pre-flight line in the first backgrounded run rather than assuming:
+  `run_preflight` returns 3/3: it was stdout/stderr interleaving in the capture, not a bug.
+- `verify_groundedness.py --changed-only` → **exit 0 — 5 GROUNDED · 0 UNSUPPORTED ·
+  0 NO_CONTEXT · 2 UNSOURCED** (the two structural pages, correctly not judged).
+  The whole vault judged in **one run with no 429** — the same command returned exit 2
+  INFRASTRUCTURE before the concurrency ceiling landed. BP-3 verified end to end.

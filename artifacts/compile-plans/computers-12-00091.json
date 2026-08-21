@@ -1,0 +1,41 @@
+{
+  "source": "raw/papers/computers-12-00091.pdf",
+  "articles": [
+    {
+      "section": "2.1",
+      "title": "The Key Distinctions between Deep Learning and Machine Learning",
+      "loc": "p.3",
+      "slug": "the-key-distinctions-between-deep-learning-and-machine-learning",
+      "category": "concept",
+      "department": "ai_eng",
+      "links": [
+        "recognition-of-objects-in-images",
+        "natural-language-processing"
+      ]
+    },
+    {
+      "section": "3.1",
+      "title": "Recognition of Objects in Images",
+      "loc": "p.17",
+      "slug": "recognition-of-objects-in-images",
+      "category": "concept",
+      "department": "ai_eng",
+      "links": [
+        "the-key-distinctions-between-deep-learning-and-machine-learning",
+        "natural-language-processing"
+      ]
+    },
+    {
+      "section": "3.3",
+      "title": "Natural Language Processing",
+      "loc": "p.18",
+      "slug": "natural-language-processing",
+      "category": "concept",
+      "department": "ai_eng",
+      "links": [
+        "the-key-distinctions-between-deep-learning-and-machine-learning",
+        "recognition-of-objects-in-images"
+      ]
+    }
+  ]
+}

@@ -502,9 +502,12 @@ def _load_safe_wiki_pages() -> list[vault.Page]:
         raise CompileNoteError("Existing wiki tree failed safety validation") from exc
 
 
-def _validate_wikilinks(wikilinks: Sequence[str], note_slug: str) -> tuple[str, ...]:
+def _validate_wikilinks(
+    wikilinks: Sequence[str], note_slug: str, extra: Sequence[str] = ()
+) -> tuple[str, ...]:
     known_slugs = {page.slug for page in _load_safe_wiki_pages()}
     known_slugs.add(note_slug)
+    known_slugs.update(extra)
     validated: list[str] = []
     for link in wikilinks:
         if not isinstance(link, str) or not _WIKILINK_SLUG_RE.fullmatch(link):
@@ -650,7 +653,21 @@ def _validated_address(
     return address
 
 
-def compile_note(
+@dataclass(frozen=True, slots=True)
+class PreparedPage:
+    """A validated, grounded page that has not been written anywhere yet.
+
+    Separating preparation from publication is what lets a batch stage every
+    page, judge them all, and only then publish — so a batch that fails
+    half-way has written nothing to `wiki/`.
+    """
+
+    path: Path
+    frontmatter: dict[str, Any]
+    content: str
+
+
+def prepare_page(
     path: str,
     title: str,
     category: str,
@@ -659,12 +676,17 @@ def compile_note(
     loc: str,
     wikilinks: Sequence[str] = (),
     skip_groundedness: bool = False,
-) -> Path:
-    """Compile and publish with per-file atomic replacement and rollback.
+    extra_known_slugs: Sequence[str] = (),
+) -> PreparedPage:
+    """Mint, retrieve, generate and judge one page. Writes nothing.
 
     The body is generated from the passages the page's minted address
-    retrieves, then judged against those same passages before anything is
-    written. A page whose prose the judge cannot ground is not written.
+    retrieves, then judged against those same passages. A page whose prose the
+    judge cannot ground raises instead of being returned.
+
+    `extra_known_slugs` lets a batch declare the slugs of pages that do not
+    exist on disk yet, so article 1 may link to article 5 (the two-pass
+    requirement) without `_validate_wikilinks` rejecting the target.
     """
     raw_path, canonical_path = _resolve_raw_source(path)
     if category not in vault.VALID_TYPES:
@@ -711,7 +733,7 @@ def compile_note(
         raise CompileNoteError("Destination page escapes its category") from exc
     if note_path.exists():
         raise CompileNoteError(f"Destination page already exists: {note_path}")
-    links = _validate_wikilinks(wikilinks, slug)
+    links = _validate_wikilinks(wikilinks, slug, extra_known_slugs)
 
     try:
         document = parse_file(raw_path, REPO_ROOT)
@@ -723,6 +745,7 @@ def compile_note(
 
     known_slugs = {page.slug for page in _load_safe_wiki_pages()}
     known_slugs.add(slug)
+    known_slugs.update(extra_known_slugs)
 
     def _build(
         address: Address, body: GeneratedBody
@@ -846,6 +869,12 @@ def compile_note(
         )
     frontmatter, content = asyncio.run(_pipeline())
 
+    return PreparedPage(note_path, frontmatter, content)
+
+
+def publish_page(prepared: PreparedPage) -> Path:
+    """Write one prepared page and regenerate the index, rolling back on failure."""
+    note_path, content = prepared.path, prepared.content
     index_path = REPO_ROOT / "wiki" / "index.md"
     page_before = _snapshot(note_path)
     index_before = _snapshot(index_path)
@@ -866,6 +895,30 @@ def compile_note(
 
     print(f"Successfully compiled note to {note_path}")
     return note_path
+
+
+def compile_note(
+    path: str,
+    title: str,
+    category: str,
+    *,
+    department: str,
+    loc: str,
+    wikilinks: Sequence[str] = (),
+    skip_groundedness: bool = False,
+) -> Path:
+    """Compile and publish one page: prepare it, then write it."""
+    return publish_page(
+        prepare_page(
+            path,
+            title,
+            category,
+            department=department,
+            loc=loc,
+            wikilinks=wikilinks,
+            skip_groundedness=skip_groundedness,
+        )
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

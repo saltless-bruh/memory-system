@@ -13,7 +13,7 @@ a pipe.
 
 from __future__ import annotations
 
-import inspect
+import functools
 import sys
 from collections.abc import Callable, Sequence
 from typing import Annotated, Any
@@ -21,83 +21,12 @@ from typing import Annotated, Any
 from cyclopts import App, Parameter
 from cyclopts.exceptions import CycloptsError
 
-from scout.cli.config import resolve as resolve_config
+from scout.cli.declarations import DECLARED
 from scout.cli.errors import CliError
-from scout.cli.registry import (
-    REGISTRY,
-    CommandSpec,
-    Effect,
-    Prerequisite,
-    command,
-)
+from scout.cli.invoke import invoke
+from scout.cli.registry import CommandSpec
 from scout.cli.render import OutputFormat, render
-from scout.cli.result import CommandResult, ErrorKind, ExitCode
-
-# ── declarations ─────────────────────────────────────────────────────────────
-# Commands are declared as they are implemented. `schema` therefore reports what
-# actually exists rather than what is planned, which is the only way an agent
-# can trust it.
-
-command(
-    "schema",
-    "Describe every command, output format, exit code, and error kind.",
-    "scout.cli.commands.schema:schema",
-    prerequisite=Prerequisite.NONE,
-)
-
-_SEMANTIC = (ExitCode.SEMANTIC_FAILURE,)
-
-command(
-    "verify-vault",
-    "Lint page frontmatter and confirm wiki/index.md is current.",
-    "scout.cli.commands.verify:verify_vault",
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-)
-command(
-    "verify-secrets",
-    "Scan tracked, staged, and untracked bytes for credential-shaped values.",
-    "scout.cli.commands.verify:verify_secrets",
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION,),
-)
-command(
-    "verify-addresses",
-    "Check that every page's sources[] hint still retrieves its own file.",
-    "scout.cli.commands.verify:verify_addresses",
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-)
-command(
-    "verify-groundedness",
-    "Judge each page's body against the sources it cites.",
-    "scout.cli.commands.verify:verify_groundedness",
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-)
-command(
-    "plan-articles",
-    "Propose a multi-article decomposition from a source's own headings.",
-    "scout.cli.commands.compile:plan_articles",
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-)
-command(
-    "compile-plan",
-    "Compile every article in an approved plan; writes nothing unless all pass.",
-    "scout.cli.commands.compile:compile_plan",
-    effect=Effect.WRITE,
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-)
-command(
-    "check",
-    "Run every verification in order and stop at the first failure.",
-    "scout.cli.commands.verify:check",
-    outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-)
-
+from scout.cli.result import CommandResult, ErrorKind
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
@@ -111,7 +40,7 @@ def _build_app() -> App:
         name="snpmemory",
         help="SNP Memory System — dual-layer knowledge vault operations.",
     )
-    for spec in REGISTRY:
+    for spec in DECLARED:
         app.command(_wrap(spec), name=spec.name)
     return app
 
@@ -119,26 +48,28 @@ def _build_app() -> App:
 def _wrap(spec: CommandSpec) -> Callable[..., CommandResult]:
     """Adapt a declared command into something cyclopts can register.
 
-    Two things happen here that must not happen anywhere else.
+    The implementation is loaded **here**, at registration, because cyclopts
+    parses from the real signature: it needs the annotations to know that
+    `--dry-run` is a flag rather than a string option, and it needs the
+    parameter names to map `--max-depth` onto `max_depth`. A generic
+    `(*args, **kwargs)` wrapper gives it neither, and the result is not a
+    graceful degradation — every multi-word flag in the tool breaks.
 
-    The implementation is imported **at call time**, so registering a command
-    never triggers whatever its module does on import. Several scripts in this
-    repository call `dotenv.load_dotenv()` at module scope; importing one to
-    register it would put thirty variables, including a provider key, into
-    `os.environ` before the user had chosen a command.
+    What must NOT happen at import time is reading an environment or resolving
+    a credential. That guarantee now rests on the command modules themselves:
+    each keeps its heavy imports inside its functions, so importing one pulls
+    in cyclopts and this package and nothing else. `tests/test_cli_core.py`
+    holds them to it.
 
-    Configuration is resolved **from the declaration**, not by the command. A
-    `NONE` command receives nothing, so `snpmemory schema` cannot read a
-    credential even by accident: the guarantee is structural rather than a
-    convention each command must remember.
+    Configuration is still resolved from the **declaration** at call time, so a
+    `NONE` command receives nothing and `snpmemory schema` cannot read a
+    credential even by accident.
     """
+    function = spec.load()
 
+    @functools.wraps(function)
     def runner(*args: Any, **kwargs: Any) -> CommandResult:
-        function = spec.load()
-        config = resolve_config(spec.prerequisite)
-        if "config" in inspect.signature(function).parameters:
-            kwargs["config"] = config
-        return function(*args, **kwargs)
+        return invoke(spec, *args, **kwargs)
 
     runner.__name__ = spec.name.replace("-", "_")
     runner.__doc__ = spec.summary

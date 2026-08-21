@@ -1222,3 +1222,36 @@ source files the owner has chosen to replace. No code defect remains open from t
   0 NO_CONTEXT · 2 UNSOURCED** (the two structural pages, correctly not judged).
   The whole vault judged in **one run with no 429** — the same command returned exit 2
   INFRASTRUCTURE before the concurrency ceiling landed. BP-3 verified end to end.
+
+---
+
+## Plan: Local MCP Server (2026-08-21)
+
+### Steps 2-6, 8 — shared invoke, policy, result mapping, tools, command, confirm gate
+- Files: `scout/cli/invoke.py`, `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`,
+  `scout/cli/mcp_result.py`, `scout/mcp/local_server.py`, `scout/cli/commands/mcp.py`,
+  `scout/cli/app.py`, `scout/cli/commands/compile.py` + 5 test modules.
+- 3 tools generated (`verify`, `plan_articles`, `compile_plan`), annotations derived from
+  `Effect`, ≤6 parameters each. `scout/mcp_server.py` byte-identical.
+- Verify: `pytest -q` → **761 passed**; ruff + mypy clean;
+  `git diff --stat scout/mcp_server.py` empty.
+
+### Two defects found by the plan's own guards
+
+**1. The registry was populated only as an import side effect of `app.py`.**
+Step 3's anti-drift test failed immediately: any consumer that did not import the
+dispatcher saw an empty registry. Declarations moved to `scout/cli/declarations.py`, which
+also exports `DECLARED` as a concrete tuple — because `ruff --fix` twice deleted the
+side-effect import as "unused", once silently emptying the entire command surface. Test
+pollution had been masking it: `test_mcp_policy` imported declarations, populating the
+global registry for every other test.
+
+**2. BLOCKER, pre-existing since `dea240c`: every multi-word CLI flag was broken.**
+`--dry-run`, `--max-depth`, `--skip-groundedness`, `--no-resume`, `--allow-uncertain` all
+failed — registering commands through a generic `(*args, **kwargs)` wrapper left cyclopts
+with no signature to parse from. It did not degrade gracefully: `--dry-run` demanded a
+value and `--max-depth 1` arrived as a keyword literally named `max-depth`.
+Fixed by loading the implementation at registration and carrying the real signature, which
+is safe because every command module already keeps heavy imports inside its functions —
+now enforced by a test that loads all commands in a subprocess and fails if any
+environment variable appears.

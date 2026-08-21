@@ -199,3 +199,29 @@ def test_config_gating_reaches_the_verify_commands() -> None:
     cfg = resolve(Prerequisite.LOCAL, environ={"POSTGRES_HOST": "db"}, start=REPO_ROOT)
     assert cfg.get("POSTGRES_HOST") == "db"
     assert cfg.get("GEMINI_API_KEY") is None
+
+
+def test_compile_plan_refuses_to_write_without_confirmation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutation is approved at call time, not by installing the tool."""
+    from scout.cli.commands.compile import compile_plan
+    from scout.cli.errors import CliError
+    from scout.cli.result import ErrorKind
+
+    called: list[int] = []
+    monkeypatch.setattr(
+        "scripts.compile_plan.compile_plan", lambda *_a, **_k: called.append(1) or []
+    )
+
+    class _Cfg:
+        def require_repo(self) -> None:
+            return None
+
+    with pytest.raises(CliError) as caught:
+        compile_plan("some-plan.json", config=_Cfg())
+
+    assert caught.value.to_result().exit_code == 5
+    assert caught.value.to_result().error is not None
+    assert caught.value.to_result().error.kind is ErrorKind.CONFIRMATION_REQUIRED
+    assert called == [], "nothing may run before confirmation"

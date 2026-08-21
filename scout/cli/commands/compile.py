@@ -19,7 +19,7 @@ from typing import Annotated, Any
 from cyclopts import Parameter
 
 from scout.cli.config import Config
-from scout.cli.errors import infrastructure_error
+from scout.cli.errors import confirmation_required, infrastructure_error
 from scout.cli.result import CommandResult, ExitCode
 
 #: Injected by the dispatcher; never a user-facing flag.
@@ -102,6 +102,7 @@ def plan_articles(
 def compile_plan(
     plan: str,
     *,
+    confirm: bool = False,
     dry_run: bool = False,
     skip_groundedness: bool = False,
     no_resume: bool = False,
@@ -115,6 +116,15 @@ def compile_plan(
 
     cfg: Config = config
     cfg.require_repo()
+
+    if not confirm and not dry_run:
+        # Current guidance is that a mutating tool is approved when it is
+        # called, not once at install time. `destructiveHint` asks a client to
+        # prompt; this makes the refusal real even for clients that do not.
+        raise confirmation_required(
+            f"compile-plan writes pages to the vault from {plan}", flag="--confirm"
+        )
+
     try:
         pages = _compile_plan(
             Path(plan),

@@ -279,3 +279,68 @@ def test_unexpected_failures_do_not_leak_their_message() -> None:
     assert "hunter2" not in rendered
     assert secret not in rendered
     assert result.exit_code == ExitCode.INFRASTRUCTURE
+
+
+def test_multi_word_flags_parse() -> None:
+    """`--max-depth` must map onto `max_depth`, and `--dry-run` must be a flag.
+
+    Regression: registering commands through a generic `(*args, **kwargs)`
+    wrapper left cyclopts with no signature to parse from. It did not degrade
+    gracefully — every multi-word option in the tool broke, `--dry-run`
+    demanding a value and `--max-depth` arriving as a keyword literally named
+    `max-depth`.
+    """
+    import inspect
+
+    from scout.cli.app import _build_app
+    from scout.cli.declarations import DECLARED
+
+    app = _build_app()
+    assert app is not None
+
+    from scout.cli.app import _wrap
+
+    for spec in DECLARED:
+        runner = _wrap(spec)
+        signature = inspect.signature(runner)
+        # A real signature, not (*args, **kwargs)
+        kinds = {p.kind for p in signature.parameters.values()}
+        assert kinds != {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }, f"{spec.name} registered without a usable signature"
+
+
+def test_importing_every_command_module_reads_no_environment() -> None:
+    """Loading a command must not run dotenv or resolve a credential.
+
+    Commands are now loaded at registration so cyclopts can parse from their
+    signatures. That is only safe while each command module keeps its heavy
+    imports inside its functions — this test is what holds them to it.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    probe = (
+        "import os, sys;"
+        "before = set(os.environ);"
+        "from scout.cli.declarations import DECLARED;"
+        "[s.load() for s in DECLARED];"
+        "added = sorted(set(os.environ) - before);"
+        "print(added);"
+        "sys.exit(1 if added else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "PYTHONWARNINGS": "ignore"},
+    )
+    assert result.returncode == 0, (
+        f"loading commands added environment variables: {result.stdout}{result.stderr}"
+    )

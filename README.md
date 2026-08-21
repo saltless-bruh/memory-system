@@ -121,6 +121,18 @@ python scripts/compile_note.py \
 python scripts/propose_page.py --page wiki/<category>/<slug>.md
 ```
 
+The compiler generates the page body **from the passages its minted address
+retrieves**, not from the parsed file, so generation and the groundedness judge
+read one corpus. It then judges the candidate against those same passages before
+writing, retries once on an unsupported verdict carrying the rejected sentences,
+and refuses to write a page it cannot ground. `--skip-groundedness` bypasses that
+check and prints a warning; its output is unverified.
+
+Two model calls are made per page — metadata (summary/entities/hint) before
+minting, prose after — plus one judge call. Set `LITELLM_JUDGE_MODEL` to a model
+other than `LITELLM_LLM_MODEL`: with both unset the judge is the same model that
+wrote the prose, which self-preference bias makes a weak check.
+
 The compiler uses the repository parser, requires strict model JSON, mints a
 department-scoped address, lints the candidate, and atomically replaces each
 file while restoring prior page/index bytes after ordinary failures. A process

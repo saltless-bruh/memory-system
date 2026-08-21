@@ -120,7 +120,8 @@ Rules the linter (`scripts/gen_index.py`) enforces:
 
 ```markdown
 ## TL;DR                    # dense, assertive — no narration
-## Technical Specifications # the compiled knowledge
+## Technical Specifications # the compiled knowledge — prose grounded in the
+                            # passages sources[] retrieves, never a template
 ## Provenance               # ties back to raw/; note conflicts between sources
 ## Cross-References         # [[wikilink]] only — see §4
 ```

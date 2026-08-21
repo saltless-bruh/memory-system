@@ -54,6 +54,14 @@ not an operations manual.
   addressed file anyway — the hint governs ranking, never existence. A `loc` is
   a human locator that retrieval does not honor; it is validated at mint time
   (`scripts/mint.py` → `LOC_MISMATCH`) and only advised on at verify time.
+- `scripts/compile_note.py` generates a page body from the passages the page's
+  minted address retrieves (`verify_groundedness.collect_context`, `k=20`, page
+  department scope) and judges it against those same passages before writing.
+  Generation and judging therefore read one corpus. A page the judge cannot
+  ground is not written; `--skip-groundedness` bypasses the check and says so.
+  Body prose containing `##`, `[[`, `---`, or control characters is rejected at
+  validation, so generated text can never break heading order or create an
+  unvalidated wikilink (R-1.5).
 - Offline tests run with sockets disabled. Live PostgreSQL and authenticated
   HTTP tests carry the `integration` marker.
 - Address verification returns `0` for PASS, `1` for semantic drift/failure,

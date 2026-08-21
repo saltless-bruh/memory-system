@@ -1056,3 +1056,70 @@ services           7/7 healthy
 
 The single address FAIL and the groundedness debt both trace to the same cause: two placeholder
 source files the owner has chosen to replace. No code defect remains open from this pass.
+
+---
+
+## Plan: Grounded Page Bodies for `compile_note` (2026-08-21)
+
+### Step 1 — archive old plan, land new plan
+- Files: `artifacts/superpowers/plan.md`, `plan-audit-remediation-2026-08-19.md`
+- Archived the completed 22-finding remediation plan; wrote the grounded-body plan.
+- Folded in three verified 2026 practice revisions (BP-1 json_schema strict, BP-2 nonce
+  fences, BP-3 judge separation) and a "Deferred to Step 3" section (P2/P3/P5/batch-P4).
+- Verify: `ls -la artifacts/superpowers/`; `git log --oneline -1`
+- Result: PASS — committed `507bf7f`.
+
+### Step 2 — failing tests first (red)
+- Files: `tests/test_compile_note.py`
+- Added 8 tests: generation reads retrieved passages not the parsed document; body
+  validator rejects `##`/`[[`/`---`/control chars/empty/extra keys/non-list; nonce fence
+  in the request; unsupported candidate not written and index unchanged; unsupported then
+  grounded retries exactly once carrying the unsupported sentence; empty context refuses
+  before any body model call.
+- Verify: `python -m pytest tests/test_compile_note.py -q`
+- Result: RED as intended — `ImportError: cannot import name 'GeneratedBody'`.
+  Baseline before the change was 25 passed.
+
+### Steps 3–4 — GeneratedBody, validator, generate_page_body
+- Files: `scripts/compile_note.py`
+- Added `GeneratedBody`, `_validate_generated_body`, `_chat_completion`,
+  `generate_page_body`; nonce fences via `verify_groundedness.fence/make_nonce` (BP-2);
+  `json_schema` strict with a remembered per-model `json_object` downgrade on HTTP 400 (BP-1).
+- **Correction found by the tests:** `MIN_BODY_SPECIFICATIONS = 2` forces padding when a
+  source supports only one claim — the exact fabrication pressure this plan exists to
+  remove. Lowered to 1. The plan's constant was wrong, not the test.
+- Verify: `pytest tests/test_compile_note.py -k "generated_body or fences"` → 9 passed.
+
+### Steps 5–8 — backend lifecycle, render, judge gate, refusal
+- Files: `scripts/compile_note.py`, `tests/test_compile_note.py`
+- One backend held open across mint → collect_context → verify_page, closed in `finally`.
+- Body template replaced; `Key entities:` and the "validated model-and-mint pipeline"
+  provenance sentence removed (an unsupportable claim about our own tooling).
+- Self-judge before write, one corrective retry carrying rejected sentences, refusal on
+  empty retrieved context.
+- 4 pre-existing tests needed the new seams wired (API changed); assertions unchanged.
+- Verify: `pytest tests/test_compile_note.py -q` → 38 passed.
+
+### Step 9 — documents
+- Files: `README.md`, `AGENTS.md`, `docs/ARCHITECTURE_STATUS.md`
+- Verify: `grep -rn 'Key entities:' AGENTS.md README.md docs/` → no hits.
+
+### Step 10 — full verification, offline then live
+- `ruff check .` → All checks passed. `mypy scout scripts` → no issues, 49 files.
+- `pytest -q` → **684 passed, 1 skipped, 21 errors**. The 21 are the live-integration env
+  gate (`SNP_INTEGRATION_PROJECT`, `POSTGRES_*` unset in this shell), identical at HEAD.
+- `ruff format --check .` reports 64 files — **pre-existing**: identical count at HEAD via
+  `git stash`, and neither changed file is among them. Not reformatted; the plan's step 10
+  over-specified this command for a repo that does not enforce it.
+- **Live end-to-end** against the running stack (raw/papers/computers-12-00091.pdf):
+  - first attempt failed at mint — the *model-generated* hint did not clear the rank-1 +
+    50%-grounding gate. Pre-existing P4, not a regression: `scripts/mint.py` mints a
+    hand-picked hint for the same file and loc.
+  - second attempt compiled `wiki/concepts/advantages-and-disadvantages-of-deep-learning.md`
+    — 6 paragraphs of real compiled prose where the template produced 2 bullets.
+  - `verify_addresses.py` → exit 0, 1 PASS.
+  - `verify_groundedness.py --page ...` → exit 0, GROUNDED (1 source, 20 passages).
+  - **Independent check** (judge and generator are the same model, so its verdict is weak
+    evidence): grepped the parsed source for the oddest claim. "deep learning often only
+    needs millions of data points" is verbatim from the paper. Grounding is real.
+- Result: PASS.

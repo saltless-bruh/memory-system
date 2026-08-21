@@ -31,6 +31,17 @@ model_list:
     model_info:
       mode: chat
 
+  # ── Judge: faithfulness gate for compiled pages ───────────────────
+  # Deliberately a DIFFERENT model family from snp-llm. An LLM judging its
+  # own output scores it higher (self-preference bias), so a judge sharing
+  # snp-llm's family would rubber-stamp the prose snp-llm just wrote.
+  - model_name: snp-judge
+    litellm_params:
+      model: os.environ/LITELLM_JUDGE_ROUTE_MODEL
+      api_key: os.environ/OPENROUTER_API_KEY
+    model_info:
+      mode: chat
+
   # ── VLM: multimodal → text before grounding (proposal §2.3) ───────
   # Recall quality downstream depends on this caption step, so keep it
   # a real VLM, not a text model pretending.

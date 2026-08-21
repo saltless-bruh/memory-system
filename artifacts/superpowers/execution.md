@@ -1123,3 +1123,23 @@ source files the owner has chosen to replace. No code defect remains open from t
     evidence): grepped the parsed source for the oddest claim. "deep learning often only
     needs millions of data points" is verbatim from the paper. Grounding is real.
 - Result: PASS.
+
+### Follow-up — independent judge, and the defect it exposed
+- Added an OpenRouter-backed `snp-judge` route (`config/litellm/config.yaml`,
+  `docker-compose.yml`), deliberately a different family from `snp-llm`'s Gemini.
+  Free-tier keys live in gitignored `.env`; `z-ai/glm-5.2:free` was 429-limited, so the
+  route uses `openrouter/nvidia/nemotron-3-super-120b-a12b:free`.
+- **The independent judge immediately failed a page the same-model judge had passed.**
+  The flagged sentence was the TL;DR: "This article provides a comprehensive overview…".
+  Root cause: `summary` came from call A, generated from the *parsed document*, but is
+  rendered into the body and therefore judged against *retrieved passages* — the same
+  corpus mismatch this plan fixed for the specifications, still present in the summary.
+- Fix: `summary` moved from `GeneratedMetadata` to `GeneratedBody`, generated post-mint
+  from the passages, with an explicit prompt rule that it must describe the passages and
+  not the document as a whole. Call A now returns entities + hint only.
+- Verify: `pytest -q` → **688 passed**; ruff and mypy clean. Both pages recompiled and
+  judged GROUNDED by the independent model; `verify_addresses` 2 PASS · 0 FAIL · 0 DRIFT.
+- Operational note: `LITELLM_TIMEOUT_SECONDS=120` was needed (the free 120B model exceeds
+  the 60s default), and judging both pages concurrently (`JUDGE_CONCURRENCY=3`) exceeds the
+  free tier — it returned exit 2 INFRASTRUCTURE, correctly refusing to mutate rather than
+  reporting a false semantic failure. Sequential judging passes.

@@ -51,7 +51,6 @@ def compiler_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
 @pytest.fixture
 def valid_metadata() -> GeneratedMetadata:
     return GeneratedMetadata(
-        summary="Acme provides one grounded technical capability.",
         entities=("acme", "capability"),
         hint="Acme source facts",
     )
@@ -102,7 +101,8 @@ def _wire_body_seams(
     monkeypatch.setattr("scripts.compile_note.collect_context", _collect)
     monkeypatch.setattr(
         "scripts.compile_note.generate_page_body",
-        lambda *_a, **_k: body or GeneratedBody(("A grounded technical claim.",)),
+        lambda *_a, **_k: body
+        or GeneratedBody("A grounded sentence.", ("A grounded technical claim.",)),
     )
 
     async def _verify(*_a: object, **_k: object) -> GroundednessReport:
@@ -257,7 +257,6 @@ def test_model_request_uses_configured_gateway_bounded_data_and_injection_delimi
                         "message": {
                             "content": json.dumps(
                                 {
-                                    "summary": "One valid summary sentence.",
                                     "entities": ["one", "two"],
                                     "hint": "exact retrieval hint",
                                 }
@@ -305,20 +304,12 @@ def test_model_request_uses_configured_gateway_bounded_data_and_injection_delimi
     "content",
     [
         "not-json",
-        json.dumps(
-            {"summary": "Valid sentence.", "entities": "not-list", "hint": "hint"}
-        ),
-        json.dumps({"summary": "First. Second.", "entities": ["one"], "hint": "hint"}),
-        json.dumps({"summary": "Valid sentence.", "entities": [], "hint": "hint"}),
-        json.dumps({"summary": "Valid sentence.", "entities": ["one"], "hint": ""}),
-        json.dumps(
-            {
-                "summary": "Valid sentence.",
-                "entities": ["one"],
-                "hint": "hint",
-                "unexpected": True,
-            }
-        ),
+        json.dumps({"entities": "not-list", "hint": "hint"}),
+        json.dumps({"entities": [], "hint": "hint"}),
+        json.dumps({"entities": ["one"], "hint": ""}),
+        # summary belongs to the grounded body now, never to pre-mint metadata
+        json.dumps({"summary": "Valid sentence.", "entities": ["one"], "hint": "hint"}),
+        json.dumps({"entities": ["one"], "hint": "hint", "unexpected": True}),
     ],
 )
 def test_model_schema_errors_fail_without_fallback(
@@ -528,13 +519,16 @@ def test_candidate_lint_failure_leaves_page_and_index_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo, path = compiler_repo
-    invalid = GeneratedMetadata("First sentence. Second sentence.", ("entity",), "hint")
+    invalid_body = GeneratedBody("First sentence. Second sentence.", ("A claim.",))
     index_before = (repo / "wiki" / "index.md").read_bytes()
-    monkeypatch.setattr("scripts.compile_note.generate_model_data", lambda *_a: invalid)
+    monkeypatch.setattr(
+        "scripts.compile_note.generate_model_data",
+        lambda *_a: GeneratedMetadata(("entity",), "hint"),
+    )
     mint_mock = MagicMock(side_effect=minted)
     monkeypatch.setattr("scripts.compile_note.mint_address", mint_mock)
     monkeypatch.setattr("scripts.compile_note.PgVectorRlsBackend", MagicMock())
-    _wire_body_seams(monkeypatch)
+    _wire_body_seams(monkeypatch, body=invalid_body)
 
     with pytest.raises(CompileNoteError, match="candidate"):
         compile_note(path, "Lint Failure", "concept", department="infra", loc="line 1")
@@ -622,6 +616,7 @@ def test_parse_file_propagates_pdf_extraction_failure(
 @pytest.fixture
 def valid_body() -> GeneratedBody:
     return GeneratedBody(
+        summary="Acme provides one grounded technical capability.",
         specifications=(
             "Acme sustains 4.2 requests per second on the measured configuration.",
             "The scheduler admits a request only when its KV blocks are resident.",
@@ -773,12 +768,14 @@ def test_body_is_generated_from_retrieved_passages_not_the_document(
 @pytest.mark.parametrize(
     "bad",
     [
-        {"specifications": ["## Injected heading"]},
-        {"specifications": ["See [[other-page]] for detail."]},
-        {"specifications": ["---"]},
-        {"specifications": ["text with \x00 control char"]},
-        {"specifications": []},
-        {"specifications": ["ok"], "extra": "field"},
+        {"summary": "A grounded sentence.", "specifications": ["## Injected heading"]},
+        {"summary": "A grounded sentence.", "specifications": ["See [[other-page]] for detail."]},
+        {"summary": "A grounded sentence.", "specifications": ["---"]},
+        {"summary": "A grounded sentence.", "specifications": ["text with \x00 control char"]},
+        {"summary": "A grounded sentence.", "specifications": []},
+        {"summary": "A grounded sentence.", "specifications": ["ok"], "extra": "field"},
+        {"specifications": ["ok"]},
+        {"summary": "Two sentences. Here is another.", "specifications": ["ok"]},
         {"specifications": "not a list"},
     ],
 )
@@ -789,8 +786,12 @@ def test_generated_body_rejects_unsafe_or_malformed_payloads(bad: object) -> Non
 
 def test_generated_body_accepts_a_well_formed_payload() -> None:
     body = _validate_generated_body(
-        {"specifications": ["First grounded claim.", "Second grounded claim."]}
+        {
+            "summary": "A grounded sentence.",
+            "specifications": ["First grounded claim.", "Second grounded claim."],
+        }
     )
+    assert body.summary == "A grounded sentence."
     assert body.specifications == ("First grounded claim.", "Second grounded claim.")
 
 
@@ -811,7 +812,7 @@ def test_body_request_fences_passages_with_a_nonce(
                     {
                         "message": {
                             "content": json.dumps(
-                                {"specifications": ["A grounded claim."]}
+                                {"summary": "A grounded sentence.", "specifications": ["A grounded claim."]}
                             )
                         }
                     }

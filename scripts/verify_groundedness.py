@@ -75,8 +75,9 @@ import dotenv  # noqa: E402
 
 dotenv.load_dotenv(REPO_ROOT / ".env")
 
-from scout import vault  # noqa: E402
+from scout import vault
 from scout.core import rag_fetch  # noqa: E402
+from scout.gateway_retry import urlopen_with_retry  # noqa: E402
 from scout.policy import validate_caller_departments  # noqa: E402
 from scout.types import Address, RagBackend, Scope  # noqa: E402
 
@@ -104,7 +105,28 @@ MAX_REASON_CHARS = 400
 
 #: Concurrent judge calls. One model call per page is the cost unit; PR runs
 #: judge only changed pages (see `--changed-only`).
-JUDGE_CONCURRENCY = 3
+#: Default 1: a ceiling under the endpoint's sustainable rate prevents far more
+#: 429s than retrying can clean up, and free tiers reject at very low
+#: concurrency. Raise it with SNP_JUDGE_CONCURRENCY on a paid route.
+DEFAULT_JUDGE_CONCURRENCY = 1
+MAX_JUDGE_CONCURRENCY = 16
+
+
+def judge_concurrency(env: Mapping[str, str] | None = None) -> int:
+    """Judge fan-out, clamped to a sane range."""
+    source = os.environ if env is None else env
+    raw = source.get("SNP_JUDGE_CONCURRENCY", "").strip()
+    if not raw:
+        return DEFAULT_JUDGE_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise GroundednessError("SNP_JUDGE_CONCURRENCY must be an integer") from exc
+    if not 1 <= value <= MAX_JUDGE_CONCURRENCY:
+        raise GroundednessError(
+            f"SNP_JUDGE_CONCURRENCY must be between 1 and {MAX_JUDGE_CONCURRENCY}"
+        )
+    return value
 
 #: Refs tried in order to find the merge base for `--changed-only`.
 DEFAULT_BASE_REFS = ("origin/main", "origin/master", "main", "master")
@@ -424,8 +446,9 @@ class LiteLLMJudge:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                response_payload = json.loads(response.read())
+            response_payload = json.loads(
+                urlopen_with_retry(request, timeout=self.timeout)
+            )
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise GroundednessError("judge gateway request failed") from exc
         try:
@@ -574,7 +597,7 @@ async def verify_pages(
     backend: RagBackend, pages: Sequence[vault.Page], judge: Judge, *, k: int = JUDGE_K
 ) -> list[GroundednessReport]:
     """Judge pages concurrently, preserving vault order in the report."""
-    semaphore = asyncio.Semaphore(JUDGE_CONCURRENCY)
+    semaphore = asyncio.Semaphore(judge_concurrency())
 
     async def bounded(page: vault.Page) -> GroundednessReport:
         async with semaphore:

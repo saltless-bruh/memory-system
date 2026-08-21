@@ -1143,3 +1143,32 @@ source files the owner has chosen to replace. No code defect remains open from t
   the 60s default), and judging both pages concurrently (`JUDGE_CONCURRENCY=3`) exceeds the
   free tier — it returned exit 2 INFRASTRUCTURE, correctly refusing to mutate rather than
   reporting a false semantic failure. Sequential judging passes.
+
+---
+
+## Plan: Step 3 — Multi-Article Compilation (2026-08-21)
+
+### Step 1 — archive completed plan, land Step 3 plan
+- Verify: `git log --oneline -1` → `dbf42af`. Result: PASS.
+
+### Step 2 — pin generation temperature
+- Files: `scripts/compile_note.py`, `tests/test_compile_note.py`
+- `_chat_completion` now sends `temperature: 0`. The judge already pinned it; generation
+  did not, leaving the one thing a plan-pinned pipeline cannot absorb unbounded.
+- Verify: `pytest tests/test_compile_note.py -q` → 42 passed.
+
+### Step 3 — rate-limit resilience
+- Files: `scout/gateway_retry.py` (new), `tests/test_gateway_retry.py` (new),
+  `scripts/compile_note.py`, `scripts/verify_groundedness.py`,
+  `tests/test_verify_groundedness.py`
+- Exponential backoff with **full jitter**, bounded attempts, `Retry-After` honoured when
+  sent, and a non-retryable status (400/401/404) raised immediately rather than burning
+  quota. Both gateway callers now route through it.
+- `JUDGE_CONCURRENCY = 3` → `judge_concurrency()` reading `SNP_JUDGE_CONCURRENCY`,
+  **default 1**. A ceiling under the sustainable rate prevents more 429s than retrying can
+  clean up, and 3 already produced a 429 on this free tier.
+- **Bug caught by its own test:** `email.utils.parsedate_to_datetime` raises `ValueError`
+  on Python 3.14 rather than returning `None`, so a malformed `Retry-After` would have
+  crashed the retry path it exists to protect. Now caught.
+- Verify: `pytest -q` → **703 passed**, 21 pre-existing live-integration env errors.
+  `ruff check .` and `mypy scout scripts` clean.

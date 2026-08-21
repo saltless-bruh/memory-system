@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scout import vault  # noqa: E402
 from scout.backends.pgvector import PgVectorRlsBackend  # noqa: E402
+from scout.gateway_retry import urlopen_with_retry  # noqa: E402
 from scout.parsers import ParsedDocument, ParserError, parse_file  # noqa: E402
 from scout.types import Address, RagBackend  # noqa: E402
 from scripts.mint import MintResult, MintStatus, mint_address  # noqa: E402
@@ -343,6 +344,10 @@ def _chat_completion(
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "response_format": response_format,
+                # Bitwise-reproducible LLM output is not achievable, but leaving
+                # temperature unset varies the one thing we most want stable.
+                # The judge already pins this; generation did not.
+                "temperature": 0,
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -355,8 +360,9 @@ def _chat_completion(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=_model_timeout()) as response:
-                response_payload = json.loads(response.read())
+            response_payload = json.loads(
+                urlopen_with_retry(request, timeout=_model_timeout())
+            )
             break
         except urllib.error.HTTPError as exc:
             if use_schema and exc.code == 400:

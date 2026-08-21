@@ -989,3 +989,40 @@ def test_unconfigured_judge_reports_cleanly_and_writes_nothing(
 
     assert not (repo / "wiki" / "concepts" / "acme-capability.md").exists()
     assert (repo / "wiki" / "index.md").read_bytes() == b"original index\n"
+
+
+def test_generation_requests_pin_temperature_to_zero(
+    retrieved: tuple[SourceContext, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Variance in generation is the one thing a plan-pinned pipeline cannot absorb."""
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://gateway.invalid")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "key")
+    monkeypatch.setenv("LITELLM_LLM_MODEL", "snp-llm")
+    captured: dict[str, object] = {}
+
+    def _urlopen(request: object, timeout: float = 0) -> object:
+        captured["body"] = json.loads(request.data)  # type: ignore[attr-defined]
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "summary": "A grounded sentence.",
+                                        "specifications": ["A grounded claim."],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=_urlopen))
+    generate_page_body("Acme", retrieved)
+
+    assert captured["body"]["temperature"] == 0  # type: ignore[index]

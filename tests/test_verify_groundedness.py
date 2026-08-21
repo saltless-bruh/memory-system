@@ -282,3 +282,20 @@ def test_contradictory_reply_resolves_against_merging() -> None:
         "x",
     )
     assert judgment.unsupported is True, "a self-contradictory reply must fail closed"
+
+
+def test_judge_concurrency_defaults_to_one_and_validates() -> None:
+    """Free tiers reject at very low concurrency; the ceiling is the real defence."""
+    from scripts.verify_groundedness import (
+        DEFAULT_JUDGE_CONCURRENCY,
+        GroundednessError,
+        judge_concurrency,
+    )
+
+    assert judge_concurrency({}) == DEFAULT_JUDGE_CONCURRENCY == 1
+    assert judge_concurrency({"SNP_JUDGE_CONCURRENCY": "  "}) == 1
+    assert judge_concurrency({"SNP_JUDGE_CONCURRENCY": "4"}) == 4
+
+    for bad in ("0", "17", "-1", "many"):
+        with pytest.raises(GroundednessError):
+            judge_concurrency({"SNP_JUDGE_CONCURRENCY": bad})

@@ -24,10 +24,21 @@ dependencies = [
     # from coordinates rather than transcribed by a model, so no cell value is
     # ever generated (scout/pdf_structure.py).
     "pdfplumber>=0.11",
+    # cyclopts is the CLI framework. It already arrives transitively with the
+    # pinned fastmcp, but the dispatcher depends on it directly and must say so
+    # rather than rely on another package continuing to pull it in.
+    "cyclopts>=4.0",
     "fastapi>=0.110.0",
     "httpx>=0.27.0",
     "uvicorn>=0.28.0",
 ]
+
+[project.scripts]
+# `snpmemory` is the single dispatcher behind the CLI, CI, and (later) the MCP
+# tools. Installing the package puts it on PATH, so the distributed agent
+# workflows can reference a command that exists on a user's machine rather than
+# a path into a checkout they do not have.
+snpmemory = "scout.cli.app:main"
 
 [project.optional-dependencies]
 dev = [

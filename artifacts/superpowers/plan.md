@@ -1,202 +1,198 @@
-# Implementation Plan: Step 3 — Multi-Article Compilation
+# Implementation Plan: Local MCP Server, Generated from the Registry
 
-Branch: `fix/architecture-security-hardening` · Base: `715faf7`
-Prepared: 2026-08-21
+Branch: `fix/architecture-security-hardening` · Base: `dea240c`
+Prepared: 2026-08-21 · Brainstorm: `artifacts/superpowers/brainstorm-mcp-2026-08-21.md`
 
-> The previous occupant (Grounded Page Bodies, complete — 688 tests, both live pages
-> GROUNDED under an independent judge) was archived to
-> `artifacts/superpowers/plan-grounded-bodies-2026-08-21.md`.
+> The previous occupant (Step 3 — Multi-Article Compilation, complete: 728 tests,
+> 5 addresses PASS, 5 pages GROUNDED) was archived to
+> `artifacts/superpowers/plan-step3-2026-08-21.md`.
 
 ---
 
 ### Goal
 
-Compile one large source into **N grounded, cross-linked wiki pages** in a single
-reviewable operation, where every page passes the address gate and the groundedness gate,
-and a failure part-way leaves the vault byte-identical to how it started.
+Let any MCP-speaking agent operate the memory system — verify, decompose, compile —
+through tools generated from `registry.py`, **without** widening the authority the
+`scout` retrieval boundary grants and **without** a second definition of any command.
 
-Step 3 is the batch. The unit — one grounded page — already works and is not revisited.
-
-**Definition of done:** `snpmemory compile-plan` turns the 26-page paper into ~8 pages that
-`verify_addresses.py` and `verify_groundedness.py` both pass, with working `[[wikilinks]]`
-between them, and a killed mid-run leaves `wiki/` unchanged.
+**Definition of done:** an agent connects to `snpmemory mcp`, calls `verify`, gets a
+structured finding; calls `plan_articles`, edits the plan, calls `compile_plan`, and polls
+`compile_status` until N pages exist — while `scout/mcp_server.py` remains byte-identical.
 
 ---
 
-### The finding that reshapes P2
+### The constraint that shapes everything
 
-**The document already declares its own structure.** Scanning the paper's text finds **31
-numbered headings** — `1 Introduction`, `2.2.1 Supervised Learning`, `2.6.4 Model Training
-and Execution Time`, `3.6 Clinical Imaging` …
+`scout` runs in a container with **no read-write repository mount**, and
+`docs/ARCHITECTURE_STATUS.md` lists such a mount among its **prohibited claims** — v2
+hardening removed it deliberately. Seven of the eight CLI commands are
+`Prerequisite.LOCAL` and need a checkout.
 
-So decomposition does not have to be invented by a model. It can be **extracted
-deterministically** from the source, and the only judgement left is *which* sections
-deserve a page and where to merge them — a small, reviewable decision rather than an
-open-ended generative one.
-
-This matters because of BP-1 below: LLM output is not byte-reproducible, so anything we
-want to be stable must not be re-generated on each run. Deriving the split from the
-document's own headings makes the skeleton stable **by construction**, and the approved
-plan file makes the rest stable **by pinning**.
-
-Caveat found while probing: headings repeat (`2.5` twice, `3` three times) because running
-headers and the TOC re-emit them. Dedup by first occurrence, ordered by page.
+So the tools cannot live on `scout`. Not a preference: putting them there would restore the
+topology the security work eliminated and would make a retrieval token a page-writing
+token. They get a **local stdio server** instead, carrying exactly the authority of the
+user who launched it.
 
 ---
 
 ### Assumptions
 
-1. The unit is fixed. `compile_note` generates from retrieved passages and self-judges;
-   Step 3 orchestrates it and does not change how one page is written.
-2. `snp-judge` stays a different model family from `snp-llm` (self-preference bias).
-3. The judge runs on a **free** OpenRouter tier: `JUDGE_CONCURRENCY = 3` already returned
-   429, and `LITELLM_TIMEOUT_SECONDS=120` is required.
-4. Departments come from `raw/.acl.yaml` (`papers/** → [ai_eng, blueteam]`), never invented
-   per page.
-5. PR-first (R-6.4/R-7.3); batch output is reviewed before merge like any page.
+1. `scout/mcp_server.py` is **not modified**. One tool, `rag_fetch`, remains the only door
+   into RAG.
+2. `fastmcp==3.3.1` stays pinned. Its SDK speaks `2025-11-25`; the current spec is
+   `2026-07-28`. We design so a later move is cheap rather than chasing a release candidate.
+3. `Task*` types exist in the pinned SDK but in the **pre-redesign** form the `2026-07-28`
+   RC reworked. We therefore use plain handle-returning tools, not native Tasks.
+4. Tool descriptions come only from `registry.py` — never from document or user text.
+5. PR-first (R-6.4/R-7.3) is unchanged: no tool pushes to `main`.
 
 ---
 
 ### Plan
 
-**1. Archive the completed plan, land this one**
-- Files: `artifacts/superpowers/plan.md`, `plan-grounded-bodies-2026-08-21.md`
+**1. Archive Step 3's plan, land this one**
+- Files: `artifacts/superpowers/plan.md`, `plan-step3-2026-08-21.md`
 - Verify: `ls artifacts/superpowers/`; `head -4 plan.md`.
 
-**2. Bound generation variance (BP-1 prerequisite)**
-- Files: `scripts/compile_note.py`
-- Change: `_chat_completion` sends **`temperature: 0`**. The judge already does; generation
-  does not, so today the one place variance actually matters is unpinned.
-- Also record the resolved model name in the page's `last_compiled` neighbourhood or the
-  batch manifest, so a page can be traced to what produced it (version pinning).
-- Verify: unit test asserts `temperature == 0` in the request body; `pytest -q`.
+**2. Extract one shared invocation path**
+- Files: `scout/cli/invoke.py` (new), `scout/cli/app.py`, `tests/test_cli_core.py`
+- Change: lift `_wrap`'s body into `invoke(spec, *args, **kwargs) -> CommandResult` —
+  load at call time, resolve config from the **declaration**, inject only if the function
+  accepts it. `app.py` calls it; the MCP server will too.
+- Why: two callers, one path. It is the mechanism that makes "cannot drift" true rather
+  than aspirational, and it preserves the existing guarantee that `schema` cannot read a
+  credential even by accident.
+- Verify: `pytest tests/test_cli_core.py -q` unchanged; a new test asserts `invoke` passes
+  no config to a `NONE` command.
 
-**3. Rate-limit resilience (BP-3) — before N multiplies it**
-- Files: `scripts/compile_note.py`, `scripts/verify_groundedness.py`
-- Change:
-  - retry on HTTP 429 and 5xx with **exponential backoff + jitter**, honouring
-    `Retry-After` when present; bounded attempts, then fail;
-  - `JUDGE_CONCURRENCY` becomes env-configurable (`SNP_JUDGE_CONCURRENCY`, default 1 for
-    free tiers) instead of a hardcoded 3.
-- Verify: unit tests with a fake `urlopen` raising 429 then succeeding — assert it retried,
-  slept, and honoured `Retry-After`; assert a 429 storm still terminates.
+**3. Declare the MCP exposure policy**
+- Files: `scout/cli/mcp_policy.py` (new), `tests/test_mcp_policy.py` (new)
+- Change: a small table deciding, per command, `EXPOSE` / `HIDE` / `GROUP(tool, stage)`.
+  Initial policy — `schema` HIDE (an MCP client lists tools natively), the five verify
+  commands GROUP into one `verify` tool with a `stage` argument, `plan-articles` and
+  `compile-plan` EXPOSE.
+- Why not pure 1:1: eight tools next to `rag_fetch` and basic-memory's tools is 12+
+  definitions in every agent's context, and a bloated tool list measurably degrades tool
+  selection. Five is enough.
+- **Anti-drift guard:** a test asserts every `CommandSpec` in `REGISTRY` appears in the
+  policy exactly once. Adding a command without deciding its exposure **fails the suite**.
+- Verify: `pytest tests/test_mcp_policy.py -q`.
 
-**4. Deterministic decomposition — `plan_articles`**
-- Files: `scripts/plan_articles.py` (new), `tests/test_plan_articles.py` (new)
-- Change: extract numbered headings + their page ranges from a parsed source; dedup
-  repeats by first occurrence; emit a **JSON plan**: `{title, section, loc, category,
-  department, slug}` per proposed article.
-- No model call. Pure function of the document.
-- Verify: run on the paper → a stable list; run twice → **byte-identical output**; unit
-  tests for dedup, ordering, and slug collisions.
+**4. Map results and exit codes onto MCP**
+- Files: `scout/cli/mcp_result.py` (new), `tests/test_mcp_result.py` (new)
+- Change: one function turning a `CommandResult` into an MCP tool return.
+  - `0` → success payload.
+  - `1` (semantic failure) → **successful tool call** carrying `{"status": "fail", ...}`.
+    A finding is data an agent must reason about, not a transport error.
+  - `2`–`7` → a tool **error**. Exit 2 must never look like a result, because
+    `ci_address_gate.py`'s whole contract is that 2 never authorises mutation.
+- Also: return summary fields by default, full detail behind `detail=true`.
+- Verify: table-driven tests over every `ExitCode`; assert 2 never yields a success payload.
 
-**5. Human-editable plan file + `--dry-run`**
-- Files: `scripts/plan_articles.py`
-- Change: write the plan to `artifacts/compile-plans/<source-stem>.json`. It is meant to be
-  edited by hand — merge two sections, drop a section, retitle. That edit is the whole
-  answer to "who decides N".
-- Verify: hand-edit the file, re-run the compiler, confirm it honours the edit, not the
-  regenerated default.
+**5. Generate the tools**
+- Files: `scout/mcp/__init__.py`, `scout/mcp/local_server.py` (new),
+  `tests/test_local_mcp_server.py` (new)
+- Change: build a `FastMCP` server by walking `REGISTRY` through the policy; derive each
+  tool's name, description, and annotations from the `CommandSpec`.
+  - `Effect.READ` → `readOnlyHint=True`
+  - `Effect.WRITE` / `DESTRUCTIVE` → `destructiveHint=True`
+  (all three hints exist in the pinned SDK — verified.)
+- **Import purity:** building and listing tools must touch no database, gateway,
+  credential, or running stack — the guarantee `schema` already makes.
+- Verify: a test builds the server with sockets disabled and asserts the tool list, the
+  annotations per tool, and that no import reached the network.
 
-**6. Pre-flight minting for all N (P4-batch)**
-- Files: `scripts/compile_plan.py` (new)
-- Change: before **any** write, mint every article's address. Report a table of
-  PASS/FAIL per article. If any fails, stop and write nothing.
-- Why: discovering "article 4 has no passing hint" after 1–3 are on disk is the failure
-  this prevents, and it also protects spent quota (BP-3: checkpointing protects the budget
-  you already burned).
-- Verify: test where article 3 of 4 fails to mint — assert zero files written.
+**6. Ship `snpmemory mcp`**
+- Files: `scout/cli/commands/mcp.py` (new), `scout/cli/app.py`, `docs/CLI_SPEC.md`
+- Change: a command that runs the stdio server. Declared `Prerequisite.LOCAL`,
+  `Effect.READ` (the server itself reads; its tools declare their own effects).
+- Verify: `snpmemory mcp --help`; an integration test drives one `tools/list` and one
+  `verify` call over stdio and asserts a structured result.
 
-**7. Two-pass cross-references (P3)**
-- Files: `scripts/compile_plan.py`
-- Change: pass 1 fixes every slug from the approved plan; pass 2 generates each body with
-  the full slug set available, so `--link` targets always resolve.
-- Constraint carried forward: generated prose still cannot emit `[[...]]` (rejected at
-  validation), so links come only from validated `--link` arguments — safe, and it keeps
-  R-1.5 unbreakable by generated text.
-- Verify: compile ≥2 articles; assert each page's wikilinks resolve and
-  `gen_index.py --check` passes.
+**7. Handles for long-running compilation**
+- Files: `scout/cli/tasks.py` (new), `tests/test_tasks.py` (new)
+- Change: `compile_plan` runs pre-flight synchronously (retrieval only, seconds), then
+  starts the batch as a detached subprocess and returns
+  `{handle, articles, preflight}`. `compile_status(handle)` reports per-article progress.
+- **The state already exists.** Step 3's staging directory and plan file are a durable,
+  resumable, per-article progress record. The handle is derived from the plan path; status
+  is computed by reading staging against the plan. A small `.run.json` (pid, started_at)
+  distinguishes *in flight* from *stalled*.
+- Verify: unit tests over a synthetic staging directory (2 of 4 staged → status reports 2
+  done, 2 pending); a test asserts a stale `.run.json` with a dead pid reports `stalled`,
+  not `running`.
 
-**8. Staged batch publish with compensation (P5, BP-2)**
-- Files: `scripts/compile_plan.py`
-- Change: build all N pages into a **staging directory**; validate and judge them all
-  there; only then publish by atomic rename, recording a manifest. On any failure,
-  compensate by removing exactly what the manifest says was published.
-- This is a saga, not a transaction — the code must say so. Compensation is idempotent and
-  retryable, and a compensation that itself fails must surface for human action rather
-  than being swallowed.
-- Verify: kill the process mid-publish (fault injection in tests); assert `wiki/` is
-  byte-identical and `index.md` unchanged.
+**8. Require confirmation for mutation**
+- Files: `scout/cli/commands/compile.py`, `scout/mcp/local_server.py`
+- Change: `compile_plan` takes a required `confirm: bool`; false or absent returns a
+  refusal naming what would be written. Current guidance is that mutation should prompt at
+  call time, not rely on install-time consent; `destructiveHint` asks the client to prompt,
+  and this makes it true even for clients that do not.
+- Verify: a test asserts `confirm=False` writes nothing and returns a refusal.
 
-**9. Checkpoint / resume (BP-3)**
-- Files: `scripts/compile_plan.py`
-- Change: record per-article completion in the plan file's sidecar. A resumed run skips
-  articles already generated and judged.
-- Why: N × (2 generations + 1 judge) on a free tier will hit limits mid-run; without this,
-  a resume re-burns the quota already spent.
-- Verify: interrupt after 2 of 4, resume, assert only 2 remain to do.
+**9. Documents**
+- Files: `README.md`, `docs/CONNECT_AGENTS.md`, `docs/ARCHITECTURE_STATUS.md`, `AGENTS.md`
+- Change: state which server does what; that `rag_fetch` remains the only door into RAG;
+  and — plainly — that the local server **carries the launching user's authority and must
+  not be exposed over HTTP without an auth design**.
+- Verify: `grep` that no document describes the local server as remotely reachable.
 
-**10. Wire into the CLI**
-- Files: `scout/cli/commands/`, `docs/CLI_SPEC.md`
-- Change: `snpmemory plan-articles` and `snpmemory compile-plan`, both honouring
-  `--output json` and the 0/1/2 exit contract.
-- Verify: `snpmemory compile-plan --dry-run -o json | jq .` parses.
-
-**11. Full verification, offline then live**
-- `ruff check .` · `mypy scout scripts` · `pytest -q` (expect 688 + new, zero regressions)
-- Live: `plan-articles` on the paper → review → `compile-plan`
-- `verify_addresses.py` → exit 0 for all N
-- `verify_groundedness.py` **sequentially** → GROUNDED for all N
-- Read two pages by eye; confirm cross-links point somewhere real
-- Record the true cost: model calls, wall time, and how often the free tier 429'd
+**10. Full verification**
+- `ruff check .` · `mypy scout scripts` · `pytest -q` (expect 728 + new, zero regressions)
+- `scout/mcp_server.py` unchanged: `git diff --stat scout/mcp_server.py` is empty.
+- Live: connect a real MCP client, list tools, run `verify`, then
+  `plan_articles → compile_plan → compile_status` to completion.
+- Confirm the 7 healthy containers are untouched by any of it.
 
 ---
 
 ### 2026 practice check (verified 2026-08-21)
 
-**BP-1 — stop chasing byte-identical reproducibility; pin the plan instead.**
-Bitwise-identical LLM output is not achievable in general: the dominant cause is the
-batch-size dependence of reduction kernels, not just floating-point non-associativity, and
-batch endpoints guarantee neither idempotency nor result ordering. The working answer is to
-**bound variance with temperature, seed, and version pinning, and evaluate for semantic
-equivalence rather than byte-exact match.**
+**MP-1 — the current spec is `2026-07-28`; we are on `2025-11-25`.** It makes the core
+stateless (no `initialize`, no `Mcp-Session-Id`), adds routable `Mcp-Method`/`Mcp-Name`
+headers, moves **Tasks to an extension after a production redesign**, and deprecates
+**Roots, Sampling and Logging** with a 12-month offramp.
 
-Applied: temperature 0 (step 2), a deterministic non-model decomposition (step 4), and an
-approved plan file as the pinned artifact (step 5). P2 is answered by *not regenerating the
-skeleton*, not by making generation deterministic — which it cannot be.
+Applied: we use none of the deprecated three — we pass explicit path parameters rather than
+Roots, call LiteLLM directly rather than Sampling, and already log to stderr. That
+alignment is partly luck; recording it means the eventual upgrade is a transport change,
+not a redesign. We deliberately do **not** adopt the SDK's pre-redesign `Task*` types
+(step 7).
 
-**BP-2 — a batch of file writes is a saga, not a transaction.**
-A compensating transaction is a semantic undo, not a rollback; compensations must be
-idempotent and retryable, and some need human intervention once automated retries are
-exhausted. Orchestration beats choreography where sequencing and compensation matter.
+**MP-2 — tool-list bloat degrades selection.** A tool definition costs ~100–500 tokens and
+real deployments reach tens of thousands; bloated schemas make agents pick the wrong tool.
+Guidance: keep parameters ≲8 per tool and return few fields by default.
 
-Applied: staging directory + manifest + explicit compensation (step 8), and the code says
-"saga" rather than claiming atomicity `compile_note` already documents it cannot provide.
+Applied: step 3 collapses 8 commands to 5 tools; step 4 returns summary fields with detail
+behind a flag.
 
-**BP-3 — concurrency ceilings prevent more 429s than retries clean up.**
-A concurrency ceiling just under the endpoint's sustainable rate prevents far more 429s
-than any retry strategy; retries need exponential backoff **with jitter** and must honour
-`Retry-After`; rejected 429s still consume quota; and checkpoint/resume protects budget
-already spent.
+**MP-3 — tool poisoning and rug pulls.** Tool descriptions and schemas are model-read
+metadata that users rarely see; a later update can swap benign behaviour for malicious.
 
-Applied: steps 3 and 9. This is not theoretical here — `JUDGE_CONCURRENCY = 3` already
-produced a 429 on this free tier, and there is currently **no backoff anywhere in the
-codebase**.
+Applied: descriptions come only from `registry.py`, which is PR-reviewed, and step 5's test
+pins the generated tool list so a change to it must be seen in review. Retrieved document
+text never reaches a description.
 
-**BP-4 — decomposition: prefer structure the document already carries.**
-Semantic/section-aware sectioning outperforms naive splitting, and agentic chunking
-frameworks exist — but they are aimed at documents with no usable structure. This paper has
-31 explicit numbered headings, so the cheap deterministic path dominates: no model call, no
-variance, no cost.
+**MP-4 — confused deputy and token passthrough.** Servers must act with the caller's
+authority, not their own, and **must not accept tokens not issued for them**.
+
+Applied: we add **no new network surface**, which is the strongest available answer — a
+stdio server has no token to confuse. `scout` keeps its request-scoped verification
+untouched. Step 9 writes the limitation down so nobody later exposes it over HTTP casually.
+
+**MP-5 — mutation needs call-time approval**, not one-time install consent.
+
+Applied: step 8's required `confirm`, plus `destructiveHint`.
 
 Sources:
-- [Demystifying Numerical Instability in LLM Inference (arXiv 2606.21023)](https://arxiv.org/html/2606.21023)
-- [Bulk LLM jobs: batching, idempotency, QA (2026)](https://www.digitalapplied.com/blog/bulk-llm-job-engineering-batching-idempotency-qa-2026)
-- [Saga patterns and distributed consistency in 2026](https://thebackenddevelopers.substack.com/p/event-driven-architecture-saga-patterns)
-- [Compensating transaction](https://en.wikipedia.org/wiki/Compensating_transaction)
-- [LLM API rate limiting best practices (2026)](https://www.clawpulse.org/blog/llm-api-rate-limiting-best-practices-avoid-429-errors-and-save-40-on-costs)
-- [Resilient concurrency and rate limiting for LLM callbacks](https://www.pluralsight.com/labs/codeLabs/resilient-concurrency-and-rate-limiting-for-llm-callbacks)
-- [Best chunking strategies for RAG (2026)](https://www.firecrawl.dev/blog/best-chunking-strategies-rag)
+- [The 2026-07-28 MCP Specification Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)
+- [MCP 2026-07-28 spec: every breaking change](https://stacktr.ee/blog/mcp-2026-spec-changes)
+- [Security Best Practices — Model Context Protocol](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+- [MCP Security — OWASP Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html)
+- [MCP Security Best Practices: A Practical Guide for 2026](https://blog.mcpservers.org/posts/mcp-security-best-practices)
+- [10 strategies to reduce MCP token bloat](https://thenewstack.io/how-to-reduce-mcp-token-bloat/)
+- [MCP Tool Schema Design Guide 2026](https://kansei-link.com/en/insights/mcp-tool-schema-design-guide-2026.html)
+- [MCP tool design: practical approaches and tradeoffs — AWS](https://aws.amazon.com/blogs/machine-learning/mcp-tool-design-practical-approaches-and-tradeoffs/)
 
 ---
 
@@ -204,29 +200,34 @@ Sources:
 
 | Risk | Mitigation |
 |---|---|
-| **Free tier cannot sustain N articles.** Already demonstrated: 2 pages judged concurrently returned exit 2. | Concurrency default 1, backoff with jitter, checkpoint/resume. Report the real 429 count in step 11 rather than hiding it. |
-| **Not every section mints.** Some sections are too short or too generic to win rank 1. | Pre-flight (step 6) fails the batch before any write and names the article, so it is a plan edit rather than a half-written vault. |
-| **Heading extraction misses or over-splits.** Running headers duplicate; some papers have none. | Dedup by first occurrence; the plan file is hand-editable; a source with no headings falls back to explicit human-authored plan entries. |
-| **Staged publish is still not crash-atomic.** A kill between two renames leaves a partial vault. | The manifest makes compensation deterministic, and step 8's fault-injection test proves the ordinary paths. Say plainly it is a saga; do not claim a transaction. |
-| **Cost.** N × (2 generations + 1 judge), plus 2 retrievals per attempt. | Pre-flight fails cheap (mint only). Checkpointing prevents re-burning. Step 11 records the measured number. |
-| **Cross-links stay shallow** because prose cannot emit `[[...]]`. | Accepted for now; revisit only if reading the compiled vault shows it actually hurts. Recorded, not silently dropped. |
+| **A tool silently gains vault-write authority.** | Effects come from the registry, not the tool author; step 3's guard forces an explicit exposure decision per command; step 8 requires `confirm`. |
+| **The local server gets exposed over HTTP later** "because it already works". | stdio only; step 9 states the authority model in the architecture document, where prohibited claims already live. |
+| **Detached subprocess orphans or double-runs.** | The handle derives from the plan path, so two runs on one plan collide detectably; `.run.json` carries the pid and a dead pid reports `stalled`, never `running`. |
+| **Registry and tools drift** — the exact failure `registry.py` was written to prevent. | Step 3's test fails the suite when a command has no exposure decision; step 5 pins the generated list. |
+| **`2025-11-25` ages out.** | No deprecated features used; Tasks deliberately hand-rolled so the move to the extension is a re-point, not a rewrite. |
+| **An agent treats exit 2 as a finding** and heals on infrastructure failure. | Step 4 maps 2–7 to tool errors, never results, with a table-driven test over every code. |
+| **Import-time credential reads.** | Step 5 tests that building and listing tools touches no environment — the same structural guarantee `schema` has. |
 
 ---
 
 ### Rollback plan
 
-- New files (`scripts/plan_articles.py`, `scripts/compile_plan.py`, their tests) can be
-  deleted without touching the working single-page path.
-- Steps 2 and 3 modify shipped files; both are small and independently revertible.
-- No migrations, no schema changes. `git revert` restores prior behaviour.
-- Vault safety does not depend on the revert: the staged-publish manifest plus the existing
-  per-file snapshot/restore mean an aborted batch leaves `wiki/` unchanged.
+- Everything new lives under `scout/mcp/`, `scout/cli/mcp_*.py`, `scout/cli/tasks.py`,
+  `scout/cli/commands/mcp.py` and their tests. Deleting them removes the feature.
+- Step 2 touches shipped code (`app.py`); it is a pure extraction with existing tests as
+  the guard, and is independently revertible.
+- `scout/mcp_server.py`, the deployed containers, and the database are untouched — step 10
+  asserts the first of those mechanically.
+- No migrations, no schema changes, no vault writes outside what `compile_plan` already did.
 
 ---
 
 ### Deferred, deliberately
 
-- **Inline contextual wikilinks** in generated prose (blocked by the `[[` rejection that
-  keeps R-1.5 unbreakable — a deliberate trade).
-- **Step 4 (87-reference graph)** and **source-health SH-1..SH-10** remain final tasks.
-- **Agent-package fixes** remain near-last, per your ordering.
+- **A remote story for LOCAL commands.** Needs OAuth 2.1 with audience validation and a
+  real deployment design — a project, not a flag.
+- **Upgrading off `fastmcp==3.3.1`.** The pin exists for Streamable HTTP and output-schema
+  stability, and `scout` depends on it.
+- **Native Tasks**, until we move past `2025-11-25`.
+- **MCP Apps** (interactive HTML in sandboxed iframes) — interesting for showing a compile
+  in progress, out of scope here.

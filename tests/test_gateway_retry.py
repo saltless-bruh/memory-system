@@ -27,9 +27,15 @@ class _Response(io.BytesIO):
 
 
 def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
-    headers: dict[str, str] = {} if retry_after is None else {"Retry-After": retry_after}
+    headers: dict[str, str] = (
+        {} if retry_after is None else {"Retry-After": retry_after}
+    )
     return urllib.error.HTTPError(
-        "http://gateway.invalid", code, "boom", headers, None  # type: ignore[arg-type]
+        "http://gateway.invalid",
+        code,
+        "boom",
+        headers,
+        None,  # type: ignore[arg-type]
     )
 
 
@@ -47,9 +53,7 @@ def test_retries_a_429_then_succeeds_and_honours_retry_after() -> None:
             raise _http_error(429, retry_after="7")
         return _Response(b'{"ok": true}')
 
-    body = urlopen_with_retry(
-        _request(), timeout=5, opener=opener, sleep=slept.append
-    )
+    body = urlopen_with_retry(_request(), timeout=5, opener=opener, sleep=slept.append)
 
     assert body == b'{"ok": true}'
     assert len(calls) == 2
@@ -108,7 +112,9 @@ def test_transport_errors_are_retried_then_surface() -> None:
 @pytest.mark.parametrize(
     ("attempt", "ceiling"), [(1, 1.0), (2, 2.0), (3, 4.0), (10, MAX_DELAY_SECONDS)]
 )
-def test_backoff_is_exponential_jittered_and_capped(attempt: int, ceiling: float) -> None:
+def test_backoff_is_exponential_jittered_and_capped(
+    attempt: int, ceiling: float
+) -> None:
     rng = random.Random(0)
     samples = [backoff_delay(attempt, rng=rng) for _ in range(50)]
     assert all(0.0 <= s <= ceiling for s in samples)

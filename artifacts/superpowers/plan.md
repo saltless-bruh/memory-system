@@ -1,233 +1,222 @@
-# Implementation Plan: Local MCP Server, Generated from the Registry
+## Goal
 
-Branch: `fix/architecture-security-hardening` · Base: `dea240c`
-Prepared: 2026-08-21 · Brainstorm: `artifacts/superpowers/brainstorm-mcp-2026-08-21.md`
+Deliver a staged, production-ready SNP Memory System by closing the twelve active gaps without corrupting the current corpus or treating static checks as proof of a working release.
 
-> The previous occupant (Step 3 — Multi-Article Compilation, complete: 728 tests,
-> 5 addresses PASS, 5 pages GROUNDED) was archived to
-> `artifacts/superpowers/plan-step3-2026-08-21.md`.
+The plan applies current secure-delivery and retrieval practices: immutable artifact promotion, a release manifest/SBOM-equivalent inventory, least-privilege operational testing, versioned multilingual retrieval evaluation, and isolated resource-bounded processing of untrusted files.
 
----
+## Assumptions
 
-### Goal
+- This is a planning-only artifact. The current commit/push/rebuild/re-ingest hold remains in force until the owner explicitly lifts it.
+- The clean release target is the reviewed, committed form of the current worktree; all later runtime evidence must name that exact Git revision and image digest.
+- Production release work must use a maintenance window or an isolated staging Compose project with a database backup/restore point before any container-side re-ingest.
+- The owner must decide: supported languages; release version; article/judge budget; derived-asset retention/location; source-health thresholds and quarantine policy; Office-format scope; `BOT_TOKEN` scope; and runner-host Docker-socket posture.
+- The researched practices incorporated here are immutable action/image references and artifact promotion ([GitHub Actions hardening](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-your-deployments#using-third-party-actions), [Docker image pinning](https://docs.docker.com/build/building/best-practices/#pin-base-image-versions)); bounded hostile-file processing ([OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)); and versioned retrieval metrics such as Recall@k, MRR, and context precision/recall ([Ragas metrics](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/context_precision/)).
+- Native MCP Tasks remain a deliberately deferred capability unless Redis or a durable dependency-free backend becomes justified.
 
-Let any MCP-speaking agent operate the memory system — verify, decompose, compile —
-through tools generated from `registry.py`, **without** widening the authority the
-`scout` retrieval boundary grants and **without** a second definition of any command.
+## Plan
 
-**Definition of done:** an agent connects to `snpmemory mcp`, calls `verify`, gets a
-structured finding; calls `plan_articles`, edits the plan, calls `compile_plan`, and polls
-`compile_status` until N pages exist — while `scout/mcp_server.py` remains byte-identical.
+1. **Record the owner decisions and release gate**
+   - Files: `docs/ARCHITECTURE_STATUS.md`, `docs/REMAINING_TASKS.md`, `docs/runbook.md`
+   - Change:
+     - Add one dated production-readiness decision record naming the release SHA, release version, maintenance/staging choice, backup owner, multilingual decision deadline, article budget, asset policy deadline, and source-health policy deadline.
+     - Keep unapproved decisions as explicit gates; do not replace them with defaults.
+   - Verify: `rg -n "production-readiness|release SHA|owner decision" docs/ARCHITECTURE_STATUS.md docs/REMAINING_TASKS.md docs/runbook.md`; `uv run pytest tests/test_docs_contract.py -q`.
 
----
+2. **Add a machine-checkable release manifest**
+   - Files: `scripts/write_release_manifest.py` (new), `tests/test_release_manifest.py` (new), `docs/runbook.md`
+   - Change:
+     - Generate a JSON manifest containing Git revision, dirty-tree state, Compose image digests, local-image labels, lockfile SHA-256 values, migration ledger version, parser capability fingerprint, and timestamp.
+     - Treat this as the release inventory/SBOM-equivalent input; it records what was tested and promoted without claiming that it proves source integrity.
+   - Verify: `uv run pytest tests/test_release_manifest.py -q`; `uv run python scripts/write_release_manifest.py --check`.
 
-### The constraint that shapes everything
+3. **Create the release preflight and rollback runbook**
+   - Files: `scripts/release_preflight.py` (new), `tests/test_release_preflight.py` (new), `docs/runbook.md`
+   - Change:
+     - Fail before deployment when the worktree is dirty, `SNP_GIT_REVISION` is absent/mismatched, locks/digests are unverified, migrations are pending, or a backup/restore-point identifier is missing.
+     - Document a tested restore sequence: stop writers, restore PostgreSQL, restore the previous image digest, and verify the old manifest before reopening ingestion.
+   - Verify: `uv run pytest tests/test_release_preflight.py -q`; `uv run python scripts/release_preflight.py --help`.
 
-`scout` runs in a container with **no read-write repository mount**, and
-`docs/ARCHITECTURE_STATUS.md` lists such a mount among its **prohibited claims** — v2
-hardening removed it deliberately. Seven of the eight CLI commands are
-`Prerequisite.LOCAL` and need a checkout.
+4. **Freeze and review the release candidate**
+   - Files: release manifest produced under `artifacts/releases/`, Git tag metadata, `docs/runbook.md`
+   - Change:
+     - After the hold is lifted, split functional changes from formatting where practical, run the complete review, commit the approved candidate, and create an annotated candidate tag.
+     - Capture the pre-release database backup and manifest before starting any new image.
+   - Verify: `git status --short` is empty; `git diff --check`; `uv run pytest -m 'not integration' --disable-socket -q`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy scout scripts`; `git show --no-patch --format=fuller <candidate-tag>`.
 
-So the tools cannot live on `scout`. Not a preference: putting them there would restore the
-topology the security work eliminated and would make a retrieval token a page-writing
-token. They get a **local stdio server** instead, carrying exactly the authority of the
-user who launched it.
+5. **Build immutable local images in staging or the approved maintenance window**
+   - Files: `docker-compose.yml`, `scripts/preflight_stack.py`, release manifest output
+   - Change:
+     - Build `scout`, `basic-memory`, and `host-sync` from the candidate revision with the locked dependencies and pinned base images; record their resulting digests in the manifest.
+     - Pass `SNP_GIT_REVISION` into every locally built Dockerfile and add the
+       same `org.opencontainers.image.revision` OCI label to `basic-memory` and
+       `host-sync` that Scout already carries; a local image with neither digest
+       nor revision label is intentionally rejected by the manifest.
+     - Promote the exact tested images to production; never rebuild from the same source after testing.
+   - Verify: `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build --pull=false scout basic-memory host-sync`; `docker compose config`; `uv run python scripts/preflight_stack.py`.
 
----
+6. **Perform a controlled container-side corpus transition**
+   - Files: `docs/runbook.md`, `scripts/release_preflight.py`, `tests/integration/test_postgres_migrations.py`
+   - Change:
+     - Start migrations before runtime services, hold automatic writers until the new container capability fingerprint is recorded, then run the approved one-shot ingest with the exact capability acknowledgement captured from its dry run.
+     - Do not use a broad restart as a substitute for this transition; preserve the backup and old manifest until address, RLS, and corpus checks pass.
+   - Verify: `docker compose up -d postgres postgres-migrate litellm`; `docker compose ps`; approved one-shot container ingest; `uv run python scripts/preflight_stack.py`; `snpmemory verify-vault`; `snpmemory verify-addresses`; `SNP_INTEGRATION_PROJECT=<approved-project> uv run pytest -m integration tests/integration/test_postgres_migrations.py tests/integration/test_postgres_rls.py -q`.
 
-### Assumptions
+7. **Record and gate the container parser contract**
+   - Files: `tests/fixtures/parser-golden/` (new container fingerprint entry), `tests/test_parser_golden.py`, `docs/REMAINING_TASKS.md`
+   - Change:
+     - Record the parsed-structure golden from the rebuilt container against its real capability fingerprint; retain the host golden as a separate environment.
+     - Make release CI reject an unrecognised canonical container fingerprint.
+   - Verify: container parser-golden recorder command; `SNP_CANONICAL_ENV=1 uv run pytest tests/test_parser_golden.py -q`.
 
-1. `scout/mcp_server.py` is **not modified**. One tool, `rag_fetch`, remains the only door
-   into RAG.
-2. `fastmcp==3.3.1` stays pinned. Its SDK speaks `2025-11-25`; the current spec is
-   `2026-07-28`. We design so a later move is cheap rather than chasing a release candidate.
-3. `Task*` types exist in the pinned SDK but in the **pre-redesign** form the `2026-07-28`
-   RC reworked. We therefore use plain handle-returning tools, not native Tasks.
-4. Tool descriptions come only from `registry.py` — never from document or user text.
-5. PR-first (R-6.4/R-7.3) is unchanged: no tool pushes to `main`.
+8. **Publish the first reproducible release and pin the installer**
+   - Files: `scripts/install-agent.sh`, `docs/CONNECT_AGENTS.md`, `docs/runbook.md`, `docs/REMAINING_TASKS.md`
+   - Change:
+     - Convert the candidate tag to the approved release tag, make it the installer default, and fetch the curl installer at the tag rather than `main`.
+     - Require the installer to print both tag and resolved commit.
+   - Verify: `git tag --list`; `SNP_AGENT_REF=<release-tag> ./scripts/install-agent.sh --dry-run <temp-dir>`; `uv run pytest tests/test_cli_install_agent.py tests/test_agent_package.py -q`.
 
----
+9. **Build an isolated real basic-memory publication fixture**
+   - Files: `tests/integration/conftest.py`, `tests/integration/test_basic_memory_mcp_live.py` (new), `docs/CONNECT_AGENTS.md`
+   - Change:
+     - Use a disposable Git remote, vault-replica volume, and Compose project; publish a known page through host-sync rather than reading a checkout directly.
+     - Keep all test data outside the production Git remote and PostgreSQL corpus.
+   - Verify: `SNP_INTEGRATION_PROJECT=<isolated-project> uv run pytest -m integration tests/integration/test_basic_memory_mcp_live.py -q`.
 
-### Plan
+10. **Assert the real first-hop contract**
+    - Files: `tests/integration/test_basic_memory_mcp_live.py`, `tests/fixtures/wiki-search-eval/first_hop.jsonl` (new)
+    - Change:
+      - Call deployed `search_notes` using high-specificity fixture queries, assert the target page is returned within a documented K, then call `read_note` using the returned identifier and assert title/body/frontmatter.
+      - Test unavailable host-sync/basic-memory as infrastructure failure, never as an empty search result.
+    - Verify: same isolated integration command; intentionally stop basic-memory and assert the test reports the expected infrastructure failure.
 
-**1. Archive Step 3's plan, land this one**
-- Files: `artifacts/superpowers/plan.md`, `plan-step3-2026-08-21.md`
-- Verify: `ls artifacts/superpowers/`; `head -4 plan.md`.
+11. **Create a versioned multilingual retrieval evaluation set**
+    - Files: `tests/fixtures/wiki-search-eval/queries.jsonl` (new), `scripts/eval_wiki_search.py` (new), `tests/test_eval_wiki_search.py` (new), `docs/basic-memory-setup.md`
+    - Change:
+      - Add human-reviewed English and Vietnamese queries with expected page IDs and intent labels; report Recall@1/3/5, MRR, and failures by language.
+      - Record the current English-only baseline; fixtures are versioned and must be extended whenever the corpus grows.
+    - Verify: `uv run pytest tests/test_eval_wiki_search.py -q`; `SNP_INTEGRATION_PROJECT=<isolated-project> uv run python scripts/eval_wiki_search.py --output artifacts/evals/wiki-search-<tag>.json`.
 
-**2. Extract one shared invocation path**
-- Files: `scout/cli/invoke.py` (new), `scout/cli/app.py`, `tests/test_cli_core.py`
-- Change: lift `_wrap`'s body into `invoke(spec, *args, **kwargs) -> CommandResult` —
-  load at call time, resolve config from the **declaration**, inject only if the function
-  accepts it. `app.py` calls it; the MCP server will too.
-- Why: two callers, one path. It is the mechanism that makes "cannot drift" true rather
-  than aspirational, and it preserves the existing guarantee that `schema` cannot read a
-  credential even by accident.
-- Verify: `pytest tests/test_cli_core.py -q` unchanged; a new test asserts `invoke` passes
-  no config to a `NONE` command.
+12. **Make and prove the wiki-search language decision**
+    - Files: `basic-memory/config.json`, `basic-memory/Dockerfile`, `docs/basic-memory-setup.md`, `docs/ARCHITECTURE_STATUS.md`, evaluation fixtures/results
+    - Change:
+      - If multilingual support is accepted, conduct a container compatibility spike for candidate FastEmbed models, choose only a model that passes the versioned evaluation without unacceptable English regression, then reindex a staging replica.
+      - If English-only is accepted, state the audience restriction and preserve the baseline as an explicit accepted limitation.
+    - Verify: staging reindex; evaluation command from step 11; a regression test enforcing the owner-selected threshold and language contract.
 
-**3. Declare the MCP exposure policy**
-- Files: `scout/cli/mcp_policy.py` (new), `tests/test_mcp_policy.py` (new)
-- Change: a small table deciding, per command, `EXPOSE` / `HIDE` / `GROUP(tool, stage)`.
-  Initial policy — `schema` HIDE (an MCP client lists tools natively), the five verify
-  commands GROUP into one `verify` tool with a `stage` argument, `plan-articles` and
-  `compile-plan` EXPOSE.
-- Why not pure 1:1: eight tools next to `rag_fetch` and basic-memory's tools is 12+
-  definitions in every agent's context, and a bloated tool list measurably degrades tool
-  selection. Five is enough.
-- **Anti-drift guard:** a test asserts every `CommandSpec` in `REGISTRY` appears in the
-  policy exactly once. Adding a command without deciding its exposure **fails the suite**.
-- Verify: `pytest tests/test_mcp_policy.py -q`.
+13. **Expand and repair the curated corpus under budget control**
+    - Files: `artifacts/plans/computers-12-00091.recommended.json`, `wiki/concepts/*.md`, `wiki/index.md` (generated), `artifacts/evals/`
+    - Change:
+      - Authorise the six-article batch budget, compile resumably, re-mint the known bad hint, and recompile legacy pages that need `Works Cited`.
+      - Define a release corpus target by independent sources and query coverage, not page count alone.
+    - Verify: `snpmemory compile-plan artifacts/plans/computers-12-00091.recommended.json --confirm --background`; `snpmemory compile-status <handle>`; `snpmemory verify-vault`; `snpmemory verify-addresses`; evaluation command from step 11.
 
-**4. Map results and exit codes onto MCP**
-- Files: `scout/cli/mcp_result.py` (new), `tests/test_mcp_result.py` (new)
-- Change: one function turning a `CommandResult` into an MCP tool return.
-  - `0` → success payload.
-  - `1` (semantic failure) → **successful tool call** carrying `{"status": "fail", ...}`.
-    A finding is data an agent must reason about, not a transport error.
-  - `2`–`7` → a tool **error**. Exit 2 must never look like a result, because
-    `ci_address_gate.py`'s whole contract is that 2 never authorises mutation.
-- Also: return summary fields by default, full detail behind `detail=true`.
-- Verify: table-driven tests over every `ExitCode`; assert 2 never yields a success payload.
+14. **Define source-health policy before implementing enforcement**
+    - Files: `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`, `docs/ARCHITECTURE_STATUS.md`, `docs/REMAINING_TASKS.md`
+    - Change:
+      - Record type-specific yield thresholds, report-versus-quarantine policy for insufficient sources, supported Office-format scope, validation location, retention period, and the human approval path for restore/override.
+      - Define a state machine: `healthy`, `insufficient`, `unavailable`, `quarantined`, and `replaced`; only `quarantined` suppresses retrieval.
+    - Verify: decision table is complete; `uv run pytest tests/test_docs_contract.py -q`.
 
-**5. Generate the tools**
-- Files: `scout/mcp/__init__.py`, `scout/mcp/local_server.py` (new),
-  `tests/test_local_mcp_server.py` (new)
-- Change: build a `FastMCP` server by walking `REGISTRY` through the policy; derive each
-  tool's name, description, and annotations from the `CommandSpec`.
-  - `Effect.READ` → `readOnlyHint=True`
-  - `Effect.WRITE` / `DESTRUCTIVE` → `destructiveHint=True`
-  (all three hints exist in the pinned SDK — verified.)
-- **Import purity:** building and listing tools must touch no database, gateway,
-  credential, or running stack — the guarantee `schema` already makes.
-- Verify: a test builds the server with sockets disabled and asserts the tool list, the
-  annotations per tool, and that no import reached the network.
+15. **Persist source-health state and immutable events**
+    - Files: `config/postgres/migrations/006_source_health.sql` (new), `scout/source_health.py` (new), `scout/ingest.py`, `tests/integration/test_source_health_rls.py` (new)
+    - Change:
+      - Add a current-state record keyed by source URI plus content hash/validator revision, and an append-only health-event table with separate least-privilege grants.
+      - Store outcomes even for zero-chunk parses; never infer health from the continued existence of old chunks.
+    - Verify: migration ledger test; integration tests prove the health writer can insert/select only and cannot alter prior events.
 
-**6. Ship `snpmemory mcp`**
-- Files: `scout/cli/commands/mcp.py` (new), `scout/cli/app.py`, `docs/CLI_SPEC.md`
-- Change: a command that runs the stdio server. Declared `Prerequisite.LOCAL`,
-  `Effect.READ` (the server itself reads; its tools declare their own effects).
-- Verify: `snpmemory mcp --help`; an integration test drives one `tools/list` and one
-  `verify` call over stdio and asserts a structured result.
+16. **Hash-gate validation and use the ingestion parser as the sole parser**
+    - Files: `scout/source_health.py`, `scout/ingest.py`, `scout/sync_job.py`, `tests/test_source_health.py` (new)
+    - Change:
+      - Compute file SHA-256 streaming from disk; skip expensive revalidation only when content hash and validator revision both match.
+      - Call `parse_file` through one shared interface for ingest and health reporting; do not add a second parser.
+    - Verify: unit tests for unchanged skip, changed healthy re-ingest, changed unhealthy quarantine candidate, and validator-revision sweep; test a multi-gigabyte synthetic stream without loading it fully into memory.
 
-**7. Handles for long-running compilation**
-- Files: `scout/cli/tasks.py` (new), `tests/test_tasks.py` (new)
-- Change: `compile_plan` runs pre-flight synchronously (retrieval only, seconds), then
-  starts the batch as a detached subprocess and returns
-  `{handle, articles, preflight}`. `compile_status(handle)` reports per-article progress.
-- **The state already exists.** Step 3's staging directory and plan file are a durable,
-  resumable, per-article progress record. The handle is derived from the plan path; status
-  is computed by reading staging against the plan. A small `.run.json` (pid, started_at)
-  distinguishes *in flight* from *stalled*.
-- Verify: unit tests over a synthetic staging directory (2 of 4 staged → status reports 2
-  done, 2 pending); a test asserts a stale `.run.json` with a dead pid reports `stalled`,
-  not `running`.
+17. **Isolate hostile parsing before enabling broad health scans**
+    - Files: `scout/parser_worker.py` (new), `scout/source_health.py`, `scout/parsers.py`, `docker-compose.yml`, `tests/test_parser_worker.py` (new)
+    - Change:
+      - Run format parsing in a short-lived, non-root worker with no general network access, file-size and decompression-ratio caps, XML entity/DTD denial, CPU/wall-clock timeout, memory ceiling, and capped concurrency.
+      - Keep optional model validation in a separately rate-limited gateway-only path; it must not grant raw parser workers model credentials.
+    - Verify: tests for timeout, ZIP bomb ratio, unsafe XML, malformed PDF, and concurrency cap; Compose/service configuration proves the parser worker has read-only raw access and no Docker socket or database-admin credential.
 
-**8. Require confirmation for mutation**
-- Files: `scout/cli/commands/compile.py`, `scout/mcp/local_server.py`
-- Change: `compile_plan` takes a required `confirm: bool`; false or absent returns a
-  refusal naming what would be written. Current guidance is that mutation should prompt at
-  call time, not rely on install-time consent; `destructiveHint` asks the client to prompt,
-  and this makes it true even for clients that do not.
-- Verify: a test asserts `confirm=False` writes nothing and returns a refusal.
+18. **Expose health results without deleting evidence**
+    - Files: `scout/types.py`, `scout/core.py`, `scout/backends/pgvector.py`, `scripts/verify_addresses.py`, `scout/cli/commands/verify.py`, `tests/test_core.py`, `tests/test_verify_addresses.py`
+    - Change:
+      - Add `FetchStatus.SOURCE_QUARANTINED`; make addressed fetches return it distinctly, without context, when the source is quarantined.
+      - Preserve `NO_EVIDENCE` for address verification, route operators to source remediation, and prevent healer/mint from treating source failure as a hint problem.
+    - Verify: unit and integration tests for healthy, no-source, no-evidence, and quarantined states; ensure no path returns stale chunks from quarantined evidence.
 
-**9. Documents**
-- Files: `README.md`, `docs/CONNECT_AGENTS.md`, `docs/ARCHITECTURE_STATUS.md`, `AGENTS.md`
-- Change: state which server does what; that `rag_fetch` remains the only door into RAG;
-  and — plainly — that the local server **carries the launching user's authority and must
-  not be exposed over HTTP without an auth design**.
-- Verify: `grep` that no document describes the local server as remotely reachable.
+19. **Add operator reporting, reversible quarantine, and controlled restoration**
+    - Files: `scout/cli/commands/source_health.py` (new), `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`, `scripts/propose_page.py`, `docs/runbook.md`, tests for the new command
+    - Change:
+      - Provide a read-only report by default; require a reason, explicit confirmation, and PR-backed review to quarantine, override, or restore.
+      - Keep original raw bytes and prior chunks for audit/rollback, but exclude quarantined sources from serving and verification success.
+    - Verify: CLI schema/output/exit-code tests; integration test proving a false-positive override restores service only after authorised review; runbook dry-run walkthrough.
 
-**10. Full verification**
-- `ruff check .` · `mypy scout scripts` · `pytest -q` (expect 728 + new, zero regressions)
-- `scout/mcp_server.py` unchanged: `git diff --stat scout/mcp_server.py` is empty.
-- Live: connect a real MCP client, list tools, run `verify`, then
-  `plan_articles → compile_plan → compile_status` to completion.
-- Confirm the 7 healthy containers are untouched by any of it.
+20. **Add a hash-gated scheduled health sweep only after the safe path works**
+    - Files: `scout/sync_job.py`, `docker-compose.yml`, `.gitea/workflows/auto-healer.yaml` or a dedicated health workflow, `tests/test_sync_job.py`
+    - Change:
+      - Schedule only the free hash/metadata scan by default; queue paid/model validation for changed or stale-validator sources with bounded rate and concurrency.
+      - Emit alerts/reports rather than automatically repairing raw evidence.
+    - Verify: unchanged corpus produces no parser/model calls; changed source produces one health event; simulated gateway budget exhaustion leaves data intact and readiness honest.
 
----
+21. **Design and implement the derived-asset boundary**
+    - Files: `docs/ARCHITECTURE_STATUS.md`, `docs/runbook.md`, `docker-compose.yml`, `config/postgres/migrations/007_derived_assets.sql` (new), `scout/derived_assets.py` (new), tests
+    - Change:
+      - After the owner chooses location and retention, store derived assets by content hash with source URI, source hash, ACL, extractor/version, and retention metadata.
+      - Enforce ACL at read time as well as copy time; deleting an asset must never delete the raw source or source-health history.
+    - Verify: migration/RLS tests; asset metadata contract tests; cross-department denial test; retention dry run.
 
-### 2026 practice check (verified 2026-08-21)
+22. **Implement `snpmemory extract` behind the derived-asset contract**
+    - Files: `scout/cli/commands/extract.py` (new), `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`, `scout/pdf_structure.py`, `tests/test_cli_extract.py` (new), `tests/test_derived_assets.py` (new), `docs/CLI_SPEC.md`
+    - Change:
+      - Extract only supported, health-cleared source types using the isolated worker; persist assets and metadata atomically with ACL inheritance.
+      - Return unavailable/insufficient conditions honestly; do not claim a zero count when the extractor was unavailable.
+    - Verify: command schema test; path-boundary, ACL, idempotency, failure-rollback, and capability-unavailable tests; container integration test after enabling the chosen extractor.
 
-**MP-1 — the current spec is `2026-07-28`; we are on `2025-11-25`.** It makes the core
-stateless (no `initialize`, no `Mcp-Session-Id`), adds routable `Mcp-Method`/`Mcp-Name`
-headers, moves **Tasks to an extension after a production redesign**, and deprecates
-**Roots, Sampling and Logging** with a 12-month offramp.
+23. **Treat Office ingestion and advanced layout extraction as a separate gated epic**
+    - Files: `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`, `docs/ARCHITECTURE_STATUS.md`, a new spike under `spikes/office-ingest/` only if approved
+    - Change:
+      - Keep DOCX/XLSX unsupported until an isolated parser/evaluation spike passes the controls from step 17 and has type-specific health thresholds.
+      - Evaluate a layout-aware extractor only against a representative corpus and resource budget; do not introduce it through `extract` opportunistically.
+    - Verify: scope remains prohibited in active guidance until the spike has a signed-off result; approved spike has correctness, security, and cost evidence.
 
-Applied: we use none of the deprecated three — we pass explicit path parameters rather than
-Roots, call LiteLLM directly rather than Sampling, and already log to stderr. That
-alignment is partly luck; recording it means the eventual upgrade is a transport change,
-not a redesign. We deliberately do **not** adopt the SDK's pre-redesign `Task*` types
-(step 7).
+24. **Generate agent CLI reference from the registry**
+    - Files: `scripts/generate_agent_cli_reference.py` (new), `packages/snp-agent/instructions/cli-reference.md` (generated), `.agent/instructions/cli-reference.md` (generated), concise hand-written guidance file, `tests/test_agent_cli_reference.py` (new)
+    - Change:
+      - Generate command names, arguments, effect, output fields, and exit codes from `snpmemory schema`; do not copy a manually maintained list.
+      - Add a small static guide for wiki-first retrieval, minted hints, PR-first changes, and semantic versus infrastructure exits.
+    - Verify: generator is byte-stable; `snpmemory schema` matches both package surfaces; package equivalence tests pass.
 
-**MP-2 — tool-list bloat degrades selection.** A tool definition costs ~100–500 tokens and
-real deployments reach tens of thousands; bloated schemas make agents pick the wrong tool.
-Guidance: keep parameters ≲8 per tool and return few fields by default.
+25. **Keep native MCP Tasks as an evidence-backed deferral**
+    - Files: `docs/ARCHITECTURE_STATUS.md`, `docs/REMAINING_TASKS.md`, `tests/test_local_mcp_server.py`
+    - Change:
+      - Record concrete revisit triggers: Redis adopted for another approved service, a durable dependency-free task backend becomes available, or the MCP client estate requires the standard protocol.
+      - Preserve the on-disk handle/heartbeat/cancel protocol and add a dated review reminder rather than introducing Redis solely for parity.
+    - Verify: local MCP capability advertises no Tasks without its backend; the existing persistent-handle tests remain green; the decision record has an owner and review date.
 
-Applied: step 3 collapses 8 commands to 5 tools; step 4 returns summary fields with detail
-behind a flag.
+26. **Reconcile active documentation and execute the final production review**
+    - Files: `docs/REMAINING_TASKS.md`, `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`, `docs/Ideas.md`, `docs/ARCHITECTURE_STATUS.md`, `README.md`, `artifacts/superpowers/finish-production-readiness.md` (new)
+    - Change:
+      - Reconcile partial-versus-unimplemented source-health wording, retire stale Idea counts, and mark only verified release outcomes complete.
+      - Perform a final review against the release manifest, rollback drill, user-path test, language evaluation, source-health tests, asset ACL tests, and runner exercise.
+    - Verify: `uv run pytest -m 'not integration' --disable-socket -q`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy scout scripts`; targeted integration suites; `git diff --check`; no stale-claim match in active documents.
 
-**MP-3 — tool poisoning and rug pulls.** Tool descriptions and schemas are model-read
-metadata that users rarely see; a later update can swap benign behaviour for malicious.
+## Risks & mitigations
 
-Applied: descriptions come only from `registry.py`, which is PR-reviewed, and step 5's test
-pins the generated tool list so a change to it must be seen in review. Retrieved document
-text never reaches a description.
+- **Corpus loss or downgrade during release:** require an immutable database backup, old release manifest, stopped writers, a dry-run capability mismatch, and one-shot controlled ingest—not a broad restart.
+- **A build passes static checks but fails at runtime:** build and test the exact image digests in staging, then promote those exact images; never rebuild after test.
+- **Multilingual change degrades current English behavior:** use versioned bilingual fixtures and published thresholds; reject model changes without measured improvement or explicit owner acceptance.
+- **Quarantine causes evidence loss:** preserve raw bytes, chunks, current state, and append-only history; suppress serving rather than deleting; require reviewed restoration.
+- **Parser sandbox escape or resource exhaustion:** isolate workers, remove credentials/network, bound file type/size/time/memory/decompression/concurrency, and fuzz hostile fixtures before enabling uploads.
+- **Derived asset ACL leak:** enforce ACL at both materialization and read; test cross-department denial and source-ACL changes.
+- **Runner compromise:** exercise it only on an approved runner host; inspect/split bot tokens; retain the Docker-socket decision as explicit host risk.
+- **Scope overload:** each numbered phase is separately releasable; R0 and R1 are prerequisites, while R2–R4 can be approved independently after their owner decisions.
 
-**MP-4 — confused deputy and token passthrough.** Servers must act with the caller's
-authority, not their own, and **must not accept tokens not issued for them**.
+## Rollback plan
 
-Applied: we add **no new network surface**, which is the strongest available answer — a
-stdio server has no token to confuse. `scout` keeps its request-scoped verification
-untouched. Step 9 writes the limitation down so nobody later exposes it over HTTP casually.
-
-**MP-5 — mutation needs call-time approval**, not one-time install consent.
-
-Applied: step 8's required `confirm`, plus `destructiveHint`.
-
-Sources:
-- [The 2026-07-28 MCP Specification Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)
-- [MCP 2026-07-28 spec: every breaking change](https://stacktr.ee/blog/mcp-2026-spec-changes)
-- [Security Best Practices — Model Context Protocol](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
-- [MCP Security — OWASP Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html)
-- [MCP Security Best Practices: A Practical Guide for 2026](https://blog.mcpservers.org/posts/mcp-security-best-practices)
-- [10 strategies to reduce MCP token bloat](https://thenewstack.io/how-to-reduce-mcp-token-bloat/)
-- [MCP Tool Schema Design Guide 2026](https://kansei-link.com/en/insights/mcp-tool-schema-design-guide-2026.html)
-- [MCP tool design: practical approaches and tradeoffs — AWS](https://aws.amazon.com/blogs/machine-learning/mcp-tool-design-practical-approaches-and-tradeoffs/)
-
----
-
-### Risks & mitigations
-
-| Risk | Mitigation |
-|---|---|
-| **A tool silently gains vault-write authority.** | Effects come from the registry, not the tool author; step 3's guard forces an explicit exposure decision per command; step 8 requires `confirm`. |
-| **The local server gets exposed over HTTP later** "because it already works". | stdio only; step 9 states the authority model in the architecture document, where prohibited claims already live. |
-| **Detached subprocess orphans or double-runs.** | The handle derives from the plan path, so two runs on one plan collide detectably; `.run.json` carries the pid and a dead pid reports `stalled`, never `running`. |
-| **Registry and tools drift** — the exact failure `registry.py` was written to prevent. | Step 3's test fails the suite when a command has no exposure decision; step 5 pins the generated list. |
-| **`2025-11-25` ages out.** | No deprecated features used; Tasks deliberately hand-rolled so the move to the extension is a re-point, not a rewrite. |
-| **An agent treats exit 2 as a finding** and heals on infrastructure failure. | Step 4 maps 2–7 to tool errors, never results, with a table-driven test over every code. |
-| **Import-time credential reads.** | Step 5 tests that building and listing tools touches no environment — the same structural guarantee `schema` has. |
-
----
-
-### Rollback plan
-
-- Everything new lives under `scout/mcp/`, `scout/cli/mcp_*.py`, `scout/cli/tasks.py`,
-  `scout/cli/commands/mcp.py` and their tests. Deleting them removes the feature.
-- Step 2 touches shipped code (`app.py`); it is a pure extraction with existing tests as
-  the guard, and is independently revertible.
-- `scout/mcp_server.py`, the deployed containers, and the database are untouched — step 10
-  asserts the first of those mechanically.
-- No migrations, no schema changes, no vault writes outside what `compile_plan` already did.
-
----
-
-### Deferred, deliberately
-
-- **A remote story for LOCAL commands.** Needs OAuth 2.1 with audience validation and a
-  real deployment design — a project, not a flag.
-- **Upgrading off `fastmcp==3.3.1`.** The pin exists for Streamable HTTP and output-schema
-  stability, and `scout` depends on it.
-- **Native Tasks**, until we move past `2025-11-25`.
-- **MCP Apps** (interactive HTML in sandboxed iframes) — interesting for showing a compile
-  in progress, out of scope here.
+- **R0 release:** stop writers, restore the database backup, redeploy the previous image digests from the prior manifest, run `preflight_stack.py`, then re-enable sync only after verification.
+- **Search model:** retain the previous basic-memory index/model configuration until bilingual evaluation passes; roll back the config and index atomically.
+- **Corpus compilation:** keep generated pages staged on a feature branch; revert the PR or restore prior pages/index from Git.
+- **Source health:** migrations are additive; disable the scheduler and set sources to report-only while preserving events/chunks. Roll back serving policy before deleting no data.
+- **Derived assets:** disable extraction/read exposure and retain metadata/assets until retention policy permits removal; raw sources and source-health records are untouched.
+- **Runner/installer:** disable the runner profile or revoke the bot token; revert installer default to the last signed release tag, never to an unreviewed branch.

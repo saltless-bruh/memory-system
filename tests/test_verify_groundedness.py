@@ -68,13 +68,21 @@ class _FakeBackend:
     ) -> list[Any]:
         from scout.types import RagChunk
 
-        return [RagChunk(text=self.text, file_path=path or "raw/x.md", score=1.0, loc="p.1")]
+        return [
+            RagChunk(text=self.text, file_path=path or "raw/x.md", score=1.0, loc="p.1")
+        ]
 
 
 def _page(body: str = "The cluster runs four replicas.") -> Any:
     return _make_page(
         "wiki/concepts/test-page.md",
-        [{"path": "raw/architecture/k8s_vllm_deployment.yaml", "loc": "p.1", "hint": "replicas"}],
+        [
+            {
+                "path": "raw/architecture/k8s_vllm_deployment.yaml",
+                "loc": "p.1",
+                "hint": "replicas",
+            }
+        ],
         body,
     )
 
@@ -270,7 +278,13 @@ def test_malformed_judge_reply_is_rejected_rather_than_read_as_supported() -> No
     """A judge that answers off-schema must not be interpreted as approval."""
     from scripts.verify_groundedness import GroundednessError
 
-    for payload in ({}, {"verdict": "maybe"}, [], "supported", {"unsupported_claims": []}):
+    for payload in (
+        {},
+        {"verdict": "maybe"},
+        [],
+        "supported",
+        {"unsupported_claims": []},
+    ):
         with pytest.raises(GroundednessError):
             parse_judgment(payload, "body")
 
@@ -278,7 +292,10 @@ def test_malformed_judge_reply_is_rejected_rather_than_read_as_supported() -> No
 def test_contradictory_reply_resolves_against_merging() -> None:
     """`verdict: supported` while listing claims must not be read as approval."""
     judgment = parse_judgment(
-        {"verdict": "supported", "unsupported_claims": [{"sentence": "x", "reason": "y"}]},
+        {
+            "verdict": "supported",
+            "unsupported_claims": [{"sentence": "x", "reason": "y"}],
+        },
         "x",
     )
     assert judgment.unsupported is True, "a self-contradictory reply must fail closed"

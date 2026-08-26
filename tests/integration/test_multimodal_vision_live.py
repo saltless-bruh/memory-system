@@ -36,24 +36,52 @@ def _require_vision_route() -> None:
         pytest.fail("live vision test requires LITELLM_BASE_URL")
 
 
-def test_live_vision_transcribes_a_readable_image() -> None:
-    """A diagram the model can read becomes real, citable text."""
-    _require_vision_route()
-    svg_path = REPO_ROOT / "raw" / "images" / "agent_memory_architecture.svg"
-    if not svg_path.exists():
-        pytest.fail("raw/images/agent_memory_architecture.svg is missing")
+def test_the_deployed_image_reports_figure_extraction_as_unavailable() -> None:
+    """The contract that is actually true of what ships, asserted as such.
 
-    doc = parse_file(svg_path, REPO_ROOT)
+    This slot held a positive VLM test requiring
+    `raw/images/agent_memory_architecture.svg`, which is not in the tracked tree,
+    **and** a figure-extraction capability the deployed image deliberately does
+    not have: `scout/requirements.txt` installs `pypdf` only, so Pillow and
+    `pdfplumber` are both absent (T5.1, decided 2026-08-25). A test requiring an
+    absent asset and an absent capability cannot pass by construction, which is
+    worse than no test — it reads as coverage while proving nothing.
 
-    assert doc.title == "Agent Memory Architecture"
-    assert doc.metadata.get("type") == "image"
-    assert doc.metadata.get("vlm_status") == "ok"
-    assert len(doc.sections) >= 1
-    assert len(doc.full_text) > 50
-    assert FABRICATION_MARKER not in doc.full_text.lower()
+    So it asserts the deployment contract instead: with Pillow absent, figure
+    extraction reports `unavailable` and produces **no count**, because a count
+    of zero from a parser that could not look is not a count of zero. This is
+    true today and it fails the day the capability silently returns — which is
+    the only thing worth catching here.
+
+    The positive test and a committed asset belong in a vision-enabled profile,
+    to be built if and when that feature is approved.
+    """
+    from scout.pdf_structure import PdfStructureError, extract_figures
+
+    pdf = REPO_ROOT / "raw" / "papers" / "computers-12-00091.pdf"
+    if not pdf.is_file():
+        pytest.skip("the sample corpus document is not present")
+
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        # The deployed condition. Extraction must refuse, not return an empty list.
+        with pytest.raises(PdfStructureError, match="Pillow"):
+            extract_figures(pdf)
+        return
+
+    # A host with Pillow installed is *not* what ships. Assert only that the
+    # capability is real there, so this test never silently becomes vacuous.
+    assert extract_figures(pdf), (
+        "Pillow is installed here, so extraction must actually find the "
+        "document's figures; an empty result would mean the capability is "
+        "broken rather than absent"
+    )
 
 
-def test_live_vision_failure_yields_no_text_rather_than_an_invented_description() -> None:
+def test_live_vision_failure_yields_no_text_rather_than_an_invented_description() -> (
+    None
+):
     """An unreadable image must produce zero evidence, not a plausible sentence.
 
     `raw/images/inference_dashboard.png` is a 155-byte 64x64 placeholder. Gemini
@@ -79,5 +107,7 @@ def test_live_vision_failure_yields_no_text_rather_than_an_invented_description(
     assert doc.sections == [], "an unreadable image must contribute no passages"
     assert doc.full_text.strip() == ""
     assert doc.metadata.get("vlm_status") in {"unavailable", "unconfigured"}
-    assert str(doc.metadata.get("vlm_error", "")).strip(), "the failure reason must be recorded"
+    assert str(doc.metadata.get("vlm_error", "")).strip(), (
+        "the failure reason must be recorded"
+    )
     assert FABRICATION_MARKER not in str(doc.metadata).lower()

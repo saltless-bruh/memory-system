@@ -41,6 +41,24 @@ model_list:
       api_key: os.environ/OPENROUTER_API_KEY
     model_info:
       mode: chat
+      # Excluded from the BACKGROUND health loop only. That loop probes every
+      # group every `health_check_interval` seconds — 288 real requests a day
+      # at 300s — and this route runs on an OpenRouter free key, whose ceiling
+      # is 50 requests/day without purchased credits. Monitoring would consume
+      # roughly six times the daily budget before a single page was judged, and
+      # would then report the route unhealthy for the rest of the day.
+      # CORRECTED 2026-08-26: an on-demand `GET /health?model=snp-judge` does
+      # NOT probe it. That endpoint serves the *cached* result of the background
+      # loop, and this route is excluded from that loop — so it answers 503
+      # whether the judge is up or down. The honest reading of that 503 is
+      # "unknown", not "unhealthy".
+      #
+      # To actually ask, spend one request deliberately:
+      #     uv run python scripts/verify_groundedness.py --probe
+      # exit 0 = the judge answered, exit 2 = it did not. That is also what
+      # `ci_address_gate.py` runs as a preflight, before any heal can mutate
+      # `sources[]` on the strength of a check that never happened.
+      disable_background_health_check: true
 
   # ── VLM: multimodal → text before grounding (proposal §2.3) ───────
   # Recall quality downstream depends on this caption step, so keep it
@@ -62,5 +80,8 @@ litellm_settings:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+  # Health checks run on a timer and `/health` serves the cached result, so the
+  # container probe costs nothing per call. Without this every probe would make
+  # a real request to every provider.
   background_health_checks: true
   health_check_interval: 300

@@ -176,12 +176,12 @@ async with pool.acquire() as conn:
             ORDER BY rrf_score DESC
             LIMIT $6
             """,
-            query_embedding,   # $1  bge-m3 vector of the hint
-            target_path,       # $2  address path (pre-filter to the addressed file)
-            candidate_limit,   # $3  per-arm candidates, e.g. 20
-            query_text,        # $4  raw hint text for the full-text arm
-            rrf_k,             # $5  RRF constant, e.g. 60
-            top_k,             # $6  final rows returned, e.g. 8
+            query_embedding,  # $1  bge-m3 vector of the hint
+            target_path,  # $2  address path (pre-filter to the addressed file)
+            candidate_limit,  # $3  per-arm candidates, e.g. 20
+            query_text,  # $4  raw hint text for the full-text arm
+            rrf_k,  # $5  RRF constant, e.g. 60
+            top_k,  # $6  final rows returned, e.g. 8
         )
 ```
 

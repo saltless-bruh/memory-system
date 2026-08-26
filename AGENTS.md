@@ -123,8 +123,18 @@ Rules the linter (`scripts/gen_index.py`) enforces:
 ## Technical Specifications # the compiled knowledge — prose grounded in the
                             # passages sources[] retrieves, never a template
 ## Provenance               # ties back to raw/; note conflicts between sources
+## Works Cited              # OPTIONAL — the works this page's own source
+                            # passages cite, resolved from the source's
+                            # reference list. Outward citations, NOT wikilinks:
+                            # a cited work becomes [[a page]] only once it is
+                            # itself ingested into raw/.
 ## Cross-References         # [[wikilink]] only — see §4
 ```
+
+`Works Cited` is the one optional section, and it is optional deliberately:
+every page compiled before it existed is still valid. When present it must sit
+immediately before `Cross-References`. It never becomes a `related:` frontmatter
+field — R-1.5 holds for citations as much as for links.
 
 ### 4. Links: `[[wikilink]]` is the ONLY link source (R-1.5)
 
@@ -192,7 +202,8 @@ uses in-process FastEmbed at 384 dimensions, while PostgreSQL uses the
 - [ ] Frontmatter has all 7 required fields; `summary` is one sentence.
 - [ ] Every `sources[].path` exists in `raw/`; `hint` was minted from PostgreSQL pgvector.
 - [ ] Links are `[[wikilink]]` only; no `related:` field.
-- [ ] Body has TL;DR / Technical Specifications / Provenance / Cross-References.
+- [ ] Body has TL;DR / Technical Specifications / Provenance / Cross-References
+      (optionally Works Cited, immediately before Cross-References).
 - [ ] `python scripts/gen_index.py --check` passes locally.
 - [ ] `verify_addresses.py` returns `0` with live services (`1` is semantic
       drift/failure; `2` is infrastructure/configuration and must not heal).

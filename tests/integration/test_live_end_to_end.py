@@ -142,7 +142,9 @@ async def _mcp_session(
             f"MCP initialize was rejected: HTTP {opened.status_code} "
             f"{opened.text[:200]}"
         )
-        assert _decode_jsonrpc(opened).get("result"), "MCP initialize returned no result"
+        assert _decode_jsonrpc(opened).get("result"), (
+            "MCP initialize returned no result"
+        )
         session_id = opened.headers.get("mcp-session-id")
         if session_id:
             headers["mcp-session-id"] = session_id
@@ -243,10 +245,21 @@ async def test_live_mcp_rejects_an_unrecognized_bearer_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_wiki_sources_drive_rag_retrieval_end_to_end(
+async def test_page_sources_drive_live_rag_retrieval_end_to_end(
     tmp_path: Path,
 ) -> None:
-    """wiki_search → wiki_read → `sources[]` → live pgvector → cited verbatim text."""
+    """`sources[]` → live pgvector → cited verbatim text.
+
+    **This does not exercise the agent's first hop.** It builds a temporary
+    corpus and reads pages off disk; `snp-wiki` (basic-memory, in-process
+    FastEmbed 384) is never contacted, so nothing here proves `search_notes`
+    would surface the page an agent needs. The name used to claim it did.
+
+    Real coverage of that hop is an accepted, tracked gap — see
+    `docs/REMAINING_TASKS.md` T3.3, which carries the acceptance criterion: a
+    separately runnable test doing real snapshot → `search_notes` → `read_note`
+    against a live basic-memory.
+    """
     _require_env(
         "LITELLM_BASE_URL",
         "LITELLM_MASTER_KEY",
@@ -279,7 +292,9 @@ async def test_live_wiki_sources_drive_rag_retrieval_end_to_end(
         )
         source_uri = ingested.get("source_uri")
         assert isinstance(source_uri, str) and source_uri
-        assert ingested.get("chunks_count", 0) > 0, f"nothing was ingested: {ingested!r}"
+        assert ingested.get("chunks_count", 0) > 0, (
+            f"nothing was ingested: {ingested!r}"
+        )
 
         wiki_dir = tmp_path / "wiki"
         wiki_dir.mkdir()

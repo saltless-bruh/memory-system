@@ -149,12 +149,14 @@ def test_all_writes_every_client_and_preserves_unrelated_servers(
     for client, path_string in paths.items():
         written = json.loads(Path(path_string).read_text(encoding="utf-8"))
         server_key = "servers" if client == "vscode" else "mcpServers"
-        assert written[server_key]["snp-wiki"] == exporter.generate_config(client)[
-            server_key
-        ]["snp-wiki"]
-        assert written[server_key]["scout"] == exporter.generate_config(client)[
-            server_key
-        ]["scout"]
+        assert (
+            written[server_key]["snp-wiki"]
+            == exporter.generate_config(client)[server_key]["snp-wiki"]
+        )
+        assert (
+            written[server_key]["scout"]
+            == exporter.generate_config(client)[server_key]["scout"]
+        )
     assert "unrelated" in json.loads(cursor_path.read_text())["mcpServers"]
     assert "unrelated" in json.loads(vscode_path.read_text())["servers"]
 
@@ -213,3 +215,64 @@ def test_invalid_existing_json_fails_without_overwrite(
 def test_unknown_client_rejected() -> None:
     with pytest.raises(ValueError):
         exporter.generate_config("unknown")
+
+
+# ── the local stdio server (T2.1) ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
+def test_every_client_gets_all_three_servers(client: str) -> None:
+    """An agent installed from this repo must reach the authoring path too.
+
+    Before T2.1 the exporter emitted the two read paths and none of the write
+    one, so an installed agent could search and fetch but not compile.
+    """
+    server_key = "servers" if client == "vscode" else "mcpServers"
+    servers = exporter.generate_config(client)[server_key]
+    assert set(servers) == {"snp-wiki", "scout", exporter.LOCAL_SERVER_NAME}
+
+
+@pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
+def test_the_local_server_is_stdio_with_its_checkout_pinned(client: str) -> None:
+    server_key = "servers" if client == "vscode" else "mcpServers"
+    local = exporter.generate_config(client)[server_key][exporter.LOCAL_SERVER_NAME]
+
+    assert local["command"] == "snpmemory"
+    assert local["args"] == ["mcp", "--root", str(exporter.REPO_ROOT)]
+    # stdio only: no URL, no token, no header. This server carries the authority
+    # of whoever launches it, which is exactly why it must never be a URL.
+    assert "url" not in local and "httpUrl" not in local
+    assert "env" not in local
+    if client == "vscode":
+        assert local["type"] == "stdio"
+
+
+def test_the_pinned_root_follows_the_caller(tmp_path: Path) -> None:
+    local = exporter.generate_config("claude", root=tmp_path)["mcpServers"][
+        exporter.LOCAL_SERVER_NAME
+    ]
+    assert local["args"] == ["mcp", "--root", str(tmp_path)]
+
+
+def test_the_exporter_and_the_server_agree_on_the_server_name() -> None:
+    """Two files naming the same server must not be allowed to disagree."""
+    from scout.mcp.local_server import SERVER_NAME
+
+    assert exporter.LOCAL_SERVER_NAME == SERVER_NAME
+
+
+def test_the_exported_entry_actually_starts_the_advertised_tools() -> None:
+    """The config must agree with reality, not with what it said last year.
+
+    This is the check that stops the exporter drifting from the server again:
+    it runs the exact argv the config carries and compares the tool names.
+    """
+    import asyncio
+
+    from scout.mcp.local_server import build_server
+
+    local = exporter.generate_config("claude")["mcpServers"][exporter.LOCAL_SERVER_NAME]
+    assert local["args"][0] == "mcp"
+
+    served = {tool.name for tool in asyncio.run(build_server().list_tools())}
+    assert served == {"verify", "plan_articles", "compile_plan", "compile_status"}

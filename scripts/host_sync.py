@@ -27,12 +27,16 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("host-sync")
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = (
-    _SCRIPT_DIR.parent if (_SCRIPT_DIR.parent / "pyproject.toml").is_file() else _SCRIPT_DIR
+    _SCRIPT_DIR.parent
+    if (_SCRIPT_DIR.parent / "pyproject.toml").is_file()
+    else _SCRIPT_DIR
 )
 VAULT_DIR = os.environ.get("VAULT_REPLICA_DIR", "/vault-replica")
 SECRET = os.environ.get("WEBHOOK_SECRET", "").encode("utf-8")
@@ -138,11 +142,16 @@ def _prepare_replica_root(raw_path: str | Path) -> Path:
 
     marker = root / REPLICA_MARKER
     if marker.exists():
-        if marker.is_symlink() or marker.read_text(encoding="utf-8") != _REPLICA_MARKER_CONTENT:
+        if (
+            marker.is_symlink()
+            or marker.read_text(encoding="utf-8") != _REPLICA_MARKER_CONTENT
+        ):
             raise ReplicaSafetyError("Replica marker is invalid")
     else:
         if any(root.iterdir()):
-            raise ReplicaSafetyError("Refusing a nonempty replica root without its marker")
+            raise ReplicaSafetyError(
+                "Refusing a nonempty replica root without its marker"
+            )
         marker.write_text(_REPLICA_MARKER_CONTENT, encoding="utf-8")
 
     snapshots = root / "snapshots"
@@ -244,7 +253,9 @@ def _bind_repository_remote(repository: Path, git_url: str, remote: str) -> None
         _run_git(["remote", "add", remote, git_url], cwd=repository)
     configured = tuple(
         line
-        for line in _run_git(["remote", "get-url", "--all", remote], cwd=repository).splitlines()
+        for line in _run_git(
+            ["remote", "get-url", "--all", remote], cwd=repository
+        ).splitlines()
         if line
     )
     if configured != (git_url,):
@@ -254,11 +265,15 @@ def _bind_repository_remote(repository: Path, git_url: str, remote: str) -> None
         )
     verified = tuple(
         line
-        for line in _run_git(["remote", "get-url", "--all", remote], cwd=repository).splitlines()
+        for line in _run_git(
+            ["remote", "get-url", "--all", remote], cwd=repository
+        ).splitlines()
         if line
     )
     if verified != (git_url,):
-        raise ReplicaSafetyError("Managed repository remote does not match configuration")
+        raise ReplicaSafetyError(
+            "Managed repository remote does not match configuration"
+        )
 
 
 def _read_current_commit(root: Path) -> str | None:
@@ -274,7 +289,9 @@ def _read_current_commit(root: Path) -> str | None:
     if not _COMMIT_RE.fullmatch(commit):
         raise ReplicaSafetyError("Current publication pointer has an invalid commit")
     snapshot = root / target
-    if not _is_within(snapshot.resolve(strict=False), (root / "snapshots").resolve(strict=True)):
+    if not _is_within(
+        snapshot.resolve(strict=False), (root / "snapshots").resolve(strict=True)
+    ):
         raise ReplicaSafetyError("Current publication pointer escapes snapshots")
     if not (snapshot / SNAPSHOT_MARKER).is_file():
         raise ReplicaSafetyError("Current snapshot is incomplete")
@@ -288,7 +305,11 @@ def _materialize_snapshot(root: Path, repository: Path, commit: str) -> Path:
     target = snapshots / commit
     if target.exists():
         marker = target / SNAPSHOT_MARKER
-        if target.is_symlink() or not marker.is_file() or marker.read_text(encoding="utf-8").strip() != commit:
+        if (
+            target.is_symlink()
+            or not marker.is_file()
+            or marker.read_text(encoding="utf-8").strip() != commit
+        ):
             raise ReplicaSafetyError("Existing snapshot is incomplete or invalid")
         return target
 
@@ -345,10 +366,17 @@ def _prune_snapshots(root: Path, *, current: str, previous: str | None) -> None:
     snapshots_root = (root / "snapshots").resolve(strict=True)
     candidates: list[Path] = []
     for candidate in snapshots_root.iterdir():
-        if candidate.is_symlink() or not candidate.is_dir() or not _COMMIT_RE.fullmatch(candidate.name):
+        if (
+            candidate.is_symlink()
+            or not candidate.is_dir()
+            or not _COMMIT_RE.fullmatch(candidate.name)
+        ):
             continue
         marker = candidate / SNAPSHOT_MARKER
-        if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != candidate.name:
+        if (
+            not marker.is_file()
+            or marker.read_text(encoding="utf-8").strip() != candidate.name
+        ):
             continue
         candidates.append(candidate)
 
@@ -408,7 +436,12 @@ def _perform_git_sync(vault_path: str = VAULT_DIR, *, queued: bool = False) -> b
     with _sync_lock:
         try:
             commit = _sync_once(Path(vault_path))
-        except (OSError, subprocess.SubprocessError, tarfile.TarError, RuntimeError) as exc:
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            tarfile.TarError,
+            RuntimeError,
+        ) as exc:
             # Do not expose command output or URLs, which can contain credentials.
             error = f"{type(exc).__name__}: synchronization failed"
             fallback = _existing_published_commit(vault_path)
@@ -466,7 +499,11 @@ async def readiness() -> JSONResponse:
         "published_commit": state_payload["published_commit"],
         "last_error": state_payload["last_error"],
     }
-    code = status.HTTP_200_OK if state_payload["ready"] else status.HTTP_503_SERVICE_UNAVAILABLE
+    code = (
+        status.HTTP_200_OK
+        if state_payload["ready"]
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
     return JSONResponse(payload, status_code=code)
 
 
@@ -489,26 +526,41 @@ async def handle_webhook(
     if signature.startswith("sha256="):
         signature = signature.removeprefix("sha256=")
     if not signature:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing signature header")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Missing signature header"
+        )
     expected = hmac.new(SECRET, raw_body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature"
+        )
 
     event_type = x_gitea_event or x_github_event or ""
     if event_type == "ping":
-        return JSONResponse({"status": "ok", "event": "ping"}, status_code=status.HTTP_200_OK)
+        return JSONResponse(
+            {"status": "ok", "event": "ping"}, status_code=status.HTTP_200_OK
+        )
     if event_type != "push":
         return JSONResponse(
-            {"status": "skipped", "event": event_type, "message": "Event is not a push"},
+            {
+                "status": "skipped",
+                "event": event_type,
+                "message": "Event is not a push",
+            },
             status_code=status.HTTP_200_OK,
         )
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed JSON payload") from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed JSON payload"
+        ) from exc
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload must be a JSON object")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payload must be a JSON object",
+        )
 
     try:
         _git_url, branch, _remote = _validated_git_config()
@@ -519,7 +571,10 @@ async def handle_webhook(
         ) from exc
     ref = payload.get("ref")
     if not isinstance(ref, str) or not ref:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload requires a branch ref")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payload requires a branch ref",
+        )
     expected_ref = f"refs/heads/{branch}"
     if ref != expected_ref:
         return JSONResponse(

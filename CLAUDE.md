@@ -7,7 +7,13 @@ servers (`snp-wiki`, `scout`) to answer questions, the operating contract is
 ## Tool usage — read this first
 
 **Wiki (`snp-wiki`): use the native tools.**
-- `search_notes(query)` — find pages by meaning (multilingual; Vietnamese ok)
+- `search_notes(query)` — find pages by meaning. **English only.** The wiki
+  embeds in-process with FastEmbed `bge-small-en-v1.5` @384, measured at
+  `recall@1 0.625` on Vietnamese paraphrases against 0.812 for a multilingual
+  alternative. A non-English query returns near-random ordering, so ask in
+  English and expect to check more than the first hit. Whether to adopt a
+  multilingual model is an open owner decision — `docs/ARCHITECTURE_STATUS.md`
+  §OD-1.
 - `read_note(identifier)` — read a page by its **title** or path
 
 > ⚠️ Do **not** use the generic `search` / `fetch` tools. This deployment runs

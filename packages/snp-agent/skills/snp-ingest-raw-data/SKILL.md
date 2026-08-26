@@ -1,7 +1,6 @@
 ---
 name: snp-ingest-raw-data
-description: >-
-  Use this skill when adding new raw documents, PDFs, RFCs, spreadsheets, or source code files into the Data Vault so they are indexed into PostgreSQL 16 pgvector.
+description: "Use this skill when adding new raw documents, PDFs, RFCs, spreadsheets, or source code files into the Data Vault so they are indexed into PostgreSQL 16 pgvector."
 ---
 
 # snp-ingest-raw-data

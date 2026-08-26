@@ -51,9 +51,9 @@ def test_empty_input_yields_empty_text() -> None:
 def test_columns_split_on_empty_gutters_not_word_starts() -> None:
     """Splitting on gaps between word *starts* cuts headings in half."""
     words = [
-        {"x0": 105.0, "x1": 228.0},   # left column heading, internally dense
+        {"x0": 105.0, "x1": 228.0},  # left column heading, internally dense
         {"x0": 110.0, "x1": 200.0},
-        {"x0": 312.0, "x1": 495.0},   # right column, after a real gutter
+        {"x0": 312.0, "x1": 495.0},  # right column, after a real gutter
     ]
     splits = find_column_splits(words)
     assert len(splits) == 1
@@ -68,7 +68,9 @@ def test_narrow_word_spacing_is_not_a_column() -> None:
 
 def test_markdown_render_preserves_the_grid() -> None:
     table = ExtractedTable(
-        page=6, number="2", caption="Table 2. X.",
+        page=6,
+        number="2",
+        caption="Table 2. X.",
         rows=(("Advantages", "Disadvantages"), ("a", "b")),
     )
     md = table.to_markdown()
@@ -118,7 +120,9 @@ def test_only_captioned_images_count_as_figures() -> None:
     figures = extract_figures(PAPER)
     assert [f.number for f in figures] == ["1", "2", "3", "4", "5", "6", "7"]
     assert all(f.page != 1 for f in figures), "page 1 holds journal branding only"
-    assert len({f.digest for f in figures}) == len(figures), "duplicates must be dropped"
+    assert len({f.digest for f in figures}) == len(figures), (
+        "duplicates must be dropped"
+    )
 
 
 @needs_paper
@@ -143,11 +147,15 @@ def test_extracted_figures_are_decodable_images_at_full_resolution() -> None:
     for figure in extract_figures(PAPER):
         image = Image.open(io.BytesIO(figure.data))
         image.load()
-        assert image.width > 300 and image.height > 300, f"{figure.loc} looks downscaled"
+        assert image.width > 300 and image.height > 300, (
+            f"{figure.loc} looks downscaled"
+        )
 
 
 @needs_paper
-def test_parse_pdf_emits_tables_without_a_vision_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parse_pdf_emits_tables_without_a_vision_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Tables are deterministic, so they must not depend on model availability."""
     from scout.parsers import parse_file
 
@@ -159,11 +167,15 @@ def test_parse_pdf_emits_tables_without_a_vision_route(monkeypatch: pytest.Monke
     assert kinds.count("table") == 3
     assert kinds.count("figure") == 0, "figures cannot be described without a route"
     assert doc.metadata["figures_status"] == "unconfigured"
-    assert doc.metadata["figure_count"] == 7, "figures are still counted, just not described"
+    assert doc.metadata["figure_count"] == 7, (
+        "figures are still counted, just not described"
+    )
 
 
 @needs_paper
-def test_a_failing_vision_route_yields_no_figure_section(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failing_vision_route_yields_no_figure_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An unreadable figure contributes nothing; it never invents a description."""
     from scout.parsers import ParserError, parse_pdf
 
@@ -177,3 +189,114 @@ def test_a_failing_vision_route_yields_no_figure_section(monkeypatch: pytest.Mon
     assert [s for s in doc.sections if s.metadata.get("kind") == "figure"] == []
     assert doc.metadata["figures_described"] == 0
     assert all("Visual Image Asset" not in s.text for s in doc.sections)
+
+
+# ── T5.1 / SH-1 / SH-4: a status must not claim work that did not happen ───
+
+
+def test_a_missing_pillow_reports_unavailable_not_a_count_of_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact T5.1 lie, reproduced and then made impossible.
+
+    `page.images` raises `ImportError` when Pillow is absent. A per-page
+    `except Exception: continue` swallowed it on every page, so a document with
+    **7 figures** was recorded as `figures_status: "ok"`, `figure_count: 0` —
+    examined successfully, nothing found. A count of zero from a parser that
+    could not look is not a count of zero.
+    """
+    from scout.pdf_structure import PdfStructureError, extract_figures
+
+    class _PageWithoutPillow:
+        @property
+        def images(self) -> list[object]:
+            raise ImportError("pillow is required to do image extraction")
+
+        def extract_text(self) -> str:
+            return "Figure 1. A captioned figure."
+
+    class _Reader:
+        pages = [_PageWithoutPillow()]
+
+    monkeypatch.setattr("pypdf.PdfReader", lambda _p: _Reader())
+
+    with pytest.raises(PdfStructureError, match="Pillow is required"):
+        extract_figures(Path("anything.pdf"))
+
+
+def test_a_broken_image_stream_on_one_page_still_does_not_sink_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The behaviour the swallow existed to protect must survive the fix."""
+    from scout.pdf_structure import extract_figures
+
+    class _BrokenPage:
+        @property
+        def images(self) -> list[object]:
+            raise ValueError("corrupt XObject stream")
+
+        def extract_text(self) -> str:
+            return "Figure 1. A captioned figure."
+
+    class _Reader:
+        pages = [_BrokenPage()]
+
+    monkeypatch.setattr("pypdf.PdfReader", lambda _p: _Reader())
+
+    # A damaged page contributes nothing and does not raise.
+    assert extract_figures(Path("anything.pdf")) == []
+
+
+def test_no_evidence_is_distinct_from_ok_and_from_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """SH-4: an empty result and a successful one must not share a value.
+
+    Three statements, three values:
+
+    * `ok` — the parser ran and found something.
+    * `no_evidence` — it ran fully and found nothing. A fact about the document.
+    * `unavailable` — it could not look. A fact about the installation.
+
+    Collapsing the last two is what let a document with 7 figures be recorded as
+    a document with none, examined successfully.
+    """
+    import scout.pdf_structure as structure
+    from scout.parsers import _pdf_figure_sections, _pdf_table_sections
+
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    # ── figures ───────────────────────────────────────────────────────────
+    metadata: dict[str, object] = {}
+    monkeypatch.setattr(structure, "extract_figures", lambda _p: [])
+    _pdf_figure_sections(pdf, "raw/x.pdf", metadata, None)
+    assert metadata["figures_status"] == "no_evidence"
+    assert metadata["figure_count"] == 0
+
+    metadata = {}
+
+    def _cannot_look(_p: Path) -> list[object]:
+        raise structure.PdfStructureError("Pillow is required for figure extraction")
+
+    monkeypatch.setattr(structure, "extract_figures", _cannot_look)
+    _pdf_figure_sections(pdf, "raw/x.pdf", metadata, None)
+    assert metadata["figures_status"] == "unavailable"
+    assert "figure_count" not in metadata, (
+        "a parser that could not look must not report a count at all"
+    )
+
+    # ── tables ────────────────────────────────────────────────────────────
+    metadata = {}
+    monkeypatch.setattr(structure, "extract_tables", lambda _p: [])
+    _pdf_table_sections(pdf, "raw/x.pdf", metadata)
+    assert metadata["tables_status"] == "no_evidence"
+
+    metadata = {}
+
+    def _no_pdfplumber(_p: Path) -> list[object]:
+        raise structure.PdfStructureError("pdfplumber is required")
+
+    monkeypatch.setattr(structure, "extract_tables", _no_pdfplumber)
+    _pdf_table_sections(pdf, "raw/x.pdf", metadata)
+    assert metadata["tables_status"] == "unavailable"

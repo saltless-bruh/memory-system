@@ -1,6 +1,6 @@
 ---
 name: superpowers-rest-automation
-description: Builds reliable automations that integrate with REST APIs: auth, pagination, retries, rate limits, idempotency, webhooks, data mapping, and safe error handling. Use when calling external APIs, syncing systems, or building ETL-style workflows.
+description: "Builds reliable automations that integrate with REST APIs: auth, pagination, retries, rate limits, idempotency, webhooks, data mapping, and safe error handling. Use when calling external APIs, syncing systems, or building ETL-style workflows."
 ---
 
 # REST Automation Skill

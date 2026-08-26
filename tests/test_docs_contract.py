@@ -154,3 +154,77 @@ def test_live_test_docs_name_the_fail_closed_host_prerequisites() -> None:
         content = path.read_text(encoding="utf-8")
         for name in required:
             assert name in content, f"{path.relative_to(REPO_ROOT)}: {name}"
+
+
+def test_the_source_health_audit_flags_its_own_stale_examples() -> None:
+    """A document may keep a worked example whose files are gone — it may not
+    present them as current.
+
+    This audit's own policy is to "preserve old records by changing their
+    banner, not by silently rewriting history", so the invariant is not that
+    every path it names exists. It is that if a named `raw/` path is **absent**,
+    the document says so where a reader will see it.
+    """
+    import re
+
+    audit = REPO_ROOT / "docs" / "SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md"
+    text = audit.read_text(encoding="utf-8")
+
+    mentioned = {
+        m.group(0) for m in re.finditer(r"raw/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+", text)
+    }
+    absent = sorted(p for p in mentioned if not (REPO_ROOT / p).exists())
+
+    if absent:
+        banner = text[: text.index("## What this document covers")]
+        assert "CORPUS HAS CHANGED" in banner, (
+            f"the audit names absent sources {absent} without a staleness "
+            "banner a reader would see"
+        )
+        for path in absent:
+            assert path in banner or "worked examples" in banner, (
+                f"{path} is absent and unexplained"
+            )
+
+
+def test_no_agent_instruction_claims_multilingual_wiki_search() -> None:
+    """Agent guidance must not contradict a measurement in this repository.
+
+    `CLAUDE.md` told every agent that `search_notes` is "multilingual; Vietnamese
+    ok" while `ARCHITECTURE_STATUS.md` §OD-1 records `recall@1 0.625` on
+    Vietnamese paraphrases and *recommends replacing the model*. Instructions are
+    the worst place for a claim the repository can disprove: docs are read once,
+    instructions are followed every time.
+
+    This guard is scoped to the claim, not the word — OD-1 itself must keep
+    discussing multilingual models, and `search_notes` must stay described.
+    """
+    status = (REPO_ROOT / "docs" / "ARCHITECTURE_STATUS.md").read_text(encoding="utf-8")
+    if "OD-1" not in status:
+        # The decision was closed; this guard has outlived its subject.
+        return
+
+    instruction_files = [
+        REPO_ROOT / "CLAUDE.md",
+        REPO_ROOT / "AGENTS.md",
+        *(REPO_ROOT / ".agent" / "instructions").glob("*.md"),
+        *(REPO_ROOT / "packages" / "snp-agent" / "instructions").glob("*.md"),
+    ]
+    offenders: list[str] = []
+    for path in instruction_files:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        for line in text.splitlines():
+            if "search_notes" not in line and "wiki search" not in line:
+                continue
+            if "multilingual" in line or "vietnamese ok" in line:
+                # Naming the limitation is the point; claiming the capability is not.
+                if "english only" in line or "od-1" in line:
+                    continue
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {line.strip()[:90]}")
+
+    assert not offenders, (
+        "agent instructions claim multilingual wiki search while OD-1 records "
+        f"recall@1 0.625 on Vietnamese: {offenders}"
+    )

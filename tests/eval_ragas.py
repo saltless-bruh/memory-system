@@ -288,10 +288,14 @@ async def run_ragas() -> int:
             (v for n, v in usable.items() if "faith" in n.lower()), None
         )
         if faithfulness_value is None:
-            print("❌ SNP_EVAL_FAITHFULNESS_MIN is set but faithfulness was not scored.")
+            print(
+                "❌ SNP_EVAL_FAITHFULNESS_MIN is set but faithfulness was not scored."
+            )
             return 1
         if faithfulness_value < floor:
-            print(f"❌ faithfulness {faithfulness_value:.4f} is below floor {floor:.4f}")
+            print(
+                f"❌ faithfulness {faithfulness_value:.4f} is below floor {floor:.4f}"
+            )
             return 1
         print(f"✅ faithfulness {faithfulness_value:.4f} meets floor {floor:.4f}")
 

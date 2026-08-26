@@ -70,10 +70,7 @@ class Finding:
     def format(self) -> str:
         object_text = f" object={self.object_id[:12]}" if self.object_id else ""
         location = f"{self.path}:{self.line}" if self.line is not None else self.path
-        return (
-            f"[{self.source}] {location}{object_text}: "
-            f"{self.label} [REDACTED]"
-        )
+        return f"[{self.source}] {location}{object_text}: {self.label} [REDACTED]"
 
 
 def _incomplete(
@@ -132,7 +129,11 @@ def _git(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
 
 def _listed_paths(repo: Path, *args: str) -> list[str]:
     output = _git(repo, "ls-files", "-z", *args)
-    return [item.decode("utf-8", errors="surrogateescape") for item in output.split(b"\0") if item]
+    return [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in output.split(b"\0")
+        if item
+    ]
 
 
 def _scan_bytes(
@@ -271,9 +272,7 @@ def scan_index(repo: Path = REPO_ROOT) -> list[Finding]:
             check=False,
         )
         if result.returncode == 0:
-            findings.extend(
-                _scan_bytes(result.stdout, source="INDEX", path=relative)
-            )
+            findings.extend(_scan_bytes(result.stdout, source="INDEX", path=relative))
         else:
             findings.append(
                 _incomplete(
@@ -317,7 +316,9 @@ def _reachable_objects(repo: Path) -> tuple[list[str], dict[str, set[str]]]:
     # finding actionable.
     commit_ids = _git(repo, "rev-list", "--all").splitlines()
     for raw_commit in commit_ids:
-        tree = _git(repo, "ls-tree", "-r", "-z", "--full-tree", raw_commit.decode("ascii"))
+        tree = _git(
+            repo, "ls-tree", "-r", "-z", "--full-tree", raw_commit.decode("ascii")
+        )
         for entry in tree.split(b"\0"):
             if not entry:
                 continue
@@ -332,7 +333,9 @@ def _reachable_objects(repo: Path) -> tuple[list[str], dict[str, set[str]]]:
     return list(dict.fromkeys(object_ids)), paths
 
 
-def _eligible_blob_ids(repo: Path, object_ids: list[str]) -> tuple[list[str], list[str]]:
+def _eligible_blob_ids(
+    repo: Path, object_ids: list[str]
+) -> tuple[list[str], list[str]]:
     if not object_ids:
         return [], []
     output = _git(
@@ -442,7 +445,13 @@ def main() -> int:
                 findings.extend(scan_untracked(repo))
         if args.history:
             findings.extend(scan_git_history(repo))
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, UnicodeError):
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        subprocess.SubprocessError,
+        UnicodeError,
+    ):
         print(
             "Secret scan failed; repository coverage was incomplete [REDACTED].",
             file=sys.stderr,

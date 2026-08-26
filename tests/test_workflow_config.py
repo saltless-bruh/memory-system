@@ -13,6 +13,8 @@ HEALER_WORKFLOW = REPO_ROOT / ".gitea" / "workflows" / "auto-healer.yaml"
 GITLEAKS_CONFIG = REPO_ROOT / ".gitleaks.toml"
 COMPOSE = REPO_ROOT / "docker-compose.yml"
 INTEGRATION_COMPOSE = REPO_ROOT / "docker-compose.integration.yml"
+STAGING_COMPOSE = REPO_ROOT / "docker-compose.staging.yml"
+STAGING_GIT_CONFIG = REPO_ROOT / "config" / "host-sync.staging.gitconfig"
 
 
 def _security_workflow() -> str:
@@ -129,6 +131,26 @@ def test_basic_memory_has_no_model_gateway_secret_or_host_network() -> None:
     assert service["volumes"][0] == "vault-replica:/vault-replica:ro"
 
 
+def test_every_locally_built_image_has_an_explicit_candidate_identity_contract() -> (
+    None
+):
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    assert services["scout"]["image"] == "${SNP_SCOUT_IMAGE:-snp-scout}"
+    assert services["sync-job"]["image"] == "${SNP_SCOUT_IMAGE:-snp-scout}"
+    assert services["postgres-migrate"]["image"] == "${SNP_SCOUT_IMAGE:-snp-scout}"
+    assert services["basic-memory"]["image"] == (
+        "${SNP_BASIC_MEMORY_IMAGE:-snp-basic-memory}"
+    )
+    assert services["host-sync"]["image"] == "${SNP_HOST_SYNC_IMAGE:-snp-host-sync}"
+
+    for name in ("scout", "basic-memory", "host-sync"):
+        assert services[name]["build"]["args"]["SNP_GIT_REVISION"] == (
+            "${SNP_GIT_REVISION:-unknown}"
+        )
+
+
 def test_agent_facing_services_have_bounded_readiness_checks() -> None:
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     for service_name in ("scout", "basic-memory"):
@@ -153,3 +175,40 @@ def test_integration_host_sync_reads_local_seed_but_publishes_to_replica() -> No
     assert compose["services"]["postgres"]["ports"] == [
         "127.0.0.1:${SNP_INTEGRATION_POSTGRES_PORT:-55432}:5432"
     ]
+
+
+def test_staging_compose_isolates_ports_and_uses_a_disposable_read_only_remote() -> (
+    None
+):
+    compose = yaml.safe_load(STAGING_COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    assert services["postgres"]["ports"] == [
+        "127.0.0.1:${SNP_STAGING_POSTGRES_PORT:-15432}:5432"
+    ]
+    assert services["litellm"]["ports"] == [
+        "127.0.0.1:${SNP_STAGING_LITELLM_PORT:-14000}:4000"
+    ]
+    assert services["scout"]["ports"] == [
+        "127.0.0.1:${SNP_STAGING_SCOUT_PORT:-18080}:8080"
+    ]
+    assert services["host-sync"]["ports"] == [
+        "127.0.0.1:${SNP_STAGING_HOST_SYNC_PORT:-19000}:9000"
+    ]
+    assert services["basic-memory"]["ports"] == [
+        "127.0.0.1:${SNP_STAGING_BASIC_MEMORY_PORT:-18765}:8765"
+    ]
+
+    host_sync = services["host-sync"]
+    assert host_sync["environment"] == {
+        "GIT_SYNC_URL": "file:///staging-source",
+        "GIT_BRANCH": "${SNP_STAGING_GIT_BRANCH:?set an immutable staging branch}",
+        "GIT_CONFIG_GLOBAL": "/etc/snp/staging.gitconfig",
+    }
+    assert host_sync["volumes"] == [
+        "${SNP_STAGING_SOURCE_REPO:?set an absolute staging bare-repository path}:/staging-source:ro",
+        "./config/host-sync.staging.gitconfig:/etc/snp/staging.gitconfig:ro",
+    ]
+    git_config = STAGING_GIT_CONFIG.read_text(encoding="utf-8")
+    assert "allow = always" in git_config
+    assert "directory = /staging-source" in git_config

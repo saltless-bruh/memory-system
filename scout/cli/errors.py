@@ -49,7 +49,11 @@ def infrastructure_error(
     message: str, *, hint: str | None = None, retryable: bool = True, **details: Any
 ) -> CliError:
     return CliError(
-        ErrorKind.INFRASTRUCTURE, message, hint=hint, details=details, retryable=retryable
+        ErrorKind.INFRASTRUCTURE,
+        message,
+        hint=hint,
+        details=details,
+        retryable=retryable,
     )
 
 
@@ -57,7 +61,9 @@ def auth_error(message: str, *, hint: str | None = None, **details: Any) -> CliE
     return CliError(ErrorKind.AUTH, message, hint=hint, details=details)
 
 
-def conflict_error(message: str, *, hint: str | None = None, **details: Any) -> CliError:
+def conflict_error(
+    message: str, *, hint: str | None = None, **details: Any
+) -> CliError:
     return CliError(ErrorKind.CONFLICT, message, hint=hint, details=details)
 
 

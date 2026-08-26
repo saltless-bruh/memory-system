@@ -30,6 +30,14 @@ class HintMapBackend:
     Like the production backend it honours `path` pre-filtering, so a hint that
     pulls only other files reports an empty addressed source rather than
     silently leaking the wrong one back.
+
+    It also answers an **unmapped** query under a path filter with everything it
+    holds for that path, because that is what a vector backend does: a
+    path-filtered search returns the nearest neighbours *within* that path
+    whatever the query says. Without this the fake claims a source has no chunks
+    whenever a test did not think to map the query — which is not a state any
+    real backend can be in, and it is the state `verify_address`'s NO_EVIDENCE
+    probe asks about.
     """
 
     mapping: dict[str, list[RagChunk]]
@@ -47,7 +55,13 @@ class HintMapBackend:
     ) -> Sequence[RagChunk]:
         self.queried.append(hint)
         self.scopes.append(scope)
-        chunks = self.mapping.get(hint, [])
+        if hint in self.mapping:
+            chunks = self.mapping[hint]
+        elif path is not None:
+            # Unmapped query, path-filtered: return what this path holds.
+            chunks = [c for group in self.mapping.values() for c in group]
+        else:
+            chunks = []
         if path is not None:
             chunks = post_filter(chunks, path)
         return chunks[:k]
@@ -56,7 +70,9 @@ class HintMapBackend:
         self.closed = True
 
 
-def _chunk(file_path: str, text: str, *, score: float = 1.0, loc: str = _LOC) -> RagChunk:
+def _chunk(
+    file_path: str, text: str, *, score: float = 1.0, loc: str = _LOC
+) -> RagChunk:
     return RagChunk(text=text, file_path=file_path, score=score, loc=loc)
 
 
@@ -150,7 +166,13 @@ async def test_mint_refuses_a_locator_the_source_does_not_carry() -> None:
 async def test_mint_accepts_a_section_locator_split_across_chunks() -> None:
     """The chunker's ``(i/n)`` marker still satisfies a section locator (m1)."""
     backend = HintMapBackend(
-        {"good": [_chunk(_TARGET, "good", loc="Section System Architecture Overview (2/2)")]}
+        {
+            "good": [
+                _chunk(
+                    _TARGET, "good", loc="Section System Architecture Overview (2/2)"
+                )
+            ]
+        }
     )
     result = await mint_address(
         backend,

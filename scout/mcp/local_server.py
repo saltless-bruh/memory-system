@@ -15,6 +15,30 @@ audience validation; a server that accepts a token it was not issued is the
 confused-deputy failure the MCP guidance exists to prevent.
 
 `scout/mcp_server.py` is untouched: `rag_fetch` remains the only door into RAG.
+
+**Why `compile_plan` is not an MCP task.** It looks like the obvious candidate —
+a batch that runs for minutes, handed back as a handle — and `fastmcp` 3.3.1 does
+implement Tasks. It was measured rather than assumed, and the cost is not one
+decorator argument:
+
+* every task path is gated on **pydocket** (`fastmcp[tasks]`), a distributed task
+  system that pulls in `redis>=5`. Without it `get_task_capabilities()` returns
+  `None`, so the server advertises no task capability and a client has nothing
+  to negotiate against;
+* `TaskConfig.validate_function` calls `require_docket` at **registration**, so
+  declaring one without the extra does not degrade — it stops the server
+  building at all;
+* task-augmented functions must be `async`, and these tools are synchronous
+  wrappers around a blocking command path.
+
+What that would buy is a `taskId` scoped to this server process. What already
+exists is a handle that is a path on disk, backed by a staging directory and a
+`.run.json` carrying state, heartbeat, TTL and poll interval — which survives a
+server restart, a reboot, and a client that has never heard of Tasks. Requiring
+Redis to obtain a weaker record is the wrong trade, so the durable handle stays
+and `compile-cancel` covers stopping a batch. See
+`tests/test_local_mcp_server.py` for the tests that hold this to the facts it
+rests on.
 """
 
 from __future__ import annotations
@@ -60,6 +84,15 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
     Building and listing tools must stay as cheap and side-effect-free as
     `snpmemory schema`, which is why implementations are loaded by `invoke` at
     call time rather than imported here.
+
+    **Where the working root is pinned, and why not here.** A client starts this
+    server from its own directory, and every tool call resolves configuration
+    and relative paths against the process cwd. `snpmemory mcp --root <dir>`
+    therefore moves the process before serving, which pins all of those together
+    at once — see `scout/cli/commands/mcp.py`. The matching refusal for a plan
+    path that escapes that root lives in the commands (`scout/cli/tasks.py`
+    `resolve_plan_path`), not in this module, so it protects the CLI as well as
+    the tool boundary rather than only the caller who happens to arrive by MCP.
     """
     server = mcp or FastMCP(name=SERVER_NAME)
     by_name = {spec.name: spec for spec in DECLARED}
@@ -106,7 +139,9 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
         dept: Annotated[str, "redteam | blueteam | ai_eng | infra"],
         category: Annotated[str, "concept | technique | entity | playbook"] = "concept",
         max_depth: Annotated[int, "Deepest heading level to propose."] = 2,
-        out: Annotated[str | None, "Write the plan here instead of returning it."] = None,
+        out: Annotated[
+            str | None, "Write the plan here instead of returning it."
+        ] = None,
         detail: Annotated[bool, "Return every field instead of a summary."] = False,
     ) -> dict[str, Any]:
         return run_tool(
@@ -137,7 +172,9 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
             bool, "Return a handle immediately instead of blocking for minutes."
         ] = False,
         dry_run: Annotated[bool, "Prepare and judge, but publish nothing."] = False,
-        skip_groundedness: Annotated[bool, "Write unverified prose. Not advised."] = False,
+        skip_groundedness: Annotated[
+            bool, "Write unverified prose. Not advised."
+        ] = False,
         allow_uncertain: Annotated[bool, "Proceed past pre-flight warnings."] = False,
         detail: Annotated[bool, "Return every field instead of a summary."] = False,
     ) -> dict[str, Any]:

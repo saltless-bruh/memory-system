@@ -34,7 +34,9 @@ class AsyncEmbedder(Protocol):
 
 
 #: A parent locator that addresses table rows, e.g. ``Rows 1-10`` or ``Row 7``.
-_ROW_RANGE_LOC = re.compile(r"^Rows?\s+(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?$", re.IGNORECASE)
+_ROW_RANGE_LOC = re.compile(
+    r"^Rows?\s+(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?$", re.IGNORECASE
+)
 #: A row marker as ``parse_csv`` emits it at the start of each row line.
 _ROW_MARKER = re.compile(r"^Row\s+(\d+)\s*:", re.MULTILINE)
 
@@ -132,9 +134,7 @@ class ContextualChunker:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
     ) -> None:
-        self.max_chunk_chars = (
-            chunk_size if chunk_size is not None else max_chunk_chars
-        )
+        self.max_chunk_chars = chunk_size if chunk_size is not None else max_chunk_chars
         self.overlap_chars = (
             chunk_overlap if chunk_overlap is not None else overlap_chars
         )
@@ -261,10 +261,11 @@ class LiteLLMBatchEmbedder:
         dim: int = 1024,
     ) -> None:
         self.base_url = (
-            base_url
-            or os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1")
+            base_url or os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1")
         ).rstrip("/")
-        self.api_key = api_key if api_key is not None else os.environ.get("LITELLM_MASTER_KEY")
+        self.api_key = (
+            api_key if api_key is not None else os.environ.get("LITELLM_MASTER_KEY")
+        )
         self.model = model or os.environ.get("SCOUT_EMBED_MODEL", "snp-embed")
         self.dim = dim
 
@@ -286,9 +287,7 @@ class LiteLLMBatchEmbedder:
         }
         return url, payload, headers
 
-    def _validate_response(
-        self, data: object, texts: list[str]
-    ) -> list[list[float]]:
+    def _validate_response(self, data: object, texts: list[str]) -> list[list[float]]:
         """Validate and order a LiteLLM response identically for sync/async I/O."""
         if not isinstance(data, dict) or not isinstance(data.get("data"), list):
             raise EmbeddingError("Malformed embedding API response")
@@ -313,13 +312,17 @@ class LiteLLMBatchEmbedder:
             vector: list[float] = []
             for value in raw_embedding:
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    raise EmbeddingError("Embedding vector contains a non-numeric value")
+                    raise EmbeddingError(
+                        "Embedding vector contains a non-numeric value"
+                    )
                 vector.append(float(value))
             indexed[index] = vector
 
         expected_indices = set(range(len(texts)))
         if set(indexed) != expected_indices:
-            raise EmbeddingError("Embedding response indices do not match request order")
+            raise EmbeddingError(
+                "Embedding response indices do not match request order"
+            )
         embeddings = [indexed[index] for index in range(len(texts))]
 
         for idx, emb in enumerate(embeddings):
@@ -340,9 +343,7 @@ class LiteLLMBatchEmbedder:
             req = urllib.request.Request(
                 url, data=payload, headers=headers, method="POST"
             )
-            with urllib.request.urlopen(
-                req, timeout=EMBED_TIMEOUT_SECONDS
-            ) as resp:
+            with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT_SECONDS) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             raise EmbeddingError("LiteLLM embedding call failed") from exc

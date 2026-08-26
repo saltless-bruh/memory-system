@@ -1,6 +1,6 @@
 ---
 name: superpowers-tdd
-description: Applies tests-first discipline (red/green/refactor) and adds regression tests for bugs. Use when implementing features, fixing bugs, or refactoring.
+description: "Applies tests-first discipline (red/green/refactor) and adds regression tests for bugs. Use when implementing features, fixing bugs, or refactoring."
 ---
 
 # TDD Skill

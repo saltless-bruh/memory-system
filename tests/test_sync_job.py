@@ -373,3 +373,261 @@ async def test_async_main_clears_readiness_on_watched_failure(
         await _async_main(FakeIndexer(), tmp_path, marker)
     assert caught.value.code == 1
     assert not marker.exists()
+
+
+# ── crash-loop containment (2026-08-24 incident) ──────────────────────────
+#
+# On 2026-08-24 `sync-job` restarted 238 times because a transient dependency
+# failure exited the process, and Docker's restart backoff resets after the
+# container survives 10 seconds — which this one always did, since DNS
+# timeouts are slow. The orchestrator's backoff could never accumulate, so the
+# process must hold its own.
+
+
+async def test_cold_start_retries_a_retryable_failure_instead_of_exiting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_async_main` must survive a cold start that keeps failing transiently.
+
+    `sync_once` is patched rather than driven through a fake indexer: it does
+    its own bounded retry, so scripted outcomes handed to an indexer are
+    consumed by that inner loop and never reach the outer one under test here.
+    """
+    marker = tmp_path / "ready"
+    delays: list[float] = []
+    outcomes = [
+        IndexOutcome(False, "error:EmbeddingError", retryable=True),
+        IndexOutcome(False, "error:EmbeddingError", retryable=True),
+        IndexOutcome(True, "ingested_1_files"),
+    ]
+    seen_marker: list[bool] = []
+
+    async def scripted_sync_once(indexer: Any, **kwargs: Any) -> IndexOutcome:
+        seen_marker.append(marker.exists())
+        return outcomes[min(len(seen_marker) - 1, len(outcomes) - 1)]
+
+    async def record(delay: float) -> None:
+        delays.append(delay)
+
+    async def stop_watch(*args: object, **kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr("scout.sync_job.sync_once", scripted_sync_once)
+    monkeypatch.setattr("scout.sync_job.watch", stop_watch)
+
+    await _async_main(
+        FakeIndexer(), tmp_path, marker, base_delay=5.0, max_delay=300.0, sleep=record
+    )
+
+    assert len(seen_marker) == 3
+    # Readiness stays cleared for every failing attempt: the container is alive
+    # and honestly reporting unhealthy, not pretending to work.
+    assert seen_marker == [False, False, False]
+    assert marker.exists()
+    assert delays == [5.0, 10.0]
+
+
+async def test_cold_start_backoff_is_capped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    delays: list[float] = []
+
+    async def always_failing(indexer: Any, **kwargs: Any) -> IndexOutcome:
+        return IndexOutcome(False, "error:EmbeddingError", retryable=True)
+
+    async def record(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) >= 8:
+            raise RuntimeError("stop")
+
+    monkeypatch.setattr("scout.sync_job.sync_once", always_failing)
+    with pytest.raises(RuntimeError, match="stop"):
+        await _async_main(
+            FakeIndexer(),
+            tmp_path,
+            tmp_path / "ready",
+            base_delay=5.0,
+            max_delay=60.0,
+            sleep=record,
+        )
+    assert delays == [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0, 60.0]
+
+
+async def test_cold_start_still_exits_on_a_non_retryable_failure(
+    tmp_path: Path,
+) -> None:
+    """A missing ACL policy is a configuration fault. Retrying it is wrong."""
+    marker = tmp_path / "ready"
+    indexer = FakeIndexer(IndexOutcome(False, "error:AclPolicyError"))
+
+    async def never(delay: float) -> None:  # pragma: no cover - must not run
+        raise AssertionError("a permanent failure must not be retried")
+
+    with pytest.raises(SystemExit) as caught:
+        await _async_main(indexer, tmp_path, marker, sleep=never)
+    assert caught.value.code == 1
+    assert not marker.exists()
+
+
+async def test_watch_failure_carries_the_outcome_retryability() -> None:
+    indexer = FakeIndexer(IndexOutcome(False, "error:EmbeddingError", retryable=True))
+    with pytest.raises(SyncFailure) as caught:
+        await watch(indexer, changes=_batches(1))
+    assert caught.value.retryable is True
+
+    permanent = FakeIndexer(
+        IndexOutcome(False, "error:AclPolicyError", retryable=False)
+    )
+    with pytest.raises(SyncFailure) as caught:
+        await watch(permanent, changes=_batches(1))
+    assert caught.value.retryable is False
+
+
+async def test_a_retryable_watched_failure_is_retried_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dependency that dies mid-watch must not take the container with it."""
+    marker = tmp_path / "ready"
+    delays: list[float] = []
+    watches: list[int] = []
+
+    async def flaky_watch(*args: object, **kwargs: object) -> int:
+        watches.append(1)
+        if len(watches) == 1:
+            assert marker.exists()
+            raise SyncFailure("watched synchronization failed", retryable=True)
+        return 0
+
+    async def record(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("scout.sync_job.watch", flaky_watch)
+    await _async_main(
+        FakeIndexer(), tmp_path, marker, base_delay=5.0, max_delay=300.0, sleep=record
+    )
+
+    assert len(watches) == 2
+    assert delays == [5.0]
+    assert marker.exists()
+
+
+def test_httpx_status_errors_are_classified_like_urllib_ones() -> None:
+    """`aembed_texts` raises httpx errors; the classifier must not ignore them."""
+    from scout.chunker import EmbeddingError
+
+    def wrapped(code: int) -> EmbeddingError:
+        request = httpx.Request("POST", "https://gateway.invalid/embeddings")
+        error = httpx.HTTPStatusError(
+            "synthetic", request=request, response=httpx.Response(code, request=request)
+        )
+        try:
+            raise EmbeddingError("redacted") from error
+        except EmbeddingError as exc:
+            return exc
+
+    assert _is_transient(wrapped(500))
+    assert _is_transient(wrapped(502))
+    assert _is_transient(wrapped(429))
+    assert _is_transient(wrapped(408))
+    assert not _is_transient(wrapped(400))
+    assert not _is_transient(wrapped(404))
+
+
+# ── T6.5: a retry must not re-parse a corpus that has not changed ──────────
+
+
+def test_a_retry_after_a_failed_embed_does_not_reparse_the_corpus(
+    tmp_path: Path,
+) -> None:
+    """The failure that actually occurs is at the embed step.
+
+    Re-parsing every document before each retry costs the whole corpus's parse
+    work to reach the one call that failed, and it scales with the corpus rather
+    than with the failure. Observed during the Tier 0 outage test as
+    `Table extraction unavailable …` printed three times per backoff cycle.
+    """
+    from scout.ingest import ParseCache
+
+    corpus = tmp_path / "raw"
+    corpus.mkdir()
+    for name in ("a.md", "b.md", "c.md"):
+        (corpus / name).write_text(f"# {name}\n\nbody of {name}\n", encoding="utf-8")
+
+    cache = ParseCache()
+    for _attempt in range(3):
+        for name in ("a.md", "b.md", "c.md"):
+            cache.parsed(corpus / name, base_dir=tmp_path)
+
+    # Three documents, three parses — not nine.
+    assert cache.parses == 3
+
+
+def test_a_changed_file_is_parsed_again(tmp_path: Path) -> None:
+    """Keyed by identity, not by path: a stale reuse must be impossible."""
+    import os
+
+    from scout.ingest import ParseCache
+
+    source = tmp_path / "a.md"
+    source.write_text("# a\n\noriginal\n", encoding="utf-8")
+
+    cache = ParseCache()
+    first = cache.parsed(source, base_dir=tmp_path)
+    assert "original" in first.full_text
+
+    source.write_text("# a\n\nrewritten entirely\n", encoding="utf-8")
+    os.utime(source, ns=(0, 0))  # force a different mtime_ns
+
+    second = cache.parsed(source, base_dir=tmp_path)
+    assert cache.parses == 2
+    assert "rewritten entirely" in second.full_text
+
+
+def test_an_unreadable_file_is_never_served_from_cache(tmp_path: Path) -> None:
+    """Without an identity there is no safe reuse, so parse and let it raise.
+
+    The cache must not turn a missing file into a cache miss it then swallows —
+    the parser's own error is the right answer and has to reach the caller.
+    """
+    from scout.ingest import ParseCache
+    from scout.parsers import ParserError
+
+    cache = ParseCache()
+    with pytest.raises(ParserError):
+        cache.parsed(tmp_path / "absent.md", base_dir=tmp_path)
+    assert cache.parses == 1, "it must have attempted a real parse"
+
+
+def test_a_successful_index_clears_the_cache(tmp_path: Path) -> None:
+    """A cache that outlived its cycle would hold a corpus-worth of text."""
+    import asyncio
+
+    from scout.ingest import ParseCache
+    from scout.sync_job import PgVectorDirectIndexer
+
+    corpus = tmp_path / "raw"
+    corpus.mkdir()
+    (corpus / ".acl.yaml").write_text(
+        'version: 1\nrules:\n  - path: "**"\n    departments: [ai_eng]\n',
+        encoding="utf-8",
+    )
+    (corpus / "a.md").write_text("# a\n\nbody\n", encoding="utf-8")
+
+    cache = ParseCache()
+    indexer = PgVectorDirectIndexer(raw_dir=corpus, parse_cache=cache)
+
+    async def _fake_ingest(**_kwargs: object) -> list[dict[str, object]]:
+        cache.parsed(corpus / "a.md", base_dir=tmp_path)
+        return [{"source_uri": "raw/a.md", "chunks_count": 1}]
+
+    import scout.ingest as ingest_module
+
+    original = ingest_module.ingest_directory
+    ingest_module.ingest_directory = _fake_ingest  # type: ignore[assignment]
+    try:
+        outcome = asyncio.run(indexer.index())
+    finally:
+        ingest_module.ingest_directory = original  # type: ignore[assignment]
+
+    assert outcome.ok
+    assert cache._entries == {}, "a successful cycle must not retain parses"

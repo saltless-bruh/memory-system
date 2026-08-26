@@ -72,7 +72,9 @@ def _frontmatter_span(lines: list[str]) -> tuple[int, int] | None:
     return None
 
 
-def _sources_span(lines: list[str], frontmatter: tuple[int, int]) -> tuple[int, int] | None:
+def _sources_span(
+    lines: list[str], frontmatter: tuple[int, int]
+) -> tuple[int, int] | None:
     """Line range ``[start, end)`` of the block nested under ``sources:``."""
     start, end = frontmatter
     for index in range(start, end):
@@ -142,10 +144,16 @@ def apply_heal_edit(
     span = items[scoped_address.source_index]
 
     declared_path = _item_key(lines, span, "path")
-    if declared_path is None or _unquote(declared_path[2]) != scoped_address.address.path:
+    if (
+        declared_path is None
+        or _unquote(declared_path[2]) != scoped_address.address.path
+    ):
         return False
     declared_hint = _item_key(lines, span, "hint")
-    if declared_hint is None or _unquote(declared_hint[2]) != scoped_address.address.hint:
+    if (
+        declared_hint is None
+        or _unquote(declared_hint[2]) != scoped_address.address.hint
+    ):
         return False
 
     index, prefix, _ = declared_hint
@@ -251,9 +259,7 @@ def apply_heals_in_place(heals: list[ProposedHeal], *, dry_run: bool = False) ->
     snapshot = _snapshot(owned_paths)
     try:
         for heal in heals:
-            if not apply_heal_edit(
-                heal.page, heal.scoped_address, heal.new_address
-            ):
+            if not apply_heal_edit(heal.page, heal.scoped_address, heal.new_address):
                 raise RuntimeError("declared source entry no longer matches")
             append_heal_to_log(
                 heal.page.slug,

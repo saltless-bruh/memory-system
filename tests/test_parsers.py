@@ -44,12 +44,7 @@ def test_parse_markdown_extracts_frontmatter_and_sections() -> None:
 
 
 def test_parse_csv_chunks_tabular_data() -> None:
-    csv_content = (
-        "id,name,role\n"
-        "1,Alice,Admin\n"
-        "2,Bob,User\n"
-        "3,Charlie,Auditor\n"
-    )
+    csv_content = "id,name,role\n1,Alice,Admin\n2,Bob,User\n3,Charlie,Auditor\n"
     doc = parse_csv(csv_content, "raw/data/users.csv")
     assert doc.title == "Users"
     assert len(doc.sections) >= 1
@@ -72,6 +67,7 @@ def test_parse_image_with_vision_extractor() -> None:
         img_path = Path(f.name)
 
     try:
+
         def fake_vision_extractor(path: Path, uri: str) -> str:
             return (
                 "## Visual Architecture\n"
@@ -80,7 +76,11 @@ def test_parse_image_with_vision_extractor() -> None:
                 "Latency: 145ms, Throughput: 500 req/s.\n"
             )
 
-        doc = parse_image(img_path, "raw/images/test_diagram.png", vision_extractor=fake_vision_extractor)
+        doc = parse_image(
+            img_path,
+            "raw/images/test_diagram.png",
+            vision_extractor=fake_vision_extractor,
+        )
         assert doc.title == img_path.stem.replace("-", " ").replace("_", " ").title()
         assert len(doc.sections) == 2
         assert doc.sections[0].loc == "Section Visual Architecture"

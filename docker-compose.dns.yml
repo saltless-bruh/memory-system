@@ -1,0 +1,50 @@
+# Opt-in DNS override — use ONLY on a host whose /etc/resolv.conf is permanently
+# a loopback resolver (systemd-resolved at 127.0.0.53, dnsmasq, …).
+#
+# Why this file exists
+# --------------------
+# Containers on a Compose network resolve through Docker's embedded server at
+# 127.0.0.11, which forwards to the nameservers Docker captured from the host's
+# /etc/resolv.conf *at container-creation time*. When that file names only a
+# loopback resolver, the embedded server has nothing to forward to and the
+# container's resolv.conf records:
+#
+#     # NO EXTERNAL NAMESERVERS DEFINED
+#
+# Every outbound provider call then fails with "Temporary failure in name
+# resolution", which surfaces far from its cause — as a 500 from the gateway,
+# or as `error:EmbeddingError` in sync-job.
+#
+# Try this FIRST — it fixes the common case with no config at all
+# ---------------------------------------------------------------
+# If the host's /etc/resolv.conf lists real nameservers *now* but the container
+# was created while it did not, the containers simply hold a stale copy:
+#
+#     docker compose up -d --force-recreate litellm scout sync-job
+#
+# Note the explicit service list: never recreate the whole stack casually,
+# because `postgres` holds the corpus.
+#
+# Reach for THIS file only when the host cannot supply routable nameservers —
+# then the resolver must be stated explicitly:
+#
+#     SNP_DNS_SERVERS=10.0.0.53 \
+#       docker compose -f docker-compose.yml -f docker-compose.dns.yml up -d
+#
+# Set SNP_DNS_SERVERS to YOUR site's resolver. Do not default it to a public
+# one: on a split-horizon network a public resolver cannot see internal names,
+# and sending internal hostnames to a third party leaks infrastructure detail.
+#
+# The host-wide alternative is `{"dns": [...]}` in /etc/docker/daemon.json.
+# That is the more permanent fix, but it is global to the machine and changes
+# every unrelated Docker workload on it, so it belongs to the host's
+# administrator rather than to this repository.
+#
+# Only `litellm` is overridden: it is the one service that makes outbound calls
+# to model providers. Everything else talks to service names on the Compose
+# network, which the embedded resolver answers without any upstream.
+
+services:
+  litellm:
+    dns:
+      - ${SNP_DNS_SERVERS:?set SNP_DNS_SERVERS to your site resolver, e.g. SNP_DNS_SERVERS=10.0.0.53}

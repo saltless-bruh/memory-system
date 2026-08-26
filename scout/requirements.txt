@@ -1,5 +1,11 @@
 # Scout runtime deps. The library core (types, core, backends over urllib) is
-# stdlib-only; these are needed only by the two service entry points:
+# stdlib-only; these are needed only by the two service entry points.
+#
+# NOTHING BUILDS FROM THIS FILE. It is the human-readable input to
+# `scout/requirements.lock`, which is what the image installs, with
+# `--require-hashes`. Change a bound here, recompile the lock against a running
+# container or a clean resolve, and rebuild. The ranges are kept deliberately:
+# they record the *intended* compatibility, which a lock cannot express.
 fastmcp==3.3.1      # scout.serve — agent-facing MCP server (rag_fetch; pinned for Streamable HTTP stability)
 watchfiles>=0.21    # scout.sync_job — raw/ file-watch (Nhịp A, T-3.2)
 asyncpg>=0.29.0     # scout.backends.pgvector — Postgres 16 async client

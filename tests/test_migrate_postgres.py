@@ -20,7 +20,9 @@ def _migration(directory: Path, name: str, sql: str = "SELECT 1") -> Path:
     return path
 
 
-def test_discover_migrations_is_stable_and_rejects_duplicate_versions(tmp_path: Path) -> None:
+def test_discover_migrations_is_stable_and_rejects_duplicate_versions(
+    tmp_path: Path,
+) -> None:
     _migration(tmp_path, "002_second.sql")
     _migration(tmp_path, "001_first.sql")
     assert [p.name for p in discover_migrations(tmp_path)] == [
@@ -72,7 +74,9 @@ async def test_failed_migration_is_redacted_and_unlocks(tmp_path: Path) -> None:
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value="schema_migrations")
     conn.fetch = AsyncMock(return_value=[])
-    conn.execute = AsyncMock(side_effect=[None, RuntimeError("synthetic_secret_value"), None])
+    conn.execute = AsyncMock(
+        side_effect=[None, RuntimeError("synthetic_secret_value"), None]
+    )
     transaction = MagicMock()
     transaction.__aenter__ = AsyncMock(return_value=transaction)
     transaction.__aexit__ = AsyncMock(return_value=None)

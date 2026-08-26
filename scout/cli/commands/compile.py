@@ -111,12 +111,17 @@ def compile_plan(
     config: Injected = None,
 ) -> CommandResult:
     """Compile every article in an approved plan into the vault."""
+    from scout.cli.tasks import resolve_plan_path
     from scripts.compile_note import CompileNoteError
     from scripts.compile_plan import CompilePlanError
     from scripts.compile_plan import compile_plan as _compile_plan
 
     cfg: Config = config
-    cfg.require_repo()
+    repo = cfg.require_repo()
+    # Resolved before anything is spent or written. The staging directory is
+    # derived from this path, so a plan path outside the checkout would take the
+    # staging directory — and everything the batch writes — out with it.
+    plan_path = resolve_plan_path(Path(plan), repo)
 
     if not confirm and not dry_run:
         # Current guidance is that a mutating tool is approved when it is
@@ -130,11 +135,11 @@ def compile_plan(
         # A batch runs for minutes. A caller that blocks — an MCP client
         # especially — times out and retries, re-spending the quota the
         # staging checkpoint exists to protect. Hand back a handle instead.
-        return _start_background(plan, skip_groundedness, allow_uncertain)
+        return _start_background(plan_path, skip_groundedness, allow_uncertain)
 
     try:
         pages = _compile_plan(
-            Path(plan),
+            plan_path,
             skip_groundedness=skip_groundedness,
             dry_run=dry_run,
             resume=not no_resume,
@@ -160,15 +165,19 @@ def compile_plan(
 
 
 def _start_background(
-    plan: str, skip_groundedness: bool, allow_uncertain: bool
+    plan_path: Path, skip_groundedness: bool, allow_uncertain: bool
 ) -> CommandResult:
-    """Launch the batch detached and return immediately with its handle."""
+    """Launch the batch detached and return immediately with its handle.
+
+    `plan_path` arrives already resolved: the child process inherits no working
+    directory guarantee, so a relative path here would give it a different
+    staging directory from the one this process reports on.
+    """
     import subprocess
     import sys
 
     from scout.cli.tasks import TaskState, status_for
 
-    plan_path = Path(plan)
     existing = status_for(plan_path)
     if existing.state is TaskState.RUNNING:
         return CommandResult(
@@ -182,7 +191,7 @@ def _start_background(
         "-m",
         "scripts.compile_plan",
         "--plan",
-        plan,
+        str(plan_path),
     ]
     if skip_groundedness:
         argv.append("--skip-groundedness")
@@ -226,16 +235,99 @@ def compile_status(
     from scout.cli.tasks import TaskState, status_for
 
     cfg: Config = config
-    cfg.require_repo()
+    repo = cfg.require_repo()
 
-    status = status_for(Path(handle), wiki_dir=vault.WIKI_DIR)
-    unfinished = status.state in {TaskState.STALLED, TaskState.NOT_STARTED}
+    # The same anchoring `compile_plan` used, so the handle it returned resolves
+    # to the same batch here — including when the two calls happen in different
+    # directories, which for an MCP client is the normal case.
+    status = status_for(Path(handle), wiki_dir=vault.WIKI_DIR, root=repo)
+    # Exit 0 means the batch is fine: working, staged, or finished. Anything a
+    # human has to act on is exit 1 — a finding, not a malfunction. `failed` and
+    # `cancelled` belong here for the same reason `stalled` always did: a caller
+    # chaining `compile-status && publish` must not proceed on a batch that
+    # stopped, and reporting one as success is the dishonesty this state machine
+    # exists to remove.
+    needs_attention = status.state in {
+        TaskState.STALLED,
+        TaskState.NOT_STARTED,
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+    }
     return CommandResult(
         exit_code=(
             ExitCode.SEMANTIC_FAILURE
-            if unfinished and status.total
+            if needs_attention and status.total
             else ExitCode.SUCCESS
         ),
         data=status.to_dict(),
         summary=f"{status.state.value}: {status.done}/{status.total} — {status.detail}",
+    )
+
+
+def compile_cancel(
+    handle: str,
+    *,
+    config: Injected = None,
+) -> CommandResult:
+    """Ask a running batch to stop at its next article boundary."""
+    from scout import vault
+    from scout.cli.errors import input_error
+    from scout.cli.tasks import TaskState, request_cancel, resolve_plan_path, status_for
+
+    cfg: Config = config
+    repo = cfg.require_repo()
+    plan_path = resolve_plan_path(Path(handle), repo)
+    if not plan_path.is_file():
+        raise input_error(
+            f"no plan at {plan_path}",
+            hint="pass the handle compile-plan returned",
+            handle=plan_path.as_posix(),
+        )
+
+    status = status_for(plan_path, wiki_dir=vault.WIKI_DIR, root=repo)
+
+    # Cancelling something that already stopped is a no-op that says so. Making
+    # it an error would push a caller into treating a finished batch as a fault.
+    if status.is_terminal:
+        return CommandResult(
+            exit_code=ExitCode.SUCCESS,
+            data={
+                "handle": status.handle,
+                "status": "no_change",
+                "state": status.state.value,
+            },
+            summary=f"already {status.state.value} — nothing to cancel",
+        )
+    if status.state is not TaskState.RUNNING:
+        return CommandResult(
+            exit_code=ExitCode.SUCCESS,
+            data={
+                "handle": status.handle,
+                "status": "not_running",
+                "state": status.state.value,
+            },
+            summary=(
+                f"{status.state.value}: no process is working on this batch, so "
+                "there is nothing to stop — re-run to resume, or delete the "
+                "staging directory to discard it"
+            ),
+        )
+
+    request_cancel(plan_path)
+    return CommandResult(
+        exit_code=ExitCode.SUCCESS,
+        data={
+            "handle": status.handle,
+            "status": "cancelling",
+            "state": status.state.value,
+            "pid": status.pid,
+        },
+        # Cancellation is cooperative: the batch reads the request between
+        # articles. Saying it has stopped would be the lie the whole status
+        # contract exists to avoid.
+        summary=(
+            f"cancellation requested — the batch will stop after the current "
+            f"article; poll compile-status until it reports "
+            f"{TaskState.CANCELLED.value}"
+        ),
     )

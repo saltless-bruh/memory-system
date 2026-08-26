@@ -1,0 +1,34 @@
+# Isolated release-candidate overlay. Always pair with docker-compose.yml and
+# an explicit `--project-name`; it gives the candidate distinct loopback ports,
+# volumes, and a disposable read-only Git remote.
+#
+# It deliberately does not inherit GIT_SYNC_URL from .env: a staging host-sync
+# must only clone the bare repository prepared from the candidate tag.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${SNP_STAGING_POSTGRES_PORT:-15432}:5432"
+
+  litellm:
+    ports:
+      - "127.0.0.1:${SNP_STAGING_LITELLM_PORT:-14000}:4000"
+
+  scout:
+    ports:
+      - "127.0.0.1:${SNP_STAGING_SCOUT_PORT:-18080}:8080"
+
+  host-sync:
+    environment:
+      GIT_SYNC_URL: file:///staging-source
+      GIT_BRANCH: ${SNP_STAGING_GIT_BRANCH:?set an immutable staging branch}
+      GIT_CONFIG_GLOBAL: /etc/snp/staging.gitconfig
+    volumes:
+      - ${SNP_STAGING_SOURCE_REPO:?set an absolute staging bare-repository path}:/staging-source:ro
+      - ./config/host-sync.staging.gitconfig:/etc/snp/staging.gitconfig:ro
+    ports:
+      - "127.0.0.1:${SNP_STAGING_HOST_SYNC_PORT:-19000}:9000"
+
+  basic-memory:
+    ports:
+      - "127.0.0.1:${SNP_STAGING_BASIC_MEMORY_PORT:-18765}:8765"

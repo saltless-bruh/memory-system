@@ -41,15 +41,32 @@ class PgVectorRlsBackend(RagBackend):
         self._pool = pool
 
     async def _get_pool(self) -> asyncpg.Pool:
-        """Lazily creates and returns the connection pool."""
+        """Lazily creates and returns the connection pool.
+
+        The environment is consulted only for what the caller did not supply. A
+        fully parameterised backend must not need `POSTGRES_*` exported as well:
+        the constructor advertises those five values, and a caller that resolved
+        them itself -- from a `.env` mapping, from a secret store -- would
+        otherwise be forced to put them into `os.environ` anyway, where every
+        subprocess inherits them.
+        """
         if self._pool is None:
-            settings = postgres_settings("query")
+            supplied = (self.host, self.port, self.database, self.user, self.password)
+            if all(value is not None for value in supplied):
+                host, port, database, user, password = supplied
+            else:
+                settings = postgres_settings("query")
+                host = self.host or settings.host
+                port = self.port or settings.port
+                database = self.database or settings.database
+                user = self.user or settings.user
+                password = self.password or settings.password
             self._pool = await asyncpg.create_pool(
-                host=self.host or settings.host,
-                port=self.port or settings.port,
-                database=self.database or settings.database,
-                user=self.user or settings.user,
-                password=self.password or settings.password,
+                host=host,
+                port=port,
+                database=database,
+                user=user,
+                password=password,
                 min_size=2,
                 max_size=20,
             )

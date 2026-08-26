@@ -47,9 +47,7 @@ def ensure_secrets(
     if rotate or refresh_token_map or not token_map.exists():
         token = (directory / "scout_test_token").read_text(encoding="utf-8").strip()
         replace_map = rotate or refresh_token_map
-        flags = os.O_WRONLY | os.O_CREAT | (
-            os.O_TRUNC if replace_map else os.O_EXCL
-        )
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if replace_map else os.O_EXCL)
         descriptor = os.open(token_map, flags, 0o600)
         os.chmod(token_map, 0o600)
         payload = {

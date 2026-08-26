@@ -345,10 +345,10 @@ def test_security_workflow_runs_immutable_scanners_and_always_runs_gitleaks() ->
     assert "github.base_ref || github.event.repository.default_branch" in content
     assert 'cd "$GITHUB_WORKSPACE/trusted-security"' in content
     assert (
-        'scripts/scan_secrets.py --all-current --history --repo '
+        "scripts/scan_secrets.py --all-current --history --repo "
         '"$GITHUB_WORKSPACE/target"'
     ) in content
-    assert 'trusted-security/.gitleaks.toml:/trusted/gitleaks.toml:ro' in content
+    assert "trusted-security/.gitleaks.toml:/trusted/gitleaks.toml:ro" in content
     assert "--config=/trusted/gitleaks.toml" in content
 
     gitleaks_step = content.index("Independent Gitleaks all-history scan")

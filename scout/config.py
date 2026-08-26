@@ -56,7 +56,9 @@ def read_secret(
         try:
             value = path.read_text(encoding="utf-8").strip()
         except OSError as exc:
-            raise ConfigError(f"unable to read configured secret file for {file_name}") from exc
+            raise ConfigError(
+                f"unable to read configured secret file for {file_name}"
+            ) from exc
         if not value:
             raise ConfigError(f"configured secret file for {file_name} is empty")
         return value

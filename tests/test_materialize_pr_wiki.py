@@ -62,7 +62,9 @@ def test_materialize_accepts_only_regular_wiki_markdown_changes(tmp_path: Path) 
     assert not (destination / "wiki" / "delete.md").exists()
 
 
-def test_materialize_rejects_any_non_wiki_change_before_mutation(tmp_path: Path) -> None:
+def test_materialize_rejects_any_non_wiki_change_before_mutation(
+    tmp_path: Path,
+) -> None:
     repo, base = _repo(tmp_path)
     (repo / "wiki" / "keep.md").write_text("PR bytes\n", encoding="utf-8")
     (repo / "scripts").mkdir()
@@ -116,7 +118,9 @@ def test_materialize_rejects_oversized_blob_before_reading_it(
         materialize_pr_wiki(repo, tmp_path / "trusted", base_sha=base, head_sha=head)
 
 
-def test_export_mirrors_only_markdown_and_preserves_other_pr_files(tmp_path: Path) -> None:
+def test_export_mirrors_only_markdown_and_preserves_other_pr_files(
+    tmp_path: Path,
+) -> None:
     trusted = tmp_path / "trusted"
     destination = tmp_path / "pr-source"
     (trusted / "wiki" / "nested").mkdir(parents=True)

@@ -75,6 +75,126 @@ POLICIES: tuple[ToolPolicy, ...] = (
         Exposure.HIDDEN,
         reason="the server cannot serve itself; an agent is already connected to it",
     ),
+    ToolPolicy(
+        "mcp-config",
+        Exposure.HIDDEN,
+        reason=(
+            "an agent reading this tool is already connected; the command "
+            "exists to get it connected in the first place, and it writes into "
+            "a config file the user owns"
+        ),
+    ),
+    ToolPolicy(
+        "ingest",
+        Exposure.HIDDEN,
+        reason=(
+            "the sync-job already indexes raw/ on a watch; an agent-triggered "
+            "re-index spends embedding calls on a corpus it does not own"
+        ),
+    ),
+    ToolPolicy(
+        "gate",
+        Exposure.HIDDEN,
+        reason=(
+            "the gate branches, commits and pushes on a schedule; it is CI's "
+            "entry point, and an agent triggering it would bypass the review "
+            "the gate exists to feed"
+        ),
+    ),
+    ToolPolicy(
+        "heal",
+        Exposure.HIDDEN,
+        reason=(
+            "rewriting sources[] on a live vault is the gate's job under human "
+            "review (R-6.4); direct healer use is explicitly not the CI gate"
+        ),
+    ),
+    ToolPolicy(
+        "status",
+        Exposure.HIDDEN,
+        reason=(
+            "an agent that cannot start the stack has no use for its health; "
+            "diagnosing a dead stack is the operator's job at a terminal"
+        ),
+    ),
+    ToolPolicy("up", Exposure.HIDDEN, reason="lifecycle is an operator decision"),
+    ToolPolicy("down", Exposure.HIDDEN, reason="lifecycle is an operator decision"),
+    ToolPolicy("logs", Exposure.HIDDEN, reason="lifecycle is an operator decision"),
+    ToolPolicy(
+        "init",
+        Exposure.HIDDEN,
+        reason="generates credentials; never something an agent should trigger",
+    ),
+    ToolPolicy(
+        "mint",
+        Exposure.HIDDEN,
+        reason=(
+            "compile_plan already mints every address it needs; a standalone "
+            "minting tool is a sub-step an agent does not have to drive, and "
+            "each tool definition costs context on every call"
+        ),
+    ),
+    ToolPolicy(
+        "compile",
+        Exposure.HIDDEN,
+        reason=(
+            "compile_plan covers the same ground for one article as for many, "
+            "and two compilation tools invite the wrong one being picked; the "
+            "single-page path stays a CLI operation"
+        ),
+    ),
+    ToolPolicy(
+        "propose",
+        Exposure.HIDDEN,
+        reason=(
+            "branching, committing and pushing are the human's decision under "
+            "R-6.4/R-7.3; an agent that could open its own PR would be reviewing "
+            "its own work"
+        ),
+    ),
+    ToolPolicy(
+        "fetch",
+        Exposure.HIDDEN,
+        reason=(
+            "R-4.1/R-4.2: rag_fetch on the Scout server is the ONLY door into RAG. "
+            "A second retrieval tool here would be a second door, whatever it "
+            "shares internally"
+        ),
+    ),
+    ToolPolicy(
+        "search",
+        Exposure.HIDDEN,
+        reason=(
+            "the snp-wiki server already exposes search_notes over the same vault; "
+            "two search tools is exactly the crowding that degrades tool selection"
+        ),
+    ),
+    ToolPolicy(
+        "read",
+        Exposure.HIDDEN,
+        reason=(
+            "the snp-wiki server already exposes read_note over the same vault; "
+            "a second reading tool is context cost for a capability the agent has"
+        ),
+    ),
+    ToolPolicy(
+        "install-agent",
+        Exposure.HIDDEN,
+        reason=(
+            "installs instructions into a directory the user owns; an agent "
+            "that could install its own operating contract elsewhere is a "
+            "decision nobody made"
+        ),
+    ),
+    ToolPolicy(
+        "compile-cancel",
+        Exposure.HIDDEN,
+        reason=(
+            "the tool surface is deliberately four, and an agent that started a "
+            "batch can stop caring about it — stopping one is the operator's "
+            "job at a terminal. A task-capable client gets tasks/cancel natively"
+        ),
+    ),
     ToolPolicy("plan-articles", Exposure.TOOL, tool="plan_articles"),
     ToolPolicy("compile-plan", Exposure.TOOL, tool="compile_plan"),
     ToolPolicy("compile-status", Exposure.TOOL, tool="compile_status"),

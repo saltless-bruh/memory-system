@@ -1,7 +1,6 @@
 ---
 name: snp-auto-heal-vault
-description: >-
-  Use this skill when address verification reports semantic link drift (DRIFT or FAIL errors) or when running automated CI/CD maintenance on Knowledge Vault RAG citations.
+description: "Use this skill when address verification reports semantic link drift (DRIFT or FAIL errors) or when running automated CI/CD maintenance on Knowledge Vault RAG citations."
 ---
 
 # snp-auto-heal-vault

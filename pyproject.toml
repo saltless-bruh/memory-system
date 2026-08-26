@@ -48,6 +48,10 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
     "ruff>=0.4",
+    # Validates `snpmemory schema` against the vendored CLI Spec document
+    # (tests/fixtures/clispec-v0.3.json). Hand-rolling validation of a 32 KB
+    # schema is how a conformance claim quietly becomes false.
+    "jsonschema>=4.21",
 ]
 # Optional benchmark stack for `tests/eval_ragas.py` only. Kept out of `dev` so
 # the deterministic offline gates never depend on it; the benchmark names this

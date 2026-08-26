@@ -15,13 +15,21 @@ CLAUDE_DIR = REPO_ROOT / ".claude"
 
 # `.agent/` is the authoritative agent contract. `.claude/` mirrors these four
 # subtrees byte-for-byte so Claude Code reads exactly what every other agent
-# reads; `manifest.json` / `package.json` stay out of `.claude/` because they
-# are distribution metadata for the portable bundle, not client config.
+# reads; distribution metadata stays out of `.claude/` because it describes the
+# portable bundle, not client config.
 MIRRORED_CONTRACT_DIRS = ("instructions", "rules", "skills", "workflows")
 
 # Root-level files whose divergence README.md and docs/ARCHITECTURE_STATUS.md
 # explicitly promise cannot happen.
-REQUIRED_SHARED_ROOT_FILES = ("manifest.json", "package.json")
+# `package.json` is npm metadata and is shared. `plugin.json` and `mcp.json`
+# are deliberately NOT: they describe the *distribution*, and `.agent/` is this
+# repository's working contract rather than a plugin. Since the superpowers
+# layer is repo-local, the two trees legitimately differ, and a manifest
+# claiming otherwise in both places would be the accident this tier removed.
+REQUIRED_SHARED_ROOT_FILES = ("package.json",)
+
+#: Files that belong to the distribution only.
+PACKAGE_ONLY_ROOT_FILES = ("plugin.json", "mcp.json")
 
 # Empty agent-config directories that must never reappear in the repo root.
 # `~` is what an unquoted/unexpanded tilde in a shell command leaves behind.
@@ -42,18 +50,26 @@ def _relative_files(root: Path) -> set[Path]:
 
 
 def test_package_manifest_validity() -> None:
-    """Validate manifest.json in packages/snp-agent and .agent."""
-    for root in (PACKAGE_DIR, AGENT_DIR):
-        manifest_path = root / "manifest.json"
-        assert manifest_path.is_file(), f"Missing manifest.json at {manifest_path}"
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert data["name"] == "@snp/memory-agent"
-        assert data["version"] == "2.0.0"
-        assert "mcpServers" in data
-        assert "basic-memory" in data["mcpServers"]
-        assert "scout" in data["mcpServers"]
-        assert "entrypoints" in data
-        assert "compatibility" in data
+    """Validate `plugin.json` — the Agent Plugins 1.0.0 manifest."""
+    manifest_path = PACKAGE_DIR / "plugin.json"
+    assert manifest_path.is_file(), f"Missing plugin.json at {manifest_path}"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert data["name"] == "snp-memory-agent"
+    assert data["version"] == "2.0.0"
+    # The specification is explicit: MCP servers are declared in `mcp.json`,
+    # never inline in the manifest.
+    assert "mcpServers" not in data
+
+    mcp_path = PACKAGE_DIR / "mcp.json"
+    assert mcp_path.is_file(), f"Missing mcp.json at {mcp_path}"
+    servers = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]
+    # `snp-wiki`, not `basic-memory`: an agent's tool namespace comes from the
+    # key a client config gives a server, and every other surface uses this one.
+    assert set(servers) == {"snp-wiki", "scout", "snpmemory"}
+
+    project = data["extensions"]["io.snp.memory"]
+    assert "entrypoints" in project
+    assert "ships" in project
 
 
 def test_package_json_validity() -> None:
@@ -78,16 +94,24 @@ def test_packages_to_agent_parity() -> None:
     assert PACKAGE_DIR.is_dir(), f"Package dir missing: {PACKAGE_DIR}"
     assert AGENT_DIR.is_dir(), f"Agent dir missing: {AGENT_DIR}"
 
-    package_files = _relative_files(PACKAGE_DIR)
+    # `plugin.json` / `mcp.json` describe the distribution and exist only in the
+    # package; `.agent/` is this repository's working contract, not a plugin.
+    package_files = _relative_files(PACKAGE_DIR) - {
+        Path(name) for name in PACKAGE_ONLY_ROOT_FILES
+    }
     agent_files = _relative_files(AGENT_DIR)
 
-    # Guard against a vacuous pass if either tree is emptied or relocated.
-    assert len(package_files) >= 20, (
+    # Guard against a vacuous pass if either tree is emptied or relocated. The
+    # floor counts only the shared files: `plugin.json` and `mcp.json` are
+    # excluded above, and `manifest.json` no longer exists.
+    assert len(package_files) >= 18, (
         f"packages/snp-agent looks truncated: only {len(package_files)} file(s)"
     )
 
     missing = sorted(str(rel) for rel in package_files - agent_files)
-    assert not missing, f"Present in packages/snp-agent but absent from .agent/: {missing}"
+    assert not missing, (
+        f"Present in packages/snp-agent but absent from .agent/: {missing}"
+    )
 
     mismatched = sorted(
         str(rel)
@@ -101,7 +125,7 @@ def test_packages_to_agent_parity() -> None:
 
 
 def test_shared_root_metadata_is_byte_identical() -> None:
-    """manifest.json and package.json must be shared and identical in both trees.
+    """Shared root metadata must be identical in both trees.
 
     These sit outside skills/ and workflows/, so the per-component mirror tests
     never reach them; they are the files that actually drifted.
@@ -109,7 +133,9 @@ def test_shared_root_metadata_is_byte_identical() -> None:
     shared = _relative_files(PACKAGE_DIR) & _relative_files(AGENT_DIR)
     for name in REQUIRED_SHARED_ROOT_FILES:
         rel = Path(name)
-        assert rel in shared, f"{name} must exist in BOTH .agent/ and packages/snp-agent/"
+        assert rel in shared, (
+            f"{name} must exist in BOTH .agent/ and packages/snp-agent/"
+        )
         assert (PACKAGE_DIR / rel).read_bytes() == (AGENT_DIR / rel).read_bytes(), (
             f"{name} differs between packages/snp-agent/ and .agent/"
         )
@@ -240,14 +266,20 @@ def test_skill_frontmatter_schema() -> None:
         assert skill_file.is_file(), f"SKILL.md missing in {skill_dir}"
         content = skill_file.read_text(encoding="utf-8")
         match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
-        assert match is not None, f"SKILL.md in {skill_dir.name} missing YAML frontmatter delimiters"
+        assert match is not None, (
+            f"SKILL.md in {skill_dir.name} missing YAML frontmatter delimiters"
+        )
         frontmatter = yaml.safe_load(match.group(1))
         assert isinstance(frontmatter, dict)
-        assert "name" in frontmatter, f"SKILL.md in {skill_dir.name} missing 'name' in frontmatter"
+        assert "name" in frontmatter, (
+            f"SKILL.md in {skill_dir.name} missing 'name' in frontmatter"
+        )
         assert frontmatter["name"] == skill_dir.name, (
             f"Frontmatter name '{frontmatter['name']}' does not match directory '{skill_dir.name}'"
         )
-        assert "description" in frontmatter, f"SKILL.md in {skill_dir.name} missing 'description'"
+        assert "description" in frontmatter, (
+            f"SKILL.md in {skill_dir.name} missing 'description'"
+        )
         assert len(frontmatter["description"].strip()) > 10
 
 
@@ -258,7 +290,118 @@ def test_workflows_frontmatter_schema() -> None:
     for wf_file in workflows_dir.glob("*.md"):
         content = wf_file.read_text(encoding="utf-8")
         match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
-        assert match is not None, f"Workflow {wf_file.name} missing YAML frontmatter delimiters"
+        assert match is not None, (
+            f"Workflow {wf_file.name} missing YAML frontmatter delimiters"
+        )
         frontmatter = yaml.safe_load(match.group(1))
         assert isinstance(frontmatter, dict)
-        assert "description" in frontmatter, f"Workflow {wf_file.name} missing 'description'"
+        assert "description" in frontmatter, (
+            f"Workflow {wf_file.name} missing 'description'"
+        )
+
+
+# ── the package ships what it says it ships (Tier 3, F-4) ─────────────────
+
+
+def _declared() -> dict[str, object]:
+    data = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))
+    ships: dict[str, object] = data["extensions"]["io.snp.memory"]["ships"]
+    return ships
+
+
+def test_the_package_ships_exactly_what_plugin_json_declares() -> None:
+    """The check that actually closes the 25-file gap.
+
+    Before this, parity was enforced `.agent` → `.claude` for four subtrees and
+    `packages` → `.agent` for root files only. The package could lose any number
+    of skills, workflows or instructions and no test would notice — which is how
+    25 files went missing and stayed missing.
+    """
+    declared = _declared()
+
+    actual_skills = sorted(
+        d.name for d in (PACKAGE_DIR / "skills").iterdir() if (d / "SKILL.md").is_file()
+    )
+    assert actual_skills == sorted(declared["skills"]), (  # type: ignore[arg-type]
+        "packages/snp-agent/skills does not match plugin.json's declared set"
+    )
+
+    for kind, subdir in (("workflows", "workflows"), ("instructions", "instructions")):
+        actual = sorted(p.name for p in (PACKAGE_DIR / subdir).glob("*.md"))
+        assert actual == sorted(declared[kind]), (  # type: ignore[arg-type]
+            f"packages/snp-agent/{subdir} does not match plugin.json's declared set"
+        )
+
+    actual_rules = sorted(p.name for p in (PACKAGE_DIR / "rules").glob("*.md"))
+    assert actual_rules == sorted(declared["rules"])  # type: ignore[arg-type]
+
+
+def test_the_repo_local_layer_is_declared_and_genuinely_absent() -> None:
+    """Repo-local by decision, not by accident — and the two must agree.
+
+    The superpowers layer is this repository's development discipline, not part
+    of the memory system's operating contract. Shipping it would tell a
+    consumer's agent to write brainstorms and plans into *their*
+    `artifacts/superpowers/`, for work unrelated to the memory system.
+    """
+    data = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))
+    repo_local = data["extensions"]["io.snp.memory"]["repoLocal"]
+    prefixes = tuple(repo_local["prefixes"])
+    assert prefixes, "the exclusion must name what it excludes"
+
+    # Nothing carrying a repo-local prefix may appear in the distribution.
+    leaked = [
+        str(rel)
+        for rel in _relative_files(PACKAGE_DIR)
+        if any(part.startswith(prefixes) for part in rel.parts)
+    ]
+    assert not leaked, f"repo-local components leaked into the package: {leaked}"
+
+    for name in repo_local["rules"]:
+        assert not (PACKAGE_DIR / "rules" / name).exists()
+        assert (AGENT_DIR / "rules" / name).is_file(), (
+            f"{name} is declared repo-local but is missing from .agent/ too — "
+            "that is deletion, not a scope decision"
+        )
+    for name in repo_local["instructions"]:
+        assert not (PACKAGE_DIR / "instructions" / name).exists()
+        assert (AGENT_DIR / "instructions" / name).is_file()
+
+    # And the layer must actually exist where it was said to live.
+    agent_superpowers = [
+        d.name for d in (AGENT_DIR / "skills").iterdir() if d.name.startswith(prefixes)
+    ]
+    assert len(agent_superpowers) == 9, (
+        f"expected 9 repo-local skills in .agent/skills, found {agent_superpowers}"
+    )
+
+
+def test_the_plugin_manifest_validates_against_agent_plugins_1_0_0() -> None:
+    """Vendored schemas, like the CLI Spec. A spec revision is a test failure."""
+    import jsonschema
+
+    fixtures = REPO_ROOT / "tests" / "fixtures"
+    for name, document in (
+        ("plugin", PACKAGE_DIR / "plugin.json"),
+        ("mcp", PACKAGE_DIR / "mcp.json"),
+    ):
+        schema = json.loads(
+            (fixtures / f"agent-plugins-1.0.0-{name}.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        instance = json.loads(document.read_text(encoding="utf-8"))
+        jsonschema.Draft202012Validator(schema).validate(instance)
+
+
+def test_the_mcp_declaration_matches_the_one_config_generator() -> None:
+    """A sixth surface would be a sixth chance to drift."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    import scripts.export_mcp_config as exporter
+
+    declared = json.loads((PACKAGE_DIR / "mcp.json").read_text(encoding="utf-8"))
+    assert set(declared["mcpServers"]) == set(
+        exporter.generate_config("claude")["mcpServers"]
+    )

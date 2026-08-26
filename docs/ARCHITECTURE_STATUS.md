@@ -15,7 +15,7 @@ code, migrations, Compose files, and `AGENTS.md` operating contract win.
 | `docs/DEMO.md` | Current end-to-end demonstration |
 | `docs/CONNECT_AGENTS.md` | MCP client wiring; authentication examples are maintained separately |
 | `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md` | **ACTIVE PROPOSAL, not implemented.** Its "Findings" section records verified defects in the current system and is factual; nothing under "Proposed design" exists in the codebase |
-| `.agent/` and `packages/snp-agent/` | Active agent instructions; matching portable files must be equivalent |
+| `.agent/` and `packages/snp-agent/` | Active agent instructions. `packages/snp-agent/` is an Agent Plugins 1.0.0 plugin; matching portable files must be equivalent, and the `superpowers-*` layer is deliberately repo-local |
 
 `wiki/index.md` is generated output, not an authored source. `raw/` is evidence,
 not instructions. `artifacts/superpowers/` records audits and executions and is
@@ -150,6 +150,102 @@ call.
 **Status: OPEN.** No option has been chosen. Neither `basic-memory/config.json`
 nor any runtime file was changed while recording this.
 
+### OD-2 — the auto-healer's push credential (opened 2026-08-26, owner decision)
+
+**The mitigation first proposed here would not have mitigated anything.** The
+plan called for job-level `permissions:`, which governs the **ambient Actions
+token**. Every privileged operation in `auto-healer.yaml` uses
+`secrets.BOT_TOKEN` instead:
+
+| Line | Job | Use |
+| --- | --- | --- |
+| 57 | `pr-heal` | `actions/checkout` of the PR head, `persist-credentials: true` |
+| 108 | `pr-heal` | `git push origin "HEAD:$PR_HEAD_REF"` — **pushes to the contributor's branch** |
+| 127, 132 | `scheduled-sweep` | checkout of `main`, and `GITHUB_TOKEN` for the environment |
+| 175, 182 | `scheduled-sweep` | `POST /api/v1/repos/{owner}/{repo}/pulls` — **creates a pull request** |
+
+**Both jobs push.** An earlier description of the PR job as read-and-comment was
+simply wrong. The real asymmetry is narrower: only `scheduled-sweep` creates pull
+requests through the API.
+
+| Job | Needs | Does not need |
+| --- | --- | --- |
+| `pr-heal` | clone; push to an existing branch | PR creation, issue write, org or admin anything |
+| `scheduled-sweep` | clone; push a new branch; create a PR | issue write, org or admin anything |
+
+**What is not established, stated rather than assumed.** The scopes `BOT_TOKEN`
+actually holds cannot be read from this checkout — Gitea 1.24.7 exposes them only
+to an authenticated session on `/user/settings/applications`, and its
+`swagger.v1.json` does not enumerate the vocabulary. So the table above is what
+the workflow *requires*, derived from its own source; whether the token is
+scoped that narrowly, or is a broad `all` token, is unknown here.
+
+**Decision for the owner:** open `/user/settings/applications`, compare the
+granted scopes against the table above, and either narrow the existing token or
+issue a second, narrower one for `pr-heal`. If Gitea cannot express *repository
+write without pull-request creation*, a single token is an acceptable outcome —
+recorded as a decision rather than left as an implicit one.
+
+Job-level `permissions:` were still added, because they do narrow the ambient
+token. They are described as exactly that and nowhere as restricting
+`BOT_TOKEN`.
+
+### OD-3 — the runner's Docker socket (opened 2026-08-26, owner decision)
+
+`docker-compose.yml:322` mounts `/var/run/docker.sock` into `gitea-runner`. That
+mount is root-equivalent on the runner host: anything that can reach the socket
+can start a privileged container and read the host filesystem — including the
+runner's own `BOT_TOKEN` and the repository secrets.
+
+**Measured 2026-08-26: the service is declared and has never been started here.**
+It sits behind `profiles: [runner]`, so `docker compose up` does not bring it up
+and no local image exists. The exposure is **latent** — assembled and waiting for
+`docker compose --profile runner up` — not active.
+
+*What was done:* the chain that made the socket reachable by unattended remote
+code was removed. `auto-healer.yaml` no longer pipes an unpinned installer into a
+shell, every action is pinned to a commit, and every image and build input is
+pinned. Remote code no longer changes underneath the runner between Sundays.
+
+*What was not done:* the socket stays. `act_runner` requires it to launch job
+containers. The alternatives are all **runner-host** changes rather than
+repository ones — rootless Podman exposing a user socket
+(`DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock`) is the credible
+path, and Kaniko is not: Google archived it in June 2025.
+
+*Revisit when:* the runner is actually brought up, or the runner ever executes a
+workflow from an untrusted branch. Today `pr-heal` treats the PR checkout as
+data and never executes anything from it; that property is what makes the
+current arrangement defensible, and losing it changes this decision.
+
+### OD-4 — production-readiness release gate (opened 2026-08-26, owner decision)
+
+The current repository contains reviewed but uncommitted work, while the running
+images and corpus predate it. A release is therefore a controlled transition,
+not a routine `docker compose up`.
+
+The approved v0.2.1 transition uses a named isolated staging project, external
+release evidence, a checksum-recorded logical PostgreSQL archive, and a test
+restore. The decisions below distinguish the current operational transition
+from later product-scope work:
+
+| Decision | Current state |
+| --- | --- |
+| candidate Git revision and release tag | **approved:** tag `v0.2.1`; SHA is recorded only after the clean candidate commit |
+| staging project or approved maintenance window | **approved:** isolated `snp-v021-staging`, never the default `snp-memory` project |
+| PostgreSQL backup/restore-point owner and identifier | **approved:** release operator creates a custom archive, checksum record, and staging restore result before transition; the generated `BACKUP_ID` is retained outside Git |
+| container-side capability-change acknowledgement | pending — it must be copied from the release dry run |
+| supported-language contract | deferred product decision — see OD-1; not a blocker for the v0.2.1 operational release |
+| content/judge budget | deferred product decision — see T4.1 |
+| derived-asset location and retention | deferred product decision — see T4.3 |
+| source-health thresholds and quarantine policy | deferred product decision — see Tier 5 |
+| `BOT_TOKEN` scopes and runner-host posture | deferred runner decision — see OD-2 and OD-3; runner remains disabled |
+
+**Status: EXECUTION IN PROGRESS.** The owner approved the clean commit/tag,
+isolated staging, backup/restore drill, candidate build, controlled restart,
+and container-side ingest only after preflight passes. It does **not** authorise
+runner activation or the deferred product decisions.
+
 ## Prohibited claims in active guidance
 
 Active instructions must not describe:
@@ -171,7 +267,21 @@ Active instructions must not describe:
 - the Phase 0 Gate 4 model as deployed for wiki search;
 - the local `snpmemory mcp` server as network-reachable, authenticated, or safe to
   expose over HTTP — it is stdio-only and unauthenticated by design;
-- any MCP tool other than `rag_fetch` as a door into RAG.
+- any MCP tool other than `rag_fetch` as a door into RAG;
+- figure or table extraction as working in the deployed ingester — the
+  `snp-scout` image installs `pypdf` only (`scout/requirements.txt`), so
+  `pdfplumber` (tables) and Pillow (`pypdf[image]`, figures) are both absent,
+  and no figure in an ingested PDF is described no matter how `snp-vlm` is
+  configured;
+- `metadata.figures_status == "ok"` as evidence that a document's figures were
+  examined. **The swallow is fixed** (T5.1): `extract_figures` now re-raises the
+  `ImportError` as a `PdfStructureError`, so a Pillow-less installation reports
+  `figures_status: "unavailable"` and **no figure count at all**. What remains
+  prohibited is the inverse reading — `"no_evidence"` means the parser ran and
+  this document captions nothing; it is not a statement that figures were
+  described. Nothing in the deployed image describes a figure: `pdfplumber` and
+  Pillow are both absent (confirmed in the running `scout` and `sync-job`
+  containers), and that is a **decision** recorded in T5.1, not an oversight.
 
 When architecture changes, update implementation and active documents together,
 then re-run the stale-claim search described in the review plan. Preserve old

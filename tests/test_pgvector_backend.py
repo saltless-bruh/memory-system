@@ -118,3 +118,68 @@ async def test_retrieve_does_not_block_event_loop_while_embedding() -> None:
     finally:
         release.set()
     assert await task == []
+
+
+async def test_a_fully_parameterised_backend_does_not_read_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The constructor's five settings must be usable on their own.
+
+    Before this, `_get_pool` called `postgres_settings("query")` unconditionally,
+    so a caller that had already resolved the credentials still needed them
+    exported into `os.environ` — which is exactly what `scout/cli/config.py`
+    exists to avoid. Found by `snpmemory fetch`, which resolves settings from a
+    `.env` mapping and never mutates the process environment.
+    """
+    from scout.backends import pgvector
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the environment must not be consulted")
+
+    captured: dict[str, object] = {}
+
+    async def _fake_create_pool(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(pgvector, "postgres_settings", _explode)
+    monkeypatch.setattr(pgvector.asyncpg, "create_pool", _fake_create_pool)
+
+    backend = pgvector.PgVectorRlsBackend(
+        host="db.internal",
+        port=6543,
+        database="snp_rag",
+        user="rag_app_role",
+        password="secret",
+    )
+    await backend._get_pool()
+    assert captured["host"] == "db.internal"
+    assert captured["port"] == 6543
+
+
+async def test_a_partially_parameterised_backend_still_fills_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The previous behaviour is unchanged whenever anything is missing."""
+    from scout.backends import pgvector
+
+    class _Settings:
+        host = "from-env"
+        port = 5432
+        database = "snp_rag"
+        user = "rag_app_role"
+        password = "from-env"
+
+    captured: dict[str, object] = {}
+
+    async def _fake_create_pool(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(pgvector, "postgres_settings", lambda *_a, **_k: _Settings())
+    monkeypatch.setattr(pgvector.asyncpg, "create_pool", _fake_create_pool)
+
+    backend = pgvector.PgVectorRlsBackend(host="explicit")
+    await backend._get_pool()
+    assert captured["host"] == "explicit"
+    assert captured["password"] == "from-env"

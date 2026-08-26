@@ -79,10 +79,17 @@ class ExtractedTable:
         if not self.rows:
             return ""
         width = max(len(r) for r in self.rows)
+
         def row(cells: tuple[str, ...]) -> str:
             padded = list(cells) + [""] * (width - len(cells))
-            return "| " + " | ".join(c.replace("\n", " ").replace("|", "\\|").strip()
-                                     for c in padded) + " |"
+            return (
+                "| "
+                + " | ".join(
+                    c.replace("\n", " ").replace("|", "\\|").strip() for c in padded
+                )
+                + " |"
+            )
+
         head, *body = self.rows
         lines = [row(head), "|" + "|".join([" --- "] * width) + "|"]
         lines.extend(row(r) for r in body)
@@ -124,7 +131,9 @@ def infer_spaced_text(chars: list[dict[str, Any]]) -> str:
     lines: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     last_top: float | None = None
-    for char in sorted(chars, key=lambda c: (round(float(c["top"]), 1), float(c["x0"]))):
+    for char in sorted(
+        chars, key=lambda c: (round(float(c["top"]), 1), float(c["x0"]))
+    ):
         top = float(char["top"])
         if last_top is None or abs(top - last_top) <= LINE_TOLERANCE_POINTS:
             current.append(char)
@@ -141,7 +150,10 @@ def infer_spaced_text(chars: list[dict[str, Any]]) -> str:
         threshold = statistics.median(widths) * SPACE_GAP_RATIO if widths else 1.0
         out, previous = "", None
         for char in line:
-            if previous is not None and float(char["x0"]) - float(previous["x1"]) > threshold:
+            if (
+                previous is not None
+                and float(char["x0"]) - float(previous["x1"]) > threshold
+            ):
                 out += " "
             out += char["text"]
             previous = char
@@ -340,6 +352,15 @@ def extract_figures(file_path: Path) -> list[ExtractedFigure]:
             captions = [(fallback_number, fallback_caption or "")]
         try:
             images = list(page.images)
+        except ImportError as exc:
+            # Pillow is an optional pypdf extra, and `page.images` raises only
+            # when it is reached. Swallowing this per page produced the exact
+            # failure T5.1 records: every page skipped, `figure_count: 0`, and a
+            # document with 7 figures reported as examined and empty. A missing
+            # capability is a fact about the *installation*, not about the page.
+            raise PdfStructureError(
+                "Pillow is required for figure extraction (pypdf[image])"
+            ) from exc
         except Exception:  # noqa: BLE001 - a broken stream must not sink the page
             continue
         for index, image in enumerate(images):
@@ -348,9 +369,7 @@ def extract_figures(file_path: Path) -> list[ExtractedFigure]:
             if digest in seen:
                 continue
             seen.add(digest)
-            number, caption = (
-                captions[index] if index < len(captions) else captions[-1]
-            )
+            number, caption = captions[index] if index < len(captions) else captions[-1]
             figures.append(
                 ExtractedFigure(
                     page=page_number,

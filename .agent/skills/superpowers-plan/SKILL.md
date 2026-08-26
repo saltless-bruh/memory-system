@@ -1,6 +1,6 @@
 ---
 name: superpowers-plan
-description: Writes an implementation plan with small steps, exact files to touch, and verification commands. Use before making non-trivial changes.
+description: "Writes an implementation plan with small steps, exact files to touch, and verification commands. Use before making non-trivial changes."
 ---
 
 # Planning Skill

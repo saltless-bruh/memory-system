@@ -108,4 +108,117 @@ def test_importing_the_server_module_reads_no_environment() -> None:
         text=True,
         timeout=60,
     )
-    assert result.returncode == 0, f"import added env vars: {result.stdout}{result.stderr}"
+    assert result.returncode == 0, (
+        f"import added env vars: {result.stdout}{result.stderr}"
+    )
+
+
+# ── T2.2: a tool call cannot write outside the served checkout ─────────────
+
+
+def test_a_plan_path_escaping_the_checkout_is_a_tool_error_not_a_result() -> None:
+    """Exit 3 must arrive as a tool *error*, never as data an agent reads on.
+
+    The staging directory is derived from the plan path, so accepting one
+    outside the checkout would let a tool call write wherever it liked.
+    """
+    import pytest
+
+    from scout.cli.mcp_result import ToolFailure, run_tool
+    from scout.cli.registry import REGISTRY
+
+    spec = next(s for s in REGISTRY if s.name == "compile-plan")
+    with pytest.raises(ToolFailure) as caught:
+        run_tool(spec, "../../etc/plan.json", confirm=True)
+
+    assert caught.value.exit_code == 3
+    assert caught.value.kind == "input_validation"
+
+
+def test_a_status_handle_escaping_the_checkout_is_refused_too() -> None:
+    """Both halves of the pair, or the refusal is only half a boundary."""
+    import pytest
+
+    from scout.cli.mcp_result import ToolFailure, run_tool
+    from scout.cli.registry import REGISTRY
+
+    spec = next(s for s in REGISTRY if s.name == "compile-status")
+    with pytest.raises(ToolFailure) as caught:
+        run_tool(spec, "/etc/plan.json")
+
+    assert caught.value.exit_code == 3
+
+
+# ── MCP Tasks: why `compile_plan` is not task-augmented (step 9, A1) ───────
+
+
+def test_task_support_is_not_available_in_this_environment() -> None:
+    """Assumption A1 said adopting Tasks was one decorator argument. It is not.
+
+    `fastmcp==3.3.1` gates every task path on **pydocket** (`fastmcp[tasks]`), a
+    distributed task system whose own dependencies are `redis>=5`,
+    `burner-redis`, and `py-key-value-aio[memory,redis]`. Without it
+    `get_task_capabilities()` returns `None`, so the server advertises no task
+    capability and the handshake has nothing to negotiate.
+
+    This test is not a wish that things stay this way. It records the condition
+    the decision rests on, so that if pydocket ever becomes available the
+    decision gets revisited deliberately rather than by accident.
+    """
+    from fastmcp.server.dependencies import is_docket_available
+    from fastmcp.server.tasks import get_task_capabilities
+
+    if is_docket_available():  # pragma: no cover - not this environment
+        assert get_task_capabilities() is not None
+        return
+    assert get_task_capabilities() is None
+
+
+def test_building_the_server_never_requires_the_tasks_extra() -> None:
+    """The regression guard for the naive fix.
+
+    `TaskConfig.validate_function` calls `require_docket`, which **raises
+    ImportError at registration time** when the extra is absent — so adding
+    `task=TaskConfig(...)` to a tool would stop the server building at all, for
+    every user who has not installed Redis. Not a degraded task feature: no
+    server.
+    """
+    import pytest
+    from fastmcp import FastMCP
+    from fastmcp.server.dependencies import is_docket_available
+    from fastmcp.server.tasks import TaskConfig
+
+    assert build_server() is not None
+
+    if is_docket_available():  # pragma: no cover - not this environment
+        return
+
+    probe = FastMCP(name="probe")
+    with pytest.raises(ImportError, match="tasks"):
+
+        @probe.tool(name="probe_tool", task=TaskConfig(mode="optional"))
+        async def _probe(x: int) -> int:
+            return x
+
+
+def test_a_client_without_tasks_still_gets_the_durable_handle_path() -> None:
+    """The contract that holds whichever way the Tasks question is answered.
+
+    The plan-path handle is the durable record: it survives a server restart, a
+    reboot, and a client that has never heard of Tasks. A taskId does not.
+    """
+    from fastmcp import Client
+
+    async def _call() -> Any:
+        async with Client(build_server()) as client:
+            return await client.call_tool(
+                "compile_plan",
+                {"plan": "artifacts/nonexistent-plan.json"},
+                raise_on_error=False,
+            )
+
+    result = asyncio.run(_call())
+    # Refused, and refused as a *tool error* carrying the machine-stable kind —
+    # not silently accepted, and not a task the client never asked for.
+    assert result.is_error
+    assert "confirmation_required" in str(result.content[0])

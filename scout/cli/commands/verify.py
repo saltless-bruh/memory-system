@@ -76,9 +76,7 @@ def verify_vault(*, config: Injected = None) -> CommandResult:
     )
 
 
-def verify_secrets(
-    *, history: bool = False, config: Injected = None
-) -> CommandResult:
+def verify_secrets(*, history: bool = False, config: Injected = None) -> CommandResult:
     """Scan tracked, staged, and untracked bytes for credential-shaped values.
 
     Args:
@@ -207,7 +205,11 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
         summary=(
             f"{len(reports)} address(es) checked — "
             f"{counts.get('pass', 0)} PASS · {counts.get('fail', 0)} FAIL · "
-            f"{counts.get('drift', 0)} DRIFT"
+            f"{counts.get('drift', 0)} DRIFT · "
+            # Reported separately because it needs a different fix: FAIL and
+            # DRIFT say re-mint the hint, NO_EVIDENCE says the source itself
+            # yields nothing and no hint can repair that (SH-2).
+            f"{counts.get('no_evidence', 0)} NO_EVIDENCE"
         ),
     )
 
@@ -243,8 +245,13 @@ def verify_groundedness(
         )
     return CommandResult(
         exit_code=exit_code,
-        data={"scope": "changed" if changed_only else "vault", "status": "pass" if code == 0 else "fail"},
-        summary="All judged pages are grounded." if code == 0 else "Unsupported claims were found.",
+        data={
+            "scope": "changed" if changed_only else "vault",
+            "status": "pass" if code == 0 else "fail",
+        },
+        summary="All judged pages are grounded."
+        if code == 0
+        else "Unsupported claims were found.",
     )
 
 

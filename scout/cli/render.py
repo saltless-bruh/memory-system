@@ -96,7 +96,10 @@ def render(
         if result.error is not None:
             # Last line of stderr, so a reader can take the final line and parse
             # it without scanning whatever came before.
-            print(json.dumps(result.error.to_dict(), sort_keys=True, default=str), file=err)
+            print(
+                json.dumps(result.error.to_dict(), sort_keys=True, default=str),
+                file=err,
+            )
     else:
         if result.error is not None:
             print(result.error.message, file=err)

@@ -61,35 +61,49 @@ async def setup_test_documents():
         # Seed test documents
         await master.execute(
             "INSERT INTO rag_documents (doc_id, source_uri, allowed_depts, title) VALUES ($1, $2, $3, $4)",
-            doc_ai, f"raw/ai_{doc_ai}.md", ["ai_eng"], "AI Doc"
+            doc_ai,
+            f"raw/ai_{doc_ai}.md",
+            ["ai_eng"],
+            "AI Doc",
         )
         await master.execute(
             "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text) VALUES ($1, 0, 'AI confidential text')",
-            doc_ai
+            doc_ai,
         )
 
         await master.execute(
             "INSERT INTO rag_documents (doc_id, source_uri, allowed_depts, title) VALUES ($1, $2, $3, $4)",
-            doc_red, f"raw/red_{doc_red}.md", ["redteam"], "Redteam Doc"
+            doc_red,
+            f"raw/red_{doc_red}.md",
+            ["redteam"],
+            "Redteam Doc",
         )
         await master.execute(
             "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text) VALUES ($1, 0, 'Redteam exploit text')",
-            doc_red
+            doc_red,
         )
 
         await master.execute(
             "INSERT INTO rag_documents (doc_id, source_uri, allowed_depts, title) VALUES ($1, $2, $3, $4)",
-            doc_pub, f"raw/pub_{doc_pub}.md", ["all"], "Public Doc"
+            doc_pub,
+            f"raw/pub_{doc_pub}.md",
+            ["all"],
+            "Public Doc",
         )
         await master.execute(
             "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text) VALUES ($1, 0, 'Public shared knowledge')",
-            doc_pub
+            doc_pub,
         )
 
         yield {"ai": doc_ai, "red": doc_red, "pub": doc_pub}
 
     finally:
-        await master.execute("DELETE FROM rag_documents WHERE doc_id IN ($1, $2, $3)", doc_ai, doc_red, doc_pub)
+        await master.execute(
+            "DELETE FROM rag_documents WHERE doc_id IN ($1, $2, $3)",
+            doc_ai,
+            doc_red,
+            doc_pub,
+        )
         await master.close()
 
 
@@ -102,15 +116,23 @@ async def test_unauthenticated_app_role_fails_closed(setup_test_documents):
         # No session clearance set
         docs = await app_conn.fetch(
             "SELECT doc_id FROM rag_documents WHERE doc_id IN ($1, $2, $3)",
-            doc_ids["ai"], doc_ids["red"], doc_ids["pub"]
+            doc_ids["ai"],
+            doc_ids["red"],
+            doc_ids["pub"],
         )
-        assert len(docs) == 0, "Unauthenticated queries must fail closed (0 documents returned)"
+        assert len(docs) == 0, (
+            "Unauthenticated queries must fail closed (0 documents returned)"
+        )
 
         chunks = await app_conn.fetch(
             "SELECT chunk_id FROM rag_chunks WHERE doc_id IN ($1, $2, $3)",
-            doc_ids["ai"], doc_ids["red"], doc_ids["pub"]
+            doc_ids["ai"],
+            doc_ids["red"],
+            doc_ids["pub"],
         )
-        assert len(chunks) == 0, "Unauthenticated queries must fail closed (0 chunks returned)"
+        assert len(chunks) == 0, (
+            "Unauthenticated queries must fail closed (0 chunks returned)"
+        )
     finally:
         await app_conn.close()
 
@@ -126,16 +148,24 @@ async def test_authenticated_ai_eng_clearance_isolation(setup_test_documents):
 
             docs = await app_conn.fetch(
                 "SELECT doc_id FROM rag_documents WHERE doc_id IN ($1, $2, $3)",
-                doc_ids["ai"], doc_ids["red"], doc_ids["pub"]
+                doc_ids["ai"],
+                doc_ids["red"],
+                doc_ids["pub"],
             )
             returned_doc_ids = {r["doc_id"] for r in docs}
             assert doc_ids["ai"] in returned_doc_ids, "ai_eng document must be visible"
-            assert doc_ids["pub"] in returned_doc_ids, "public 'all' document must be visible to authenticated caller"
-            assert doc_ids["red"] not in returned_doc_ids, "redteam document MUST be denied to ai_eng"
+            assert doc_ids["pub"] in returned_doc_ids, (
+                "public 'all' document must be visible to authenticated caller"
+            )
+            assert doc_ids["red"] not in returned_doc_ids, (
+                "redteam document MUST be denied to ai_eng"
+            )
 
             chunks = await app_conn.fetch(
                 "SELECT doc_id, chunk_text FROM rag_chunks WHERE doc_id IN ($1, $2, $3)",
-                doc_ids["ai"], doc_ids["red"], doc_ids["pub"]
+                doc_ids["ai"],
+                doc_ids["red"],
+                doc_ids["pub"],
             )
             returned_chunk_docs = {r["doc_id"] for r in chunks}
             assert doc_ids["ai"] in returned_chunk_docs
@@ -156,16 +186,26 @@ async def test_authenticated_redteam_clearance_isolation(setup_test_documents):
 
             docs = await app_conn.fetch(
                 "SELECT doc_id FROM rag_documents WHERE doc_id IN ($1, $2, $3)",
-                doc_ids["ai"], doc_ids["red"], doc_ids["pub"]
+                doc_ids["ai"],
+                doc_ids["red"],
+                doc_ids["pub"],
             )
             returned_doc_ids = {r["doc_id"] for r in docs}
-            assert doc_ids["red"] in returned_doc_ids, "redteam document must be visible"
-            assert doc_ids["pub"] in returned_doc_ids, "public 'all' document must be visible"
-            assert doc_ids["ai"] not in returned_doc_ids, "ai_eng document MUST be denied to redteam"
+            assert doc_ids["red"] in returned_doc_ids, (
+                "redteam document must be visible"
+            )
+            assert doc_ids["pub"] in returned_doc_ids, (
+                "public 'all' document must be visible"
+            )
+            assert doc_ids["ai"] not in returned_doc_ids, (
+                "ai_eng document MUST be denied to redteam"
+            )
 
             chunks = await app_conn.fetch(
                 "SELECT doc_id FROM rag_chunks WHERE doc_id IN ($1, $2, $3)",
-                doc_ids["ai"], doc_ids["red"], doc_ids["pub"]
+                doc_ids["ai"],
+                doc_ids["red"],
+                doc_ids["pub"],
             )
             returned_chunk_docs = {r["doc_id"] for r in chunks}
             assert doc_ids["red"] in returned_chunk_docs
@@ -188,21 +228,30 @@ async def test_ingest_role_has_crud_through_forced_rls() -> None:
             ["infra"],
             "Ingest role test",
         )
-        assert await conn.fetchval(
-            "SELECT title FROM rag_documents WHERE doc_id = $1", doc_id
-        ) == "Ingest role test"
+        assert (
+            await conn.fetchval(
+                "SELECT title FROM rag_documents WHERE doc_id = $1", doc_id
+            )
+            == "Ingest role test"
+        )
         await conn.execute(
             "UPDATE rag_documents SET title = $2 WHERE doc_id = $1",
             doc_id,
             "Updated",
         )
-        assert await conn.fetchval(
-            "SELECT title FROM rag_documents WHERE doc_id = $1", doc_id
-        ) == "Updated"
+        assert (
+            await conn.fetchval(
+                "SELECT title FROM rag_documents WHERE doc_id = $1", doc_id
+            )
+            == "Updated"
+        )
         await conn.execute("DELETE FROM rag_documents WHERE doc_id = $1", doc_id)
-        assert await conn.fetchval(
-            "SELECT count(*) FROM rag_documents WHERE doc_id = $1", doc_id
-        ) == 0
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM rag_documents WHERE doc_id = $1", doc_id
+            )
+            == 0
+        )
     finally:
         await conn.execute("DELETE FROM rag_documents WHERE doc_id = $1", doc_id)
         await conn.close()

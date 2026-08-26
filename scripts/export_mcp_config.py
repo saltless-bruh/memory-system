@@ -29,6 +29,19 @@ _BASIC_MEMORY_URL = "http://localhost:8765/mcp"
 _SCOUT_URL = "http://localhost:8080/mcp"
 _SCOUT_AUTH_HEADER_ENV = "SCOUT_AUTH_HEADER"
 
+#: The checkout this script belongs to — the default for the local server's
+#: pinned root, since a config exported from a clone should serve that clone.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Must equal `scout.mcp.local_server.SERVER_NAME`. It is repeated rather than
+#: imported because that module pulls in fastmcp, and this script has to stay
+#: runnable on a machine with nothing installed. A test holds the two together.
+LOCAL_SERVER_NAME = "snpmemory"
+
+#: Installed by `[project.scripts]`, so the exported entry can name a command on
+#: PATH rather than a path into a checkout the user may not have.
+_LOCAL_SERVER_COMMAND = "snpmemory"
+
 
 def _basic_memory_config(client: str) -> dict[str, Any]:
     """Return the project's existing, unauthenticated basic-memory config."""
@@ -69,18 +82,43 @@ def _scout_config(client: str) -> dict[str, Any]:
     # different syntaxes. Claude's mcp-remote process inherits the host
     # environment directly, so adding a self-referential env entry is unsafe.
     if client in {"cursor", "vscode"}:
-        config["env"] = {
-            _SCOUT_AUTH_HEADER_ENV: f"${{env:{_SCOUT_AUTH_HEADER_ENV}}}"
-        }
+        config["env"] = {_SCOUT_AUTH_HEADER_ENV: f"${{env:{_SCOUT_AUTH_HEADER_ENV}}}"}
     elif client == "gemini":
-        config["env"] = {
-            _SCOUT_AUTH_HEADER_ENV: f"${_SCOUT_AUTH_HEADER_ENV}"
-        }
+        config["env"] = {_SCOUT_AUTH_HEADER_ENV: f"${_SCOUT_AUTH_HEADER_ENV}"}
     return config
 
 
-def generate_config(client: str) -> dict[str, Any]:
-    """Generate a client config with basic-memory and authenticated Scout."""
+def _local_server_config(client: str, root: Path) -> dict[str, Any]:
+    """Return the local stdio server entry, with the checkout it serves pinned.
+
+    The root travels in ``args`` rather than in a client-specific ``cwd`` key:
+    argv is the one field every one of these four clients passes through
+    unchanged, and an operator reading the config can see which checkout is
+    being served instead of having to know what directory the client launches
+    in. `snpmemory mcp` resolves relative paths and `.env` against its working
+    directory, so an unpinned launch would serve whichever tree the client
+    happened to start from — or none at all.
+
+    No token and no network address: this server is stdio-only and carries the
+    authority of whoever launches it. See `scout/mcp/local_server.py`.
+    """
+    config: dict[str, Any] = {
+        "command": _LOCAL_SERVER_COMMAND,
+        "args": ["mcp", "--root", str(root)],
+    }
+    if client == "vscode":
+        config["type"] = "stdio"
+    return config
+
+
+def generate_config(client: str, root: Path | None = None) -> dict[str, Any]:
+    """Generate a client config for all three servers this system offers.
+
+    Args:
+        client: One of `SUPPORTED_CLIENTS`.
+        root: The checkout the local stdio server should serve. Defaults to the
+            one this script lives in.
+    """
     if client not in SUPPORTED_CLIENTS:
         raise ValueError(f"Unknown client: {client}")
     server_key = "servers" if client == "vscode" else "mcpServers"
@@ -88,6 +126,7 @@ def generate_config(client: str) -> dict[str, Any]:
         server_key: {
             "snp-wiki": _basic_memory_config(client),
             "scout": _scout_config(client),
+            LOCAL_SERVER_NAME: _local_server_config(client, root or REPO_ROOT),
         }
     }
 
@@ -122,8 +161,7 @@ def _prompt_for_client(parser: argparse.ArgumentParser) -> str:
         parser.error("client selection aborted")
 
     client_map = {
-        str(index): client
-        for index, client in enumerate(SUPPORTED_CLIENTS, 1)
+        str(index): client for index, client in enumerate(SUPPORTED_CLIENTS, 1)
     }
     client = client_map.get(choice, choice)
     if client not in SUPPORTED_CLIENTS:
@@ -223,9 +261,6 @@ def _write_exports(exports: Sequence[tuple[str, Path, dict[str, Any]]]) -> None:
         for _client, _target_path, temporary in staged:
             temporary.unlink(missing_ok=True)
 
-    for client, target_path, _config in exports:
-        print(f"Successfully exported {client} MCP config to {target_path}")
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -273,6 +308,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         exports = _prepare_exports(concrete_clients)
         _write_exports(exports)
+        # Reporting belongs to this entry point, not to the writer: the CLI
+        # command below renders its own result and must keep stdout clean.
+        for exported_client, target_path, _config in exports:
+            print(
+                f"Successfully exported {exported_client} MCP config to {target_path}"
+            )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         # Error details are intentionally limited to their class: malformed
         # configs must never cause a secret-bearing value to be echoed.

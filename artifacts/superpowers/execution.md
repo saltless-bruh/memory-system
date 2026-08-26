@@ -1295,3 +1295,1983 @@ environment variable appears.
    successful publish deletes the staging directory, so a finished batch under-reported to
    zero — an agent would read it as nothing having happened. `done` now counts published
    pages once a batch is complete. Verified live: `complete 3/3`.
+
+---
+
+# Tier 0 execution — 2026-08-24
+
+Plan: `artifacts/superpowers/plan-tier0-2026-08-24.md` (with amendments AM-1..AM-4).
+Parallelisation check: steps are dependency-ordered (2 gates 3; 5→6→7 is a TDD
+cycle on one file), so sequential execution is correct here.
+
+## Step 1 — Capture the baseline — PASS
+- Files: `artifacts/superpowers/tier0-baseline-2026-08-24.txt` (new)
+- Recorded `compose ps`, per-container restart counts, litellm `/etc/resolv.conf`,
+  DNS probes, the embeddings probe, and sync-job logs.
+- Key baseline facts: `sync-job restarts=238 health=starting`;
+  `litellm health=unhealthy`; resolv.conf says `NO EXTERNAL NAMESERVERS DEFINED`;
+  both DNS probes fail; `POST /v1/embeddings` → `status 500`.
+- Note: restart count rose 156 → 238 during planning, confirming the loop is live.
+- Verify: `grep -E 'restarts=|FAIL|status 5|NO EXTERNAL' artifacts/superpowers/tier0-baseline-2026-08-24.txt` → all expected lines present. PASS
+
+## Step 2 — Confirm the DNS diagnosis — PASS (with a finding)
+- Files: none (`docker compose up -d --force-recreate litellm scout sync-job`)
+- resolv.conf now carries `ExtServers: [host(192.168.2.253) host(192.168.2.235) ...]`;
+  both DNS probes resolve; `POST /v1/embeddings` → `200`, `dim 1024`.
+- `litellm` went `unhealthy` → `healthy`. A2 confirmed.
+- **BUT `sync-job` kept crash-looping with the same `error:EmbeddingError`.**
+  Verification failed → switched to systematic debugging (workflow rule 3).
+
+## Debug — root cause of the crash loop (A1 falsified)
+- Reproduced with `docker compose run --rm --no-deps sync-job` and read the
+  swallowed HTTP body: `BatchEmbedContentsRequest.requests: at most 100 requests
+  can be in one batch` (127 chunks in the corpus document).
+- `scout/chunker.py:242` defines `MAX_EMBED_BATCH = 100` to respect that cap.
+  The running image has no such attribute → the image predates the fix.
+- `snp-scout` built 2026-08-20T09:57; the fix landed in `268af30` at
+  2026-08-20T15:09; 14 commits have landed since the image was built.
+- Impact beyond ingestion: `scout` (the only door into RAG) is running
+  pre-`268af30` code — before request-scoped auth and document ACLs.
+- Plan amended: AM-5, new steps 2b (rebuild) and 4b (stamp + check image revision).
+
+## Step 2b — Rebuild the stale image and recreate — PASS
+- Files: none (`docker compose build scout`; `up -d --force-recreate scout sync-job`)
+- `sync-job health=healthy restarts=0` (baseline was `restarts=238 health=starting`).
+- Cold-start ingest succeeded: `rag_documents` = 1 row
+  (`raw/papers/computers-12-00091.pdf`, `allowed_depts {ai_eng,blueteam}`),
+  `rag_chunks` = 127.
+- New warning surfaced, recorded as a follow-up (not Tier 0 scope):
+  `Table extraction unavailable ... pdfplumber is required for table extraction`.
+- Verify: `docker inspect … sync-job` + `psql` counts above. PASS
+
+## Step 3 — Make the resolver configurable without changing the default path — PASS
+- Files: `docker-compose.dns.yml` (new), `.env.example`, `docs/runbook.md`
+- Opt-in override sets `dns:` on `litellm` only, from `${SNP_DNS_SERVERS:?...}`.
+- Runbook gains three incident rows plus new sections 6.1 (DNS) and 6.2 (image drift).
+- Verify:
+  - `SNP_DNS_SERVERS=10.0.0.53 docker compose -f docker-compose.yml -f docker-compose.dns.yml config`
+    → `dns: [10.0.0.53]` under `litellm`; exactly 1 `dns:` key in the whole render. PASS
+  - Same command with the variable unset → exit 1,
+    `required variable SNP_DNS_SERVERS is missing a value`. PASS
+  - `docker compose config | grep -c 'dns:'` → `0`; default path untouched. PASS
+
+## Step 4 + 4b — Preflight for both faults, and make image drift detectable — PASS
+- Files: `scripts/preflight_stack.py` (new), `tests/test_preflight_stack.py` (new),
+  `scout/Dockerfile`, `docker-compose.yml`, `docs/runbook.md`
+- Pure classifiers (`classify_resolv_conf`, `classify_image_revision`) pinned against
+  the verbatim resolv.conf files the broken and fixed containers carried; no Docker
+  needed by the suite.
+- `scout/Dockerfile` gains `ARG SNP_GIT_REVISION` + `LABEL org.opencontainers.image.revision`;
+  compose passes it as a build arg.
+- **Design flaw caught by the plan's own verification:** the first implementation
+  *skipped* a check whose input it could not read, so a stopped service produced
+  `exit 0`. Added an `available` state; unreadable now exits `2` and outranks `1`.
+  Test: `test_an_unreadable_check_never_reports_a_clean_run`.
+- Verify:
+  - `pytest tests/test_preflight_stack.py` → 12 passed. PASS
+  - After `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build scout`:
+    image label == `git rev-parse HEAD`; preflight prints 2× PASS, `exit=0`. PASS
+  - With `litellm` stopped: `UNAVAIL container-dns … fix: docker compose up -d litellm`,
+    `exit=2`. PASS
+
+## Steps 5–7 — Crash-loop containment and classifier parity — PASS
+- Files: `scout/sync_job.py`, `tests/test_sync_job.py`
+- Red first: 6 new tests failed for the right reasons before any implementation.
+- `SyncFailure` now carries `retryable` (default `False` — an unclassified fault
+  stops loudly rather than retrying forever); `watch()` propagates the outcome's flag.
+- `_is_transient` classifies `httpx.HTTPStatusError` by status (5xx/408/429),
+  mirroring the existing `urllib.error.HTTPError` branch. Without it the async
+  embed path's 500 was called permanent while the sync path's identical 500 was
+  called transient.
+- `_async_main` retries retryable failures in-process with capped exponential
+  backoff (5s → 300s) on **both** the cold start and the watch loop, keeping
+  readiness cleared throughout. Non-retryable failures still exit 1 immediately.
+  The attempt counter is deliberately never reset within a process lifetime —
+  resetting on a successful cycle is precisely how Docker's own backoff fails here.
+- **Test defect of mine, caught and fixed:** the first cold-start test scripted
+  outcomes through a fake indexer, but `sync_once` retries internally, so the
+  inner loop consumed them and the outer loop under test never saw a failure.
+  Rewritten to patch `sync_once`. Suite time for the file fell 7.79s → 1.02s.
+- Verify: `pytest tests/test_sync_job.py` → 30 passed. `ruff check .` clean.
+  `mypy scout scripts` clean (62 files). Full suite: **790 passed** (was 772),
+  21 live-integration errors unchanged (T6.3, out of scope). PASS
+
+## Step 8 — Scope the health check to the routes the stack depends on — PASS
+- Files: `config/litellm/config.yaml`, `docker-compose.yml`
+- **A4 resolved against the implementation, not the docs.** The published docs say
+  `/health?model=` returns 200 with counts; this build returns **503** when the
+  targeted group has no healthy deployment (`_health_endpoints.py`: "surface that
+  as a 503 so monitoring systems can rely on the HTTP status"). The probe handles
+  both: 503 → unhealthy, other non-200 → unreachable.
+- **`?model=` filters the background CACHE** when `background_health_checks` is on
+  (verified in `_health_endpoints.py`), so probing every 30s costs no tokens.
+- AM-1 applied: `snp-judge` gets `disable_background_health_check: true`. The global
+  `health_check_skip_disabled_background_models` was deliberately NOT set, so an
+  on-demand `GET /health` still probes the judge — quota saved, visibility kept.
+- Health check now gates on `snp-embed` + `snp-llm` only; `snp-vlm`/`snp-judge` are
+  reported, not load-bearing. AM-4 applied: `start_interval` on both services.
+- Verify: `docker compose up -d --force-recreate litellm` → `health=healthy`.
+  The health log shows the intended sequence: connection-refused during boot,
+  then `no healthy deployment` until the background cache warmed, then `exit=0`.
+  `sync-job` stayed up throughout. PASS
+
+## Step 9 — Vision route decision — documented as a limitation (option a)
+- Files: `docs/ARCHITECTURE_STATUS.md`
+- Investigating the warning found the real limitation is **larger and different**
+  from what `REMAINING_TASKS.md` claimed. It is not "no vision route configured":
+  - `scout/requirements.txt` installs `pypdf` only. `pdfplumber` (tables) and
+    Pillow (`pypdf[image]`, figures) are absent from the image.
+  - In the container `pypdf` raises `ImportError: pillow is required to do image
+    extraction`; `extract_figures`'s per-page `except Exception: continue`
+    swallows it, so `figure_count` is `0` and `figures_status` is recorded as
+    **`"ok"`** — a clean signal for a document that has 7 figures. Verified by
+    running the same page through pypdf on the host (2 images) and in the image
+    (ImportError).
+- Two prohibited claims added. The `figures_status` honesty bug is recorded as a
+  follow-up rather than fixed here: it is a source-health defect (SH-1/SH-2), not
+  a Tier 0 blocker, and this run was scoped to Tier 0.
+
+## Step 10 — Full verification and close-out — PASS
+- Files: `docs/REMAINING_TASKS.md` (Tier 0 rewritten as was/is-now; T5.1 and T6.5 added)
+- **The decisive check.** `litellm` stopped, `sync-job` restarted into the outage:
+  ```
+  t+20s  health=starting   restarts=0 state=running
+  t+100s health=unhealthy  restarts=0 state=running
+  [sync-job] cold-start sync failed: error:EmbeddingError; retrying in 5s (attempt 1, readiness cleared)
+  [sync-job] cold-start sync failed: error:EmbeddingError; retrying in 10s (attempt 2, readiness cleared)
+  ```
+  Baseline for the same condition was `restarts=238 health=starting`. PASS
+- Recovery, no restart: `litellm` restored → `RECOVERED health=healthy restarts=0`.
+- Every service `healthy`, every `RestartCount` `0`.
+- `scripts/preflight_stack.py` → 2× PASS, exit 0.
+- Corpus intact: 1 doc, 127 chunks.
+- `ruff check .` clean · `mypy scout scripts` clean (62 files) ·
+  `pytest` **790 passed** (from 772), 21 live-integration errors unchanged ·
+  `snpmemory verify-secrets` exit 0.
+
+---
+
+# Tier 1 execution — 2026-08-24
+
+Plan: `artifacts/superpowers/plan-tier1-2026-08-24.md`. Proceeding on the plan's
+three stated recommendations (jsonschema as a test dep · `search` via
+`scout/diy_engine.py` · `extract`/`install-agent` out of scope).
+Parallelisation check: Phase A is a strict chain (2 red → 3 → 4 green), and each
+Phase B command depends on Phase A's declaration shape. Sequential is correct.
+
+## Step 1 — `--help` and the bare form exit 0 — PASS
+- Files: `scout/cli/app.py`, `tests/test_cli_core.py`
+- Red first: 4 new tests failed with `assert 2 == 0`.
+- cyclopts prints help and returns `None` rather than raising `SystemExit`, so
+  the "not a CommandResult" branch reported a healthy invocation as exit 2 —
+  INFRASTRUCTURE — while printing "this is a bug in snpmemory".
+- `main()` now returns `SUCCESS` for `None`. Safe only because no command can
+  return it: `test_every_declared_command_returns_a_command_result` pins that
+  every declared implementation is annotated `-> CommandResult`.
+- Verify: `pytest tests/test_cli_core.py` → 33 passed. Live: `--help` → 0,
+  bare → 0, `verify-vault --help` → 0, `--version` → 0, unknown command → 3. PASS
+
+## Steps 2–5 — Phase A: make `snpmemory schema` a real contract — PASS
+- Files: `tests/fixtures/clispec-v0.3.json` (new, vendored),
+  `tests/test_cli_schema_conformance.py` (new, 10 tests), `pyproject.toml`,
+  `scout/cli/registry.py`, `scout/cli/declarations.py`,
+  `scout/cli/commands/schema.py`
+- Red first: 5 of 7 conformance tests failed, naming the missing `clispec`,
+  `name`, `version`, `errors`.
+- Vendored the real schema (32 KB) rather than fetching: `pytest-socket` blocks
+  network in this suite by design.
+- `CommandSpec` gained `args`, `cardinality`, `pagination`,
+  `confirmation_bypass_arg`, `requires_tty`, `stability`, `example`,
+  `output_fields`, `stdout_schema`, `fields_arg`. New `ArgSpec`, `FieldSpec`,
+  `Pagination`, `Cardinality`.
+- Top level now emits `clispec`, `name`, `version`, `description`, `output`,
+  `global_args`, `errors`, `outcomes` — **and keeps** `tool`, `spec`,
+  `output_formats`, `exit_codes`, `error_envelope`. Unknown properties are
+  permitted at every level of the spec, and schema output an agent already reads
+  is itself a contract, so nothing was renamed.
+- `output: {tty: "text", piped: "text"}` is what makes the deliberate
+  text-when-piped default **conformant** rather than a silent divergence — the
+  spec permits a human-readable default only for a tool that declares it.
+- Three things the schema forced that are genuine improvements, not box-ticking:
+  1. **Every command now declares its arguments.** `compile-plan` publishes
+     `--confirm` as its `confirmation_bypass_arg`; before this an agent could
+     not learn the flag existed without parsing `--help`.
+  2. **Every command describes its output** (`output_fields`), so a consumer
+     knows the shape without invoking it.
+  3. **Command-level `errors`/`outcomes` became references** to the top-level
+     tables, so an exit code is resolved in one place instead of restated per
+     command. The resolved codes stay under `error_codes`/`outcome_codes`.
+- `FieldSpec.__post_init__` rejects an `array` with no `items` — an array whose
+  element shape is undeclared tells a consumer nothing.
+- Fixed a latent footgun found on the way: `scout/cli/commands/schema.py` did not
+  import `declarations`, so calling `schema()` from anywhere but `app.py`
+  returned an empty document that looked like a tool with no commands.
+- `snpmemory schema <command>` narrows the document; an unknown name exits 3
+  rather than returning an empty list.
+- Verify: `pytest tests/test_cli_schema_conformance.py` → 10 passed, including
+  full JSON-Schema validation. Full suite **806 passed** (from 790); `ruff check .`
+  and `mypy scout scripts` clean. PASS
+
+## Step 6 — Record conformance in the spec, and stop it drifting — PASS
+- Files: `docs/CLI_SPEC.md`, `tests/test_cli_schema_conformance.py`
+- Status banner corrected: the spec claimed "Nothing here exists yet" while ten
+  commands shipped. Now "partially implemented", with the schema as the source
+  of truth for what exists.
+- Documented the v0.3 target, why the schema is vendored, and — importantly —
+  that the text-when-piped default is now a *declared* default rather than an
+  undeclared divergence, quoting the clause that permits it.
+- `test_every_implemented_command_appears_in_the_spec` parses the spec's own
+  tables. One-directional on purpose: the spec may list unbuilt commands, but a
+  command that exists without being specified is undocumented surface.
+- Verify: `pytest tests/test_cli_schema_conformance.py` → 11 passed. PASS
+
+## Steps 7–8 — Wave 1 read-only: `read` and `search` — PASS
+- Files: `scout/cli/commands/wiki.py` (new), `tests/test_cli_wiki.py` (new, 12 tests),
+  `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`
+- Both answer from the checkout, not from a running wiki server — a compiled page
+  is a file, and reading it should not need the stack.
+- `read`: resolves by path, then slug, then title. **An ambiguous title refuses
+  (exit 3) rather than choosing** — two pages can share a title across
+  categories, and picking one is how the wrong page gets cited.
+- Stream discipline: in text mode only `summary` reaches stdout, so the page body
+  is the summary and the `title — path` header is a stderr message. This makes
+  `snpmemory read x > page.md` write the page and nothing else.
+- `search`: runs `ScoutDiyEngine` over `wiki/`. Declared `bounded`, not
+  `unbounded` — the caller's `--limit` fixes the size and the engine has no
+  cursor, so declaring `unbounded` would oblige a pagination contract this
+  command cannot honour. `score` is documented in the schema as an **RRF weight
+  capped near 0.033, not a similarity**, per the prohibited claims.
+- **MCP exposure: both HIDDEN.** `snp-wiki` already exposes `search_notes` and
+  `read_note` over the same vault; a second pair is context cost for a capability
+  the agent already has, and tool-list crowding degrades selection.
+- Two real integration defects found by running it rather than assuming:
+  1. The command built `LiteLLMEmbedder()` from ambient `os.environ` and failed
+     on the host. Now takes the key and URL from the resolved `Config`, which is
+     what that layer exists for.
+  2. `LITELLM_BASE_URL` is the OpenAI-compatible root and ends in `/v1`, while
+     the embedder posts to `/v1/embeddings` relative to it — asking the gateway
+     for `/v1/v1/embeddings`. Suffix now stripped, with a regression test.
+- Verify: `pytest tests/test_cli_wiki.py` → 12 passed, all offline (a stub
+  embedder, since `pytest-socket` blocks the network). Live:
+  `snpmemory search convolution --limit 3` ranks
+  `convolutional-neural-networks` first. Full suite **819 passed**; ruff and
+  mypy clean. PASS
+
+## Step 9 — Wave 1: `fetch`, the security-sensitive one — PASS
+- Files: `scout/cli/commands/rag.py` (new), `tests/test_cli_rag.py` (new, 17 tests),
+  `scout/backends/pgvector.py`, `tests/test_pgvector_backend.py`,
+  `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`, `docs/CLI_SPEC.md`
+- Calls `scout.core.rag_fetch` — the same function the Scout MCP server calls —
+  so there is one retrieval path with one post-filter and one no-source contract.
+- **`--dept` is required and `all` is refused**, with a hint saying why: `all` is a
+  document ACL meaning "visible to every authenticated caller", never a
+  department a caller can hold. A local invocation has no verified caller to
+  narrow from, so the department is stated and validated rather than inherited.
+- `no_source` is exit **1** (a finding), never a fabricated passage (R-4.5). A
+  dead backend is exit **2**, so nothing reads an outage as "this address has no
+  source".
+- **MCP exposure: HIDDEN.** R-4.1/R-4.2 — `rag_fetch` on the Scout server is the
+  only door into RAG, and a second retrieval tool would be a second door however
+  much it shares internally.
+- **Backend defect found and fixed:** `PgVectorRlsBackend._get_pool` called
+  `postgres_settings("query")` unconditionally, reading `os.environ` even when
+  every credential had been passed to the constructor. A caller that resolved
+  settings itself was still forced to export them — the exact thing
+  `scout/cli/config.py` exists to prevent. Now the environment is consulted only
+  for what was not supplied; two regression tests pin both paths.
+- **Live verification of the security boundary.** The corpus document's ACL is
+  `{ai_eng, blueteam}`. With the identical hint:
+  ```
+  ai_eng   exit=0 status=ok          blueteam exit=0 status=ok
+  infra    exit=1 status=no_source   redteam  exit=1 status=no_source
+  ```
+  RLS enforced end to end through the CLI. `--dept all` → exit 3 with the hint.
+  A real fetch returned 2 passages with score 0.0322 — the RRF cap, as documented.
+- **Spec corrected rather than quietly diverged from:** `search`, `read` and
+  `fetch` were specified as Remote and are implemented as Local. `docs/CLI_SPEC.md`
+  now says so, with the tradeoff stated (no checkout, no command — that audience
+  is served by the MCP servers).
+- Verify: `pytest tests/test_cli_rag.py` → 17 passed. Full suite **838 passed**;
+  ruff and mypy clean. PASS
+
+## Steps 10–12 — Wave 2 authoring: `mint`, `compile`, `propose` — PASS
+- Files: `scout/cli/commands/authoring.py` (new), `tests/test_cli_authoring.py`
+  (new, 12 tests), `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`
+- Each command calls the module that already does the work rather than
+  reproducing it — a wrapper that reimplements its script is a second copy free
+  to drift.
+- **The confirmation envelope (F-3) is real, not a flag check.** A refusal
+  carries what would change and the exact re-run command, and is deliberately
+  not a prompt: a person, a CI step and an agent all have to read it, and only
+  one of those can answer a question.
+- `mint` exits 1 when no hint clears the gate and returns the locators the file
+  actually carries — never a hint invented to make the answer come out (R-6.3).
+- `compile` maps an existing page or a protected branch to exit 7, not an
+  overwrite. `--dry-run` prepares and reports; `publish_page` is never reached.
+- `propose` refuses (exit 7) while staged paths exist — committing there would
+  sweep up work the caller never named.
+- **The pinned tool-surface test caught me growing the MCP list without
+  justification.** I had declared `mint_address` and `compile_page` as tools;
+  `test_the_tool_surface_is_smaller_than_the_command_surface` failed. Reverted
+  both to HIDDEN: `compile_plan` already mints every address it needs and covers
+  one article as well as many, and each tool definition costs context on every
+  call. `propose` is HIDDEN too — an agent that could open its own PR would be
+  reviewing its own work. Tool surface stays at four.
+- Live verification (no writes):
+  - `mint … --loc "p.25 (2/7)"` → exit 0, `minted`, outcome `pass`.
+  - `mint … --loc p.999` → exit 1, `loc_mismatch`, and it lists the real
+    locators: `['p.25 (2/7)', 'p.12 (4/5)', 'p.25 (1/7)']`.
+  - `propose --page wiki/index.md` → exit 3 (a generated file is not a page).
+  - `propose --page wiki/concepts/convolutional-neural-networks.md` → exit 5,
+    envelope naming both paths, the base branch, and the `--confirm` re-run.
+    Nothing branched, nothing committed.
+- Verify: `pytest tests/test_cli_authoring.py` → 12 passed. Full suite **850
+  passed**; ruff and mypy clean. PASS
+
+## Steps 13–14 — Wave 3 operability: `up`, `down`, `status`, `logs`, `init` — PASS
+- Files: `scout/cli/commands/stack.py` (new), `tests/test_cli_stack.py` (new, 11
+  tests), `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`
+- Thin and honest over `docker compose`: unrecognised arguments are forwarded, so
+  `snpmemory up --build` behaves as the command people already know.
+- `status` earns its place by folding in `scripts/preflight_stack.py` — the Tier 0
+  checks that name failures neither compose nor a health column surfaces. It is
+  also where that script stops being reachable only as a script.
+- `down` is DESTRUCTIVE and requires `--confirm`, naming `postgres` and `git` as
+  what is at stake. `init` never overwrites an existing secret set (exit 7) and
+  rotation needs `--confirm` on top.
+- **A false alarm found by running it.** `status` first reported `degraded`
+  because `postgres-migrate` was "stopped" — but it is a one-shot that runs the
+  migrations and exits 0 by design. A check that is wrong on the happy path stops
+  being read, so a non-running service with exit code 0 is now recognised as
+  finished rather than down. Two tests pin both sides (exit 0 → fine, exit 1 →
+  reported).
+- A degraded stack is exit **1**, not 2: `status` ran correctly and is reporting
+  what it found.
+- **Secrets:** `test_init_creates_secrets_and_never_prints_one` reads each
+  generated file and asserts its value appears nowhere in the summary or payload.
+- MCP exposure: all five HIDDEN. Lifecycle is an operator decision, and `init`
+  generates credentials — never something an agent should trigger.
+- Verify: `pytest tests/test_cli_stack.py` → 11 passed. Live: `snpmemory status`
+  → exit 0, `ok`, 8 services, both preflight checks PASS; `snpmemory down`
+  → exit 5, nothing stopped. Full suite **861 passed**; ruff and mypy clean. PASS
+
+## Steps 15–16 — Wave 4 CI: `gate` and `heal` — PASS
+- Files: `scout/cli/commands/ci.py` (new), `tests/test_cli_ci.py` (new, 9 tests),
+  `scout/cli/declarations.py`, `scout/cli/mcp_policy.py`
+- **The inherited safety property is the point of these tests.** Gate exit `2` is
+  *raised* as an infrastructure error rather than returned as a result, so nothing
+  downstream can mistake it for "the vault is fine" or for permission to heal.
+  Two tests pin it — one for `gate`, one for `heal` — and both assert the hint
+  says nothing was written.
+- `--dry-run` on `heal` needs no `--confirm`: seeing what would change must not
+  itself require authorising a change.
+- A backend fault never leaks its message. `test_a_backend_fault_never_leaks_its_message`
+  raises a `RuntimeError` carrying a full DSN with a password and asserts neither
+  the password nor the host appears in the rendered result.
+- An unknown `--mode` is rejected before the gate runs at all, not by argparse
+  inside it.
+- MCP exposure: both HIDDEN. The gate branches, commits and pushes — an agent
+  triggering it would bypass the review the gate exists to feed — and direct
+  healer use is explicitly not the CI gate (R-6.4).
+- Verify: `pytest tests/test_cli_ci.py` → 9 passed. Live: `snpmemory heal` →
+  exit 5, suggesting `--dry-run` first. Full suite **870 passed**; ruff and mypy
+  clean. PASS
+
+## Step 17 (partial) — `ingest` implemented and declared — CHECKPOINT
+- Files: `scout/cli/commands/ingest.py` (new), `scout/cli/declarations.py`,
+  `scout/cli/mcp_policy.py`
+- Enforces R-3.1 by **resolving** the path before comparing, so `raw/../etc/passwd`
+  and an escaping symlink are both refused, not only a literal `..`.
+- An unreadable `.acl.yaml` is exit 7, never a default: defaulting there is how a
+  private document becomes world-readable.
+- Requires `--confirm` (indexing spends embedding calls and replaces rows).
+- MCP exposure HIDDEN — the sync-job already indexes on a watch.
+- **Not yet done for this command:** its test file. Declared and type-clean, but
+  untested, so it is not finished.
+- Verify: `ruff check .` and `mypy scout scripts` clean (68 files);
+  full suite **870 passed**, 21 pre-existing live-integration errors.
+
+## Tier 1 status at checkpoint
+Phase A complete (steps 1–6). Waves 1–4 complete (`read`, `search`, `fetch`,
+`mint`, `compile`, `propose`, `up`, `down`, `status`, `logs`, `init`, `gate`,
+`heal`) — 13 commands, all tested. `ingest` implemented but untested.
+`mcp-config` not started. `extract` and `install-agent` remain out of scope
+(blocked on T4.3 and Tier 3).
+
+---
+
+# Tier 2 execution — plan `artifacts/superpowers/plan-tier2-2026-08-25.md`
+
+Decisions taken as recommended in the plan (same standing the owner gave Tier 0
+and Tier 1): **(1)** adopt `TaskConfig` on the SDK's 2025-11-25 shape, as
+`mode="optional"`, last in the plan; **(2)** `compile-cancel` is CLI-only,
+`Exposure.HIDDEN`.
+
+## Step 1 — tests for `ingest` (Tier 1 carry-over)
+- Files: `tests/test_cli_ingest.py` (new, 17 tests),
+  `scout/cli/commands/ingest.py` (one defect fixed — see AM-1)
+- Boundary written first, per the plan. Confirmed it has teeth by temporarily
+  swapping `candidate.resolve()` for `candidate.absolute()`: the symlink case
+  and the `..` case both went **red** (`DID NOT RAISE CliError`), then green
+  again on revert. A `startswith` check on the unresolved path passes both.
+- Covered: escaping symlink / `..` / plain outside path → 3; `--path` naming a
+  directory and `--dir` naming a file → 3; neither or both → 3; missing ACL map
+  and an empty-rules map → 7 with `ingest_directory` never reached; no
+  `--confirm` and no `--dry-run` → 5 with `ingest_directory` never reached;
+  `--dry-run` needs no confirmation; `reconcile` follows the target's kind, not
+  the caller's intent; a zero-chunk source is exit 1 `no_evidence`; a driver
+  failure is exit 2 and its message (a DSN with a password) never reaches the
+  rendered result; `RAW_DIR` moves the boundary without removing it.
+- **AM-1 (defect found while testing, fixed):** a relative `--path`/`--dir` was
+  resolved against the **process cwd** while `raw_root` was anchored to the
+  checkout. `snpmemory ingest --dir raw/papers` therefore refused its own corpus
+  from every directory except the repository root, with "outside the corpus
+  root" — which reads as a boundary violation rather than as the bug it was.
+  Fail-safe (exit 3, no mutation) but wrong. Relative arguments are now anchored
+  to `repo`, matching `raw_root`. Regression test:
+  `test_a_relative_target_is_anchored_to_the_checkout_not_the_shell`.
+  This is T2.2's defect class in a second place, found before Phase C reached it.
+- Verify: `pytest tests/test_cli_ingest.py` → **17 passed**;
+  `ruff check` clean; `mypy scout scripts` → 68 files, clean. PASS
+
+## Step 2 — `snpmemory mcp-config` (Tier 1 carry-over, T1 table row 14)
+- Files: `scout/cli/commands/mcp.py`, `scout/cli/declarations.py`,
+  `scout/cli/mcp_policy.py`, `scripts/export_mcp_config.py` (small refactor),
+  `tests/test_cli_mcp_config.py` (new, 17 tests)
+- `--client` is required and closed (`cursor|vscode|claude|gemini`); an unknown
+  one is exit 3 naming the four. No prompt: the script's interactive selection
+  needs a TTY, and a required flag is the honest CLI form.
+- Prints by default. Text mode renders only `summary`, so the config *is* the
+  summary and the human header goes to stderr — `snpmemory mcp-config --client
+  claude > .mcp.json` therefore yields a valid file.
+- `--out` merges rather than replaces (a user's file holds servers this project
+  knows nothing about), and merging over an existing file needs `--confirm`
+  (exit 5, file byte-identical). An unparseable target is exit 7 reporting only
+  the exception class.
+- **A merged document is written but never echoed.** `data["config"]` is present
+  only when printing. The generated half carries a `${SCOUT_AUTH_HEADER}`
+  reference, but the half read from disk may hold a real token for an unrelated
+  server; a command that printed what it merged would leak it into a terminal,
+  a log, or an agent's context. Two tests pin this.
+- Refactor: `_write_exports` no longer prints; `main` reports. The writer had to
+  stop owning stdout for the CLI command to render its own result. No external
+  caller existed (checked), and `tests/test_export_mcp_config.py` still passes.
+- MCP exposure HIDDEN — an agent reading this tool is already connected.
+- Verify: `pytest tests/test_cli_mcp_config.py` → **17 passed**; related suites
+  (schema conformance, mcp policy, exporter, local server, cli core) → 81 passed.
+  Live: `snpmemory mcp-config --client claude` → valid JSON on stdout, exit 0;
+  `--client emacs` → exit 3; `--out` over an existing file → exit 5 and `cmp`
+  reports byte-identical; `--confirm` → exit 0 with `mine` and `other` preserved
+  alongside the managed servers. PASS
+
+## Step 3 — T2.1: the local stdio server is in the exported config
+- Files: `scripts/export_mcp_config.py`, `scout/cli/commands/mcp.py`,
+  `scout/cli/declarations.py`, `tests/test_export_mcp_config.py` (+6),
+  `tests/test_cli_mcp_config.py` (+6)
+- `generate_config(client, root=None)` now emits **three** servers for every
+  client: `snp-wiki`, `scout`, `snpmemory`. The local entry is
+  `{"command": "snpmemory", "args": ["mcp", "--root", "<checkout>"]}`, plus
+  `"type": "stdio"` for vscode. No URL, no token, no header — this server carries
+  the authority of whoever launches it, which is exactly why it must never be a
+  URL.
+- **How the root is pinned, and why it is argv and not a `cwd` key.** F-3 called
+  for pinning the working directory. Reading `invoke.py` shows why a key would
+  not have been enough: `invoke()` calls `resolve_config()`, which finds the
+  checkout and the `.env` from `Path.cwd()` on **every** tool call. So the pin
+  has to move the process, not decorate the config. `snpmemory mcp --root <dir>`
+  validates that the directory is inside a checkout (`find_repo_root`, so a
+  subdirectory is accepted and resolves to the root) and `os.chdir`s to it once
+  at startup, before any tool can run. argv also travels through all four
+  clients unchanged and shows an operator which checkout is being served.
+- `--root` is honoured *before* `require_repo()`, otherwise a client launching
+  from outside a checkout would be refused before the flag could help — which is
+  the entire case it exists for.
+- `LOCAL_SERVER_NAME` is duplicated in the exporter rather than imported from
+  `scout.mcp.local_server`: that module pulls in fastmcp (which reaches for a
+  socket on import — pytest_socket warns about it), and this script must stay
+  runnable on a machine with nothing installed. A test asserts the two strings
+  are equal, so they cannot drift.
+- Verify: `pytest tests/test_export_mcp_config.py` → **32 passed**;
+  `tests/test_cli_mcp_config.py` → **23 passed**; ruff and mypy clean.
+  Live, and this is the decisive one: the exact argv from the exported config,
+  run from `/tmp`, lists all four tools and exits 0. The same command **without**
+  `--root`, from the same directory, exits 3 "this command needs a repository
+  checkout" — which is what every client that launches from its own directory
+  would have got. PASS
+
+## Step 4 — T2.1: the agent package manifest, and the installer's scaffold
+- Files: `packages/snp-agent/manifest.json`, `.agent/manifest.json`,
+  `scripts/install-agent.sh`, `tests/test_agent_package.py` (+4),
+  `tests/test_agent_package_sync.py` (one assertion strengthened)
+- Third `mcpServers` entry in both manifests (they are kept byte-identical by a
+  parity test): `transport: "stdio"`, `command: "snpmemory"`, and
+  `required_tools` naming the four real tools.
+- **AM-2 — the wiki server was named twice.** The manifest called it
+  `basic-memory`; the exporter and `install-agent.sh` both call it `snp-wiki`,
+  and CLAUDE.md documents `snp-wiki`. An agent's tool namespace comes from that
+  client-config key, so `basic-memory` was the outlier and the plan's "the two
+  files must agree" was not satisfiable without picking one. Picked `snp-wiki`
+  (2 of 3 surfaces, and the documented name); the engine is still named in the
+  entry's `description`. `test_agent_package_sync.py` asserted the old key —
+  replaced with the stronger `set(...) == {"snp-wiki","scout","snpmemory"}`.
+  Follow-up for Tier 3: several package skills still tell agents to call
+  `basic-memory.search_notes(...)`, which is the wrong namespace for a client
+  configured by our own exporter. Recorded in `docs/REMAINING_TASKS.md`.
+- **AM-3 — the installer was a fourth config surface the plan did not name.**
+  `install-agent.sh` scaffolds `.mcp.json` for the target project, and it
+  scaffolded two servers. Leaving it would have meant an agent *installed from
+  the package* still could not reach the authoring path — the exact gap T2.1
+  exists to close. Now scaffolds three. A curl install clones into a temp
+  directory that is deleted on exit, so in that case the local server is
+  **omitted** with a message telling the user to run `snpmemory mcp-config` from
+  their own clone: pinning a server to a path that will not exist is worse than
+  not offering it.
+- Anti-drift tests: manifest server set == exporter server set (both manifests);
+  `required_tools` == the names `build_server().list_tools()` actually serves;
+  the local entry is stdio and carries no URL; the installer's scaffold has all
+  three with the checkout pinned.
+- Verify: `pytest tests/test_agent_package.py tests/test_agent_package_sync.py
+  tests/test_export_agent_bundle.py` → **33 passed**. Live: ran the installer
+  into a scratch directory — exit 0, `.mcp.json` is valid JSON with all three
+  servers and `--root` pinned to this checkout. PASS
+
+## Step 5 — T2.1: say which server owns which job
+- Files: `docs/CONNECT_AGENTS.md`, `docs/REMAINING_TASKS.md`
+- "Which server does what" now has **three** rows, each stated as ownership:
+  `snp-wiki` reads the vault (always the first stop), `scout` is the only door
+  into RAG, `snpmemory` authors and verifies. Framed against the Golden Rule so
+  the split reads as a design, not a list.
+- The endpoints table gains the local server with "stdio subprocess, no address"
+  where a URL would go, and "none — it inherits the launching user's authority"
+  where authentication would go. The existing Authority section already said
+  never to expose it; the table now says it where a reader looks first.
+- New "Generated local server entry" section: the exact JSON, and **why** the
+  root is pinned in `args` rather than a `cwd` key.
+- Renamed `basic-memory` → `snp-wiki` throughout the client-configuration prose,
+  matching AM-2. The engine is still named once, where the distinction matters.
+- Added `snpmemory mcp-config` alongside the script, and `--root` to "Running
+  it". Verification step 6 tells a reader how to reproduce a missing local
+  server at a terminal.
+- Recorded **T3.0** in `docs/REMAINING_TASKS.md`: five distributed package files
+  still tell agents to call `basic-memory.search_notes(...)`, a namespace no
+  agent configured by our own exporter has. Correct where it names the engine or
+  the container; wrong where it names a tool. Belongs with the Tier 3 sync.
+- Verify: `pytest tests/test_docs_contract.py` → 6 passed; no `basic-memory`
+  left in CONNECT_AGENTS.md except the one line that defines the relationship.
+  PASS
+
+## Step 6 — T2.2: a handle means the same thing everywhere
+- Files: `scout/cli/tasks.py`, `scout/cli/commands/compile.py`,
+  `scout/mcp/local_server.py` (docstring), `tests/test_tasks.py` (+7),
+  `tests/test_local_mcp_server.py` (+2), `tests/test_cli_verify.py` (stub fixed)
+- New `resolve_plan_path(plan_path, root)`; `status_for` gained `root=` and now
+  always returns an **absolute** handle. `compile-plan` and `compile-status`
+  both pass `cfg.require_repo()`, so the two halves of a batch agree, and
+  `_start_background` puts the resolved path in the child's argv — the child
+  inherits no working-directory guarantee, so a relative path there would give
+  it a different staging directory from the one the parent reports on.
+- **AM-4 — the plan said "resolve against a pinned root"; I implemented that,
+  then reverted it.** Live-testing the subdirectory case showed it was wrong in
+  both directions: `cd docs && compile-status ../artifacts/plan.json` was refused
+  with "pass a path under <root>" — untrue of a path that plainly is under it —
+  and `cd docs && compile-status plan.json` would have silently read
+  `<root>/plan.json` instead of the file the caller was looking at. The rule
+  shipped instead: **a relative path resolves the way a shell resolves it, and
+  `root` is a boundary, not an anchor.** The property T2.2 actually wants comes
+  from the handle being absolute, which closes the agent case completely; the
+  boundary check does the other half by keeping the batch — and therefore its
+  staging directory — inside the checkout. Both are tested.
+- The escape refusal lives in the commands rather than in `build_server()` as
+  the plan sketched, so it protects the CLI too and not only callers who arrive
+  by MCP. Two MCP-boundary tests confirm exit 3 arrives as a tool **error**,
+  never as data an agent could read on.
+- `tests/test_cli_verify.py`'s stub `require_repo()` returned `None`, which was
+  fine while nothing consumed it. Returns a path now, and the test chdirs so its
+  relative plan name lands inside that root. Input validation deliberately runs
+  before the confirmation refusal: telling a caller to "pass --confirm" for a
+  path that would be rejected anyway sends them round the loop twice.
+- Verify: **935 passed**, 21 pre-existing live-integration errors (T6.3
+  unchanged); ruff and mypy clean. Live: the same batch reported from the repo
+  root and from `docs/` via a cwd-relative path returns one identical absolute
+  handle and one identical state (`stalled 1/2`); `../../etc/plan.json` and
+  `/etc/plan.json` both exit 3 naming the root **and** what the path resolved
+  to. PASS
+
+## Step 7 — T2.3 / T2.4: honest states, staleness, and a plan-edit guard
+- Files: `scout/cli/tasks.py`, `scripts/compile_plan.py`,
+  `scout/cli/commands/compile.py`, `tests/test_tasks.py` (+12),
+  `tests/test_compile_plan.py` (+8), `tests/test_cli_verify.py` (+1)
+- **Plan-hash guard (T2.3).** `plan_fingerprints()` hashes the *parsed* article
+  list, not the file's bytes, and only the fields that reach generation —
+  `slug/title/loc/category/department/links`. R3 in practice: reformatting a
+  plan, sorting its keys, and renumbering every `section` all leave the
+  fingerprint unchanged; editing a title does not. A resume onto staged pages
+  whose recorded fingerprint differs **refuses**, and the refusal names the
+  drift by slug (`1 changed (beta); 1 added (gamma); 1 removed (beta)`) with
+  `--no-resume` as the escape hatch. Before this, editing a plan and re-running
+  published prose no version of the plan had asked for, and reported success.
+- **Terminal states (T2.4).** `TaskState` gains `FAILED` and `CANCELLED`, plus a
+  `TERMINAL_STATES` set and `TaskStatus.is_terminal`. `scripts/compile_plan.py`
+  records the outcome in `.run.json` before exiting: `failed` with the reason and
+  exit code for a refused batch, `cancelled` for a Ctrl-C, and `failed` naming
+  only the exception **class** for an unexpected crash (a traceback here can
+  carry anything) before re-raising it.
+- **AM-5 — added a heartbeat, which the plan did not name.** TTL is unusable
+  without one: a live pid says a process exists, not that it is working, and
+  pids are reused. One small write per staged article, and a `running` claim
+  whose heartbeat is older than the TTL now reports `stalled — process N is
+  alive but has finished no article in Xs (ttl 900s), it may be hung`. This is
+  T2.4's own "make STALLED time-based rather than PID-based".
+- `poll_interval` (5.0s — deliberately fastmcp's `TaskConfig` default, so step 9
+  cannot tell a client something different) and `ttl` (900s: an article costs two
+  generations and a judge, so minutes are normal and calling a working batch
+  stalled is worse than calling a hung one stalled late) are carried in the
+  status payload alongside `terminal`, `last_heartbeat`, and `exit_code`.
+- **A live check found a real gap and it is fixed.** `compile-status` returned
+  **exit 0** for a `failed` batch, because its unfinished set was still
+  `{stalled, not_started}`. A caller chaining `compile-status && publish` would
+  have proceeded on a dead run. `failed` and `cancelled` now exit 1, with a
+  regression test.
+- Backward compatibility: a staging directory written before fingerprints
+  existed carries no `plan_fingerprint`. That **warns** and resumes rather than
+  refusing — a batch already in flight must not be stranded by the upgrade. Own
+  test.
+- Verify: **956 passed**, 21 pre-existing live-integration errors; ruff and mypy
+  clean. Live: a recorded failure reports
+  `state=failed terminal=True exit_code=1 poll_interval=5.0 ttl=900.0 1/2` and
+  exits **1**; a recorded cancellation likewise. PASS
+
+## Step 8 — T2.4: cooperative cancellation
+- Files: `scout/cli/tasks.py`, `scripts/compile_plan.py`,
+  `scout/cli/commands/compile.py`, `scout/cli/declarations.py`,
+  `scout/cli/mcp_policy.py`, `docs/CLI_SPEC.md`,
+  `tests/test_compile_plan.py` (+3), `tests/test_cli_verify.py` (+5)
+- `snpmemory compile-cancel <handle>` writes `.cancel` beside the run marker.
+  A **file, not a signal**: a signal arrives mid-article and would abandon a
+  generation already paid for, and a pid may have been reused by something else.
+  The batch reads it between articles — where staging is already consistent —
+  records `cancelled`, and stops.
+- `CompilePlanCancelled` subclasses `CompilePlanError`, so every existing handler
+  still treats it as the semantic outcome it is, while `main` can tell it apart
+  and not record `failed` over a deliberate stop.
+- A run clears any leftover request at start: starting is an intent to run, and a
+  request from a previous attempt must not silently kill this one.
+- Refusal shapes: already-terminal → exit 0 `no_change` (an error would push a
+  caller into treating a finished batch as a fault); no live process → exit 0
+  `not_running` saying what to do instead; unknown handle → exit 3; a handle
+  outside the checkout → exit 3.
+- **The summary never claims the batch stopped.** It says "will stop after the
+  current article; poll compile-status until it reports cancelled" (R4). The
+  state moves to `cancelled` only once it actually has.
+- MCP exposure HIDDEN, as the plan recommended: the tool surface stays at four,
+  and a task-capable client will get `tasks/cancel` natively from step 9.
+- `docs/CLI_SPEC.md` gained rows for `compile-cancel`, `--root`, and
+  `mcp-config`'s real flags — caught by `test_cli_schema_conformance.py`, which
+  is exactly its job.
+- Verify: **964 passed**, 21 pre-existing live-integration errors; ruff and mypy
+  clean. Live, against a real detached `scripts.compile_plan` child with only the
+  model calls stubbed (the loop, markers, boundary check and CLI all real):
+  cancelled while article 2 was in flight → article 2 **finished and stayed
+  staged**, article 3 never started, state `cancelled: 2/3`, exit 1, staging
+  holding `tmp-cancel-a.md`, `tmp-cancel-b.md`, `.run.json` and nothing
+  half-written. Re-running then printed `resume: reusing staged tmp-cancel-a` /
+  `tmp-cancel-b` and compiled only `tmp-cancel-c` — so the message's promise
+  that staged pages are kept and resumable is true. PASS
+
+## Step 9 — MCP Tasks: **A1 falsified; step stopped as the plan instructed**
+- Files: `scout/mcp/local_server.py` (docstring only),
+  `tests/test_local_mcp_server.py` (+3). **No `TaskConfig` was added.**
+- The plan said: "Step 9 verifies A1 against a real `fastmcp.Client` before
+  anything depends on it — if the handshake does not negotiate, the step stops
+  and the rest of the plan is unaffected, because it is deliberately last."
+  It does not negotiate. Measured, not inferred:
+
+  | Probe | Result |
+  | --- | --- |
+  | `get_task_capabilities()` | `None` |
+  | server capabilities over a real in-memory `Client` | `experimental, logging, prompts, resources, tools, extensions` — **no `tasks`** |
+  | `client.call_tool("compile_plan", …, task=True)` | `McpError: FunctionTool 'tool:compile_plan@' does not support task-augmented execution` |
+  | `@tool(task=TaskConfig(mode="optional"))` on an **async** fn | `ImportError: FastMCP background tasks require the 'tasks' extra` — **at registration** |
+  | the same on a **sync** fn (the shape our tools have) | same `ImportError`, before it even reaches the async check |
+
+- **Why A1 was wrong.** `fastmcp==3.3.1` gates every task path on **pydocket**
+  (`fastmcp[tasks]` → `pydocket>=0.20.0`), described by its own authors as "a
+  distributed background task system", whose dependencies include `redis>=5`,
+  `burner-redis`, and `py-key-value-aio[memory,redis]` — 14 packages and a Redis
+  instance. `TaskConfig.validate_function` calls `require_docket` at
+  **registration time**, so a naive `task=TaskConfig(...)` does not degrade
+  gracefully: `build_server()` raises and there is no server at all for anyone
+  without the extra. Task-augmented functions must also be `async`; these tools
+  are synchronous wrappers around a blocking command path.
+- **The trade, stated plainly.** Adopting it costs Redis in the `scout` image
+  plus an async rewrite, and buys a `taskId` scoped to the server process. What
+  already exists is a handle that is a path on disk, backed by a staging
+  directory and a `.run.json` carrying state, heartbeat, TTL and poll interval —
+  surviving a server restart, a reboot, and a client that has never heard of
+  Tasks. Requiring Redis to obtain a *weaker* record is the wrong trade. A2 —
+  "the plan-path handle stays the durable record" — is the assumption that
+  survived, and steps 7 and 8 already delivered the three unmet normative rules
+  (terminal `failed`/`cancelled`, TTL + poll interval, cooperative cancellation)
+  without any of that cost.
+- **What was NOT done, deliberately:** declaring `TaskConfig` behind an
+  `if is_docket_available()` guard. It would compile, and it would be a code
+  path this repository can never execute or test — a surface that exists only
+  cosmetically. If Tasks are wanted, the honest route is adding the dependency
+  and the infrastructure on purpose, which is an architecture decision and not
+  this plan's to take.
+- Tests pin the facts rather than the wish: `get_task_capabilities()` matches
+  `is_docket_available()` **in both directions**, so the day pydocket lands the
+  decision is revisited deliberately; `build_server()` must not require the
+  extra (the regression guard for the naive fix); and a real `fastmcp.Client`
+  gets the ordinary `confirmation_required` tool error, proving the non-task
+  path is intact.
+- Verify: `pytest tests/test_local_mcp_server.py` → **14 passed**, the 11
+  pre-existing ones **unchanged**, which was R2's stated mitigation. PASS
+  (as a verified negative result)
+
+## Step 10 — close-out
+- Files: `docs/REMAINING_TASKS.md`, `docs/CLI_SPEC.md`,
+  `artifacts/superpowers/finish-tier2-2026-08-25.md` (= `finish.md`),
+  `scripts/compile_plan.py` + `tests/test_compile_plan.py` (two review fixes)
+- Tiers 1 and 2 rewritten as was/is-now. New **T2.5** prices the MCP Tasks
+  question so nobody re-derives it, and records the 2025-11-25 vs 2026-07-28
+  version fork. New **T3.0** (wrong tool namespace in package instructions).
+  Header, T3.2 and the suggested sequence all updated; the re-verification debt
+  from T0.2 is stated where the sequence will be read.
+- **AM-6 (review fix):** the run marker is now written **before** the pre-flight.
+  A detached batch whose pre-flight refused reported `not_started` — the most
+  misleading state available, because it says nothing happened when something
+  did. Now `failed`, naming the article that could not mint. Own test.
+- **Second review fix:** the heartbeat is written on the *resume* branch too, so
+  a long resume over many staged articles cannot look hung while it reads them.
+- Removed the scratch directories the live checks created under `artifacts/`.
+- Verify: **969 passed**, 21 pre-existing live-integration errors; `ruff check .`
+  and `mypy scout scripts` (68 files) clean; `snpmemory verify-secrets` exit 0;
+  `pytest -k mcp_policy` 7 passed, no undecided commands; `snpmemory schema -o
+  json` VALID against the vendored clispec 0.3 with 26 commands; all 7 services
+  healthy with `restarts=0`; preflight PASS/PASS exit 0. PASS
+
+---
+
+# Tier 3 execution — plan `artifacts/superpowers/plan-tier3-2026-08-25.md`
+
+Decisions taken as recommended: **(1)** the superpowers layer stays **repo-local**
+and is declared, not shipped; **(2)** adopt Agent Plugins 1.0.0; **(3)**
+`SNP_MEMORY_ROOT`, empty by default with a clear refusal.
+
+## Steps 1–2 — every `SKILL.md` conforms to the Agent Skills spec
+- Files: `tests/test_agent_skills_spec.py` (new, 211 parametrized cases),
+  42 × `SKILL.md` across `.agent/skills`, `.claude/skills`,
+  `packages/snp-agent/skills`
+- Written test-first, as the plan required. **Red baseline before any edit**, and
+  it matched the analysis exactly:
+
+  | Rule | Failures |
+  | --- | --- |
+  | frontmatter parses as strict YAML | 12 (the 6 broken × 2 mirrors) |
+  | name valid and matches its directory | 12 (cascade from the above) |
+  | description present and within 1024 | 12 (cascade) |
+  | only specification keys | 12 (cascade) |
+  | **no angle brackets in frontmatter** | **26** |
+
+  74 failed, 137 passed.
+- The angle-bracket count is the finding the backlog did not have. 24 of the 26
+  are the `description: >-` folded scalars that were the *fix* for the other
+  eight skills, and 2 are `->` arrows in `superpowers-workflow`. The spec names
+  `<`/`>` in frontmatter as a prompt-injection risk, so a folded scalar is the
+  wrong fix for a description containing `: `.
+- One mechanical pass rewrote all 42 descriptions as **double-quoted single-line
+  scalars** (`json.dumps` output is a valid YAML double-quoted scalar, so the
+  escaping is guaranteed rather than hand-rolled). R4's mitigation was applied:
+  the parsed text was captured before and after, and **2 of 42 changed** — both
+  the arrows, deliberately (`brainstorm -> plan` → `brainstorm then plan`).
+- `.agent/skills` and `.claude/skills` remain byte-identical (`diff -rq` clean),
+  and the test now asserts that set equality itself.
+- Rules encoded rather than importing `skills-ref`: its own authors call it
+  "intended for demonstration purposes only and not meant to be used in
+  production". Same choice this repo made for the CLI Spec.
+- Verify: `pytest tests/test_agent_skills_spec.py` → **211 passed** (from 74
+  failed). Full suite **1180 passed**, 21 pre-existing live-integration errors;
+  ruff clean. **Live:** the harness re-read the skill list and now renders the
+  rewritten descriptions — `superpowers-workflow` reads "brainstorm then plan
+  then implement with verification (prefer TDD) then review then finish". PASS
+
+## Step 3 — vendored the Agent Plugins 1.0.0 schemas
+- Files: `tests/fixtures/agent-plugins-1.0.0-plugin.schema.json`,
+  `tests/fixtures/agent-plugins-1.0.0-mcp.schema.json` (new)
+- Both vendored verbatim from
+  `raw.githubusercontent.com/agentplugins/agent-plugins-spec`, matching the
+  pattern Tier 1 established with `clispec-v0.3.json`. No new runtime
+  dependency; `jsonschema` is already a dev dependency, and `skills-ref` stays
+  out on its authors' own advice.
+- The first copy of the plugin schema — taken from the rendered `agent-plugins.org`
+  URL — was missing the `title` and `description` members. Caught by fetching the
+  raw file and comparing, and replaced. Worth recording: a rendered spec page is
+  not a source of truth for a vendored artifact.
+- Verify: both parse as Draft 2020-12 (`check_schema`), both are closed
+  (`additionalProperties: false`), and each document's `$id` equals the `const`
+  its own `$schema` property requires — so a future spec revision cannot be
+  mistaken for this one. PASS
+
+## Step 4 — T3.0: no agent is told to call a tool that does not exist
+- Files: 30 markdown files across `.agent/`, `.claude/`,
+  `packages/snp-agent/`; `tests/test_agent_tool_namespace.py` (new, 107 cases)
+- Renamed the **tool namespace** `basic-memory.search_notes` /
+  `.read_note` → `snp-wiki.*`, plus every place naming the *server* an agent
+  connects to: `**Server**: \`basic-memory\` (Port 8765)`, the "Tool Calling
+  Specification" heading, the architecture diagram's MCP arrow, the reload
+  workflow's probe and status panel, and — the one that mattered most —
+  `snp-search-wiki`'s **frontmatter description**, which is the text an agent
+  reads to decide whether the skill is relevant at all.
+- Also corrected `snp-export-mcp`, which told agents the system exposes "two
+  independent MCP endpoints". Tier 2 made it three.
+- **Left alone, deliberately, and the test knows why:** `basic-memory` naming
+  the *engine* (`Roadmap: LLM-Wiki Engine (basic-memory + gen_index.py)`) and
+  the *container* (`snp-bootstrap-system`'s list of compose services). Those are
+  real things with that name. The test carries an allowlist keyed by file with
+  the reason, so a **new** mention has to be classified rather than absorbed.
+- Verify: `pytest tests/test_agent_tool_namespace.py` → **107 passed**. Proved it
+  detects a regression: reverting one call to `basic-memory.search_notes` turned
+  it red on both the per-file rule and the allowlist rule, then green on revert.
+  `.agent` ↔ `.claude` parity intact. PASS
+
+## Step 5 — F-3: the fifth config surface stops having its own opinion
+- Files: `scripts/export_agent_bundle.py`, `tests/test_export_agent_bundle.py`
+  (+7, 1 stale assertion corrected)
+- Deleted the three hardcoded per-client config blocks (≈50 lines) and replaced
+  them with `export_mcp_config.generate_config()`. One generator now feeds all
+  five surfaces.
+- What that fixed, concretely: this path emitted `basic-memory` as the server key
+  and `Authorization: Bearer ${SCOUT_AUTH_TOKEN}`, while `docs/CONNECT_AGENTS.md`,
+  `export_mcp_config.py` and `install-agent.sh` all use `snp-wiki` and
+  `SCOUT_AUTH_HEADER` (which is the **complete** header value, not a bare token).
+  A user who followed the documentation and exported `SCOUT_AUTH_HEADER` got a
+  config from this path that could not authenticate at all — and no `snpmemory`
+  server either.
+- **Unplanned fix, kept:** it *replaced* the target config outright. Now it
+  merges, like every other writer in the repo. Overwriting somebody's `.mcp.json`
+  is data loss, and the test that pins it was cheap.
+- One pre-existing assertion (`"basic-memory" in data["mcpServers"]`) encoded
+  the defect and was corrected to `snp-wiki`, the same way Tier 2 corrected the
+  manifest parity assertion.
+- Verify: `pytest tests/test_export_agent_bundle.py` → **18 passed**. Live:
+  installed into a scratch project holding a pre-existing `.mcp.json` —
+  result carries `['scout','snp-wiki','snpmemory','someone-elses']`, keeps the
+  unrelated top-level key, contains `SCOUT_AUTH_HEADER` and no
+  `SCOUT_AUTH_TOKEN`. Full suite **1294 passed**; ruff and mypy clean. PASS
+
+## Steps 6–8 — Agent Plugins 1.0.0, and the package boundary as a decision
+- Files: `packages/snp-agent/plugin.json`, `packages/snp-agent/mcp.json` (new);
+  `packages/snp-agent/manifest.json` + `.agent/manifest.json` (**removed**);
+  `scripts/export_agent_bundle.py`, `scout/cli/commands/mcp.py`,
+  `tests/test_agent_package_sync.py` (+4), `tests/test_agent_package.py`,
+  `tests/test_export_agent_bundle.py`
+- Steps 6 and 7 were interleaved, as the plan anticipated: the boundary decision
+  had to land *in* `plugin.json`, so the file came first and the test second.
+- **`plugin.json`** — `$schema` + `name` + standard metadata, and everything the
+  closed schema does not define under `extensions["io.snp.memory"]`: `rbac`,
+  `entrypoints`, `requiredTools`, and the two lists that matter —
+  - `ships`: the 8 skills, 6 workflows, 3 instructions and 1 rule that are
+    distributed;
+  - `repoLocal`: the superpowers layer, with the reason written down. Shipping it
+    would tell a consumer's agent to write brainstorms and plans into *their*
+    `artifacts/superpowers/`, for work unrelated to the memory system.
+- **`mcp.json`** — three **typed** entries (`streamable-http` × 2, `stdio` × 1).
+  The specification is explicit that servers are "never inline in the manifest",
+  which is exactly where ours were.
+- **A5 in practice.** The portable plugin cannot pin the checkout: `${PLUGIN_ROOT}`
+  names the *installed plugin's* directory, every resolved path must stay inside
+  it, and the checkout is outside by construction. So `mcp.json` ships
+  `env: {"SNP_MEMORY_ROOT": ""}` and `snpmemory mcp` reads it as a `--root`
+  fallback. Verified live from `/tmp`: set → all four tools, exit 0; **empty →
+  exit 3 naming the variable and explaining why it ships empty**; unset outside a
+  checkout → the existing exit 3. It fails loudly instead of serving the wrong
+  tree. This replaced `"<path to the memory-system checkout>"`, a placeholder
+  that was both a lie and an angle bracket.
+- `manifest.json` is gone from both trees. `load_manifest()` reads `plugin.json`
+  and **pins the schema identifier** — those are immutable and a new release must
+  use a new one, so a mismatch is a migration to make, not a version to tolerate.
+  Own test.
+- `.agent/` deliberately gets neither file: it is this repository's working
+  contract, not a distributable plugin, and since the superpowers layer is
+  repo-local the two trees legitimately differ. `REQUIRED_SHARED_ROOT_FILES`
+  narrowed to `package.json`, with `PACKAGE_ONLY_ROOT_FILES` naming the rest.
+- **F-4 closed.** Two new tests, both proved to have teeth:
+  - removing `snp-rag-fetch` from the package → 2 failures, one of them the new
+    declaration check;
+  - copying `superpowers-tdd` *into* the package → 2 failures, one of them the
+    repo-local leak check. The leak check also asserts the excluded files still
+    exist in `.agent/`, so "repo-local" cannot quietly become "deleted".
+- Verify: full suite **1299 passed**, 21 pre-existing live-integration errors;
+  ruff and mypy clean. Live: built the distribution tarball — `plugin.json` and
+  `mcp.json` inside it both **validate against the vendored Agent Plugins 1.0.0
+  schemas**, it carries exactly the 8 declared skills, and `superpowers leaked:
+  False`. PASS
+
+## Step 9 — say what changed, once
+- Files: `README.md`, `docs/ARCHITECTURE_STATUS.md`, `docs/CONNECT_AGENTS.md`
+- README's package section now says the distribution is an Agent Plugins 1.0.0
+  plugin, and states the repo-local decision **as a decision** with its reason —
+  the previous text described the trees as mirrors, which they deliberately are
+  not.
+- `docs/CONNECT_AGENTS.md` gains an "Installing the portable package" section
+  and, importantly, a quoted explanation of **why the package cannot pin your
+  checkout**: `${PLUGIN_ROOT}` names the installed plugin's directory and paths
+  must stay inside it. That is written down so the next person does not "fix"
+  the empty `SNP_MEMORY_ROOT` with a placeholder that cannot work.
+- Verify: `pytest tests/test_docs_contract.py` → 6 passed. PASS
+
+## Step 10 — T3.2: `snpmemory install-agent`
+- Files: `scout/cli/commands/agent.py` (new), `scout/cli/declarations.py`,
+  `scout/cli/mcp_policy.py`, `docs/CLI_SPEC.md`,
+  `tests/test_cli_install_agent.py` (new, 10 tests)
+- A wrapper over `scripts/install-agent.sh`, the same shape `mcp-config` uses
+  over `export_mcp_config.py`. The script stays the implementation because it is
+  what the documented `curl | bash` install runs; a second implementation would
+  be a second thing to keep true.
+- What the wrapper adds is the exit-code contract and one refusal: `3` for a
+  target that is not a directory, `5` when the target **already has an
+  `.agent/`** — that is somebody else's configured project — and `2` if the
+  script is missing or cannot run. `--dry-run` lists what would be written and
+  reaches nothing.
+- MCP exposure HIDDEN: an agent that could install its own operating contract
+  into other directories is a decision nobody made.
+- Verify: `pytest tests/test_cli_install_agent.py` → **10 passed**. Live:
+  `--dry-run` created 0 files; installing produced the 8 declared skills and an
+  `.mcp.json` with `['scout','snp-wiki','snpmemory']`; re-running without
+  `--confirm` exited **5** leaving the project untouched; **no `superpowers-*`
+  skill was installed**, which is the repo-local decision holding at the point it
+  actually matters. And the decisive one: the exact argv from the *installed
+  project's own* `.mcp.json`, run from that project, lists all four tools and
+  exits 0. PASS
+
+## Step 11 — close-out
+- Files: `docs/REMAINING_TASKS.md`, `docs/CLI_SPEC.md`,
+  `artifacts/superpowers/finish-tier3-2026-08-25.md` (= `finish.md`)
+- Tier 3 rewritten as was/is-now, with three items the backlog did not have:
+  **T3.3** (the 25-file gap as a decision, enforced both ways), **T3.4** (Agent
+  Plugins adoption, including the `${PLUGIN_ROOT}` limitation written down so
+  nobody "fixes" it), **T3.5** (the fifth config surface). Tier 1's counts were
+  corrected by measurement rather than assumption: **28 specified, 27
+  implemented**, `extract` the only one left.
+- Verify: **1309 passed**, 21 pre-existing live-integration errors; `ruff check
+  .` and `mypy scout scripts` (69 files) clean; `snpmemory verify-secrets` exit
+  0; `pytest -k mcp_policy` 7 passed with no undecided commands; `snpmemory
+  schema -o json` VALID against clispec 0.3; `plugin.json` and `mcp.json` VALID
+  against the vendored Agent Plugins 1.0.0 schemas; all 7 services healthy.
+  Scratch directories removed. PASS
+
+## Tier 3 status: COMPLETE
+All 11 steps landed. Both plan decisions were taken as recommended and both
+held up under live testing.
+
+---
+
+# Tiers 4–6 execution — plan `artifacts/superpowers/plan-tier456-2026-08-25.md`
+
+Executing **Phases A–C plus step 11**, as recommended and approved. Step 12 (the
+paid compile of 10 articles) is a separate go/no-go once the corpus is clean and
+the judge budget is checked. Decisions taken as recommended: T4.3 stays deferred;
+T5.1 declines figures/tables for now and says so; T5.1's reporting fix happens
+regardless.
+
+## Step 1 — T6.3: unselected live tests skip, selected ones still fail
+- Files: `tests/conftest.py`, `tests/test_conftest_gating.py` (new, 4 tests)
+- The distinction, which is the whole point: `SNP_INTEGRATION_PROJECT` **unset**
+  means nobody asked for these → **skip**, because failing there makes the
+  default command never report green, which trains everyone to read past the
+  summary line. **Set but incomplete** means somebody asked and it cannot run →
+  still **fail**, naming what is missing, because a skip there hides the thing
+  they were trying to test.
+- The gate is autouse and reads the ambient environment, so the tests run pytest
+  as a **subprocess** with a constructed environment rather than importing it —
+  the only honest way to check it.
+- My first `_run` helper built the environment and then never passed it to
+  `subprocess.run`. The "selected but unconfigured" case appeared to skip when
+  run through the helper and errored correctly when run by hand; the discrepancy
+  was the missing `env=env`, not the gate.
+- Verify: `pytest tests/test_conftest_gating.py` → 4 passed. And the result that
+  matters: `uv run pytest -q` → **1313 passed, 21 skipped, exit 0**. The default
+  test command reports green for the first time. PASS
+
+## Step 2 — T6.5: parse once per cycle, retry only what failed
+- Files: `scout/ingest.py` (new `ParseCache`), `scout/sync_job.py`,
+  `tests/test_sync_job.py` (+4)
+- The failure that actually occurs is at the **embed** step — the gateway is
+  down, or the provider rate-limits. `sync_once` retries three times and each
+  attempt re-parsed the entire corpus to reach the one call that failed. Cost
+  scaled with the corpus rather than with the failure. Observed during the Tier
+  0 outage test as `Table extraction unavailable …` three times per cycle.
+- `ParseCache` is keyed by **identity, not path**: `(mtime_ns, size)`. A changed
+  file is parsed again, so a stale reuse is impossible rather than unlikely. A
+  file whose identity cannot be established is parsed, never served from cache.
+- Cleared once an index **succeeds**: a cache that outlived its cycle would hold
+  a corpus-worth of parsed text for the life of the process to save work nobody
+  was going to repeat.
+- One test assumption of mine was wrong: I expected `OSError` for a missing
+  file, but `parse_file` raises `ParserError`. The behaviour was right — the
+  cache must let the parser's own error reach the caller rather than turning it
+  into a swallowed miss. Test corrected, and it now also asserts a real parse
+  was attempted.
+- Verify: 3 documents × 3 attempts → **3 parses, not 9**; a rewritten file
+  re-parses; a successful index leaves the cache empty. `pytest
+  tests/test_sync_job.py tests/test_ingest_v2.py` → 42 passed, 2 skipped. PASS
+
+## Step 3 — T6.2: the `/doctor` finding that is this repository's
+- Files: `docs/news-file_need-check/CLAUDE.md` → `AGENT_POLICY_SNAPSHOT.md`,
+  `docs/REMAINING_TASKS.md`
+- The stray file was loaded as project instructions for everything under
+  `docs/`. Renamed via `git mv`, so it is documentation. No `CLAUDE.md` remains
+  under `docs/`.
+- **Two findings while fixing it, neither acted on — both are the owner's call:**
+  1. That file is **byte-identical to `~/.claude/CLAUDE.md`** — the owner's
+     *personal global* working policy — and it is **tracked**. A committed copy
+     of a personal global file can only drift from the real one, and it would
+     travel with the repository if this branch is pushed. I recommend deleting
+     it rather than keeping a renamed copy, but deleting somebody's file is not
+     mine to decide.
+  2. `docs/news-file_need-check/computers-12-00091.pdf` is an **untracked 2.5 MB
+     byte-identical duplicate** of the corpus PDF (same md5). Left in place in
+     case it was put there deliberately.
+- The other `/doctor` items are the owner's machine, not this repository:
+  recorded, not touched.
+- Verify: `find docs -name CLAUDE.md` → empty; `pytest
+  tests/test_docs_contract.py` → 6 passed. PASS
+
+## Step 4 — T5.1 / SH-1 / SH-4: no status claims work that did not happen
+- Files: `scout/pdf_structure.py`, `scout/parsers.py`,
+  `tests/test_pdf_structure.py` (+3)
+- **The exact mechanism, found and closed.** `page.images` raises
+  `ImportError` when Pillow is absent, and `extract_figures`'s per-page
+  `except Exception: continue` swallowed it on **every** page. So a document
+  with 7 figures produced `figures_status: "ok"`, `figure_count: 0` — examined
+  successfully, nothing found. An `ImportError` is now re-raised as a
+  `PdfStructureError`: a missing capability is a fact about the *installation*,
+  not about the page. The behaviour the swallow existed to protect — a corrupt
+  XObject stream on one page must not sink the document — is kept, and has its
+  own test.
+- **Three states, not two** (SH-4): `ok` = ran and found something;
+  `no_evidence` = ran fully and found nothing, a fact about the document;
+  `unavailable` = could not look, a fact about the installation. `ok` previously
+  meant both of the first two. Also asserted: a parser that could not look
+  reports **no count at all**, rather than a count of zero.
+- One of my tests was sloppy and I rewrote it: it assumed `pdfplumber` was
+  absent, but it is installed on the **host** — the T5.1 problem is the
+  container image, not the dev venv. The replacement drives both functions
+  through controlled extractors and checks all four status outcomes.
+- **Verified in the real containers:** `scout` and `sync-job` both report
+  `Pillow: ABSENT` and `pdfplumber: ABSENT`, so the precondition for the lie is
+  real in the deployed image. The fix itself is proven on the host against the
+  exact `ImportError` pypdf raises; confirming it *inside* the container needs
+  the image rebuilt, since the running one is built from `2d2b9dd`. Recorded
+  rather than claimed.
+- Verify: `pytest tests/test_pdf_structure.py` → 17 passed; full suite **1320
+  passed, 21 skipped**. PASS
+
+## Step 5 — SH-2 / SH-4: a source that yields nothing is not a broken hint
+- Files: `scripts/verify_addresses.py`, `scripts/mint.py`,
+  `scout/cli/commands/verify.py`, `docs/ARCHITECTURE_STATUS.md`,
+  `tests/test_verify_addresses.py` (+3, 1 reclassified), `tests/test_mint.py`
+- **Where the check runs was an open decision** (the audit's §6 decision 4:
+  offline lint behind a flag, or alongside `verify_addresses.py` where live
+  services are already required). Took the second: making the *offline* linter
+  require a database is a behaviour change to a command CI depends on, for a
+  check that needs the stack anyway.
+- New `VerifyStatus.NO_EVIDENCE`. FAIL previously meant "unindexed, empty after
+  parsing, **or** outside this page's department" — three different problems and
+  one label. It now means the source is retrievable and the *address* is stale;
+  NO_EVIDENCE means the source yields nothing at all and re-minting cannot fix
+  it. The finding and the fix now correspond, which is SH-2's whole complaint.
+- The probe is the source's own filename under a path pre-filter, because a
+  path-filtered vector search returns nearest neighbours *within* that path
+  whatever the query says. **That assumption is now written down**, because it
+  is the one thing the mechanism rests on.
+- **Minting learned to stop.** A candidate reporting NO_EVIDENCE `break`s
+  instead of spending the remaining candidates: no hint can fix a source with no
+  chunks, and reporting the last one tried would blame the phrase for a problem
+  the phrase cannot have.
+- Two existing tests broke and taught something. `HintMapBackend` returned empty
+  for any unmapped query even under a path filter — a state no real backend can
+  be in, and precisely the state the probe asks about. Fixed the **fake** to
+  behave like a real path-filtered backend rather than weakening the feature.
+  A third test reclassified FAIL → NO_EVIDENCE, which is the change working:
+  its scenario is a source with no chunks at all.
+- Verify: full suite **1323 passed, 21 skipped**; ruff and mypy clean. Live:
+  `5 PASS · 0 FAIL · 0 DRIFT · 0 NO_EVIDENCE`, exit 0 — the real vault is
+  unaffected, and the new column exists. PASS
+
+## Step 6 — record what the audit still asserts, and what it no longer does
+- Files: `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`, `docs/REMAINING_TASKS.md`,
+  `tests/test_docs_contract.py` (+1)
+- §6 decision 5 marked **RESOLVED**: both worked-example files are absent from
+  `raw/` and no wiki page cites either. Four decisions remain, not five.
+- The document's own policy is to "preserve old records by changing their
+  banner, not by silently rewriting history", so the seven remaining mentions
+  stay. A banner at the top says the corpus has changed, names both files, and
+  states the distinction: the **findings stand as classes of failure**, the
+  **worked examples describe a corpus that is gone**.
+- The guard follows that policy rather than fighting it. The test does **not**
+  assert every `raw/` path in the audit exists — that would force rewriting
+  history. It asserts that if a named path is absent, the banner a reader sees
+  first says so.
+- Tier 5's summary in `REMAINING_TASKS.md` now records SH-4 and the T5.1
+  reporting fix as built, and **T5.1 decision 1 as taken**: the deployed
+  ingester does not extract figures or tables, deliberately, confirmed against
+  the running containers. Docling is recorded as the 2026 answer for whenever it
+  is revisited, along with the note that its layout awareness would give T4.2 its
+  reference section structurally instead of by regex.
+- Verify: `pytest tests/test_docs_contract.py` → 7 passed. PASS
+
+## Step 7 — parse the reference list into structured citations
+- Files: `scripts/extract_references.py` (new), `tests/test_references.py`
+  (new, 11 tests)
+- **87 of 87 entries parsed** from `computers-12-00091.pdf` — the same 87 T4.2
+  names — with indices 1…87 contiguous and a year on every one.
+- **Parsed, not prompted** (F-4). A reference is a closed shape; an LLM would
+  introduce variance for no gain, and the output is byte-identical across runs
+  (verified with `cmp`), like `plan-articles`.
+- **The contract is asymmetric on purpose.** `index`, `text`, `year`, `url`,
+  `doi` are reliable. `title` is populated only when the shape is unambiguous
+  and is `None` otherwise — **18 of 87** — because a confidently wrong title is
+  worse than an absent one. Inspected all 18: they are real shape variations
+  (books with `, 2nd ed.;`, an entry that opens with its own title and has no
+  authors, and one where the PDF lost the space in `nets.Neural Comput.`), not a
+  parser bug. Every entry keeps its verbatim `text`, so no citation is lost —
+  some are simply less structured.
+- Two extraction details that mattered: entries **wrap across lines** (a citation
+  split in two is two wrong answers), and the PDF injects a running footer
+  (`Computers 2023, 12, 91 24 of 26`) mid-list. Both have tests.
+- Spot-checked entries 8, 50 and 87 against the raw text. Entry 50 —
+  `Hinton, G.E. Deep belief networks. Scholarpedia 2009, 4, 5947. [CrossRef]` —
+  is *exactly* the fragment that ranked **first** for hint "Convolutional Neural
+  Networks" in the status check. The noise and the graph material are literally
+  the same bytes.
+- Verify: `pytest tests/test_references.py` → 11 passed; ruff and mypy clean. PASS
+
+## Steps 8–9 — the reference list leaves the index, and the reranker decision
+- Files: `scout/references.py` (new, moved out of `scripts/`), `scout/parsers.py`,
+  `scripts/extract_references.py` (now a thin CLI), `tests/test_references.py`
+  (+3), `artifacts/superpowers/retrieval-baseline-2026-08-25.md` (new)
+- Layering fixed on the way: the parser must not import from `scripts/`, so the
+  parsing moved to `scout/references.py` and the script became a CLI over it.
+- `_lift_references` runs inside `parse_pdf`: the bibliography becomes
+  `metadata["references"]` and stops being retrievable prose. An **appendix
+  after the references is not dropped** — a page past the heading is only
+  treated as bibliography when it actually reads like one, and that has a test.
+- **Corpus effect:** parsed text 109,457 → 92,008 chars; `[CrossRef]`-bearing
+  chunks **23 → 2**; references in metadata **0 → 87**. The 2 remaining are
+  false positives of the detector, not bibliography (the paper's own `Citation:`
+  block and one prose chunk mentioning a DOI).
+
+### The hard gate (A2) — all three passed
+| Gate | Result |
+| --- | --- |
+| `verify-addresses` still 5/5 | **5 PASS · 0 FAIL · 0 DRIFT · 0 NO_EVIDENCE**, exit 0 |
+| rank-1 for each page's own hint | **3/5 → 4/5** correct |
+| `verify-groundedness` | **5 GROUNDED · 0 UNSUPPORTED**, exit 0 |
+
+The headline: `convolutional-neural-networks` went from
+`ACM 2017, 60, 84–90. [CrossRef] 50. Hinton, G.E. Deep belief networks` at rank
+1 to the actual CNN section. That is the exact failure demonstrated in the
+status check.
+
+### Two findings I did not expect, both recorded
+1. **`snpmemory ingest` cannot run from the host without exporting `.env`.**
+   `ConfigError: POSTGRES_HOST is missing` — the CLI resolves `.env` for its own
+   `Config`, but `ingest_directory` reaches `postgres_settings()`, which reads
+   ambient `os.environ`. Same class as the Tier 1 `fetch` defect, in a different
+   place. Worked around with `set -a; . ./.env` for the re-index; recorded as a
+   real gap, not fixed here.
+2. **The corpus now depends on where ingestion runs.** The host has `pdfplumber`;
+   the containers do not (T5.1's declined capability). So the host re-index
+   produced **3 table sections the container cannot**, and chunks went 127 → 140
+   rather than down: −23 bibliography, +tables. `sync-job` will drop those tables
+   on its next re-index. This is SH-6 ("a separate validator will drift from the
+   ingest parser") in a new form — the *same* parser drifting from itself
+   depending on where it runs.
+
+### Step 9 — no reranker, decided on the measurement
+- The one page that did not improve is `the-key-distinctions-…`, whose minted
+  hint **is the paper's own title**, so the paper's `Citation:` block is the
+  best match in the document. Retrieval is correct; the **hint** is wrong. A
+  cross-encoder would not change that, and T4.1 already records that two of the
+  five pages came from a hand-edited plan. Re-minting belongs with the recompile.
+- Also: LiteLLM's rerank support does not cover this stack's providers (Gemini
+  embeddings, OpenRouter chat), so a reranker means a new paid provider or a
+  local cross-encoder — a large dependency for a corpus of one document.
+- Recorded with per-page before/after numbers and an explicit revisit trigger:
+  several documents, and rank-1 correctness below ~80% on real hints.
+- Verify: full suite **1338 passed, 21 skipped**; ruff and mypy clean. PASS
+
+## Step 10 — T4.2: citations on the citing page
+- Files: `scout/references.py`, `scripts/compile_note.py`, `scout/vault.py`,
+  `AGENTS.md`, `tests/test_vault.py` (+4)
+- The source carries **124 inline citation markers** resolving to **78 distinct
+  references** (max index 87), so the graph is fully derivable from the text —
+  no model call, no prompting.
+- `cited_indices` expands ranges (`[14–17]` → 14,15,16,17) and **ignores a range
+  wider than 30**: a bracketed numeric interval that large is far more likely a
+  measurement than a citation, and inventing 200 edges from one bracket would
+  poison the graph rather than build it. An index with no matching entry is
+  **dropped, not guessed** — an edge pointing at nothing is worse than a missing
+  one.
+- Citations are resolved from the **retrieved passages**, not the generated
+  prose: the model does not reproduce `[12]` markers, and a citation the page
+  never saw would be a fabricated edge.
+- **F-4 applied.** An outward reference is a **citation, not a wikilink** — it
+  becomes `[[a page]]` only once that work is itself ingested into `raw/`. It
+  renders as body content and there is **no `related:` frontmatter field**
+  (R-1.5), verified in the rendered output.
+- **A contract decision the linter forced.** `REQUIRED_HEADINGS` is an exact
+  sequence, so adding `Works Cited` failed lint on every page. Making it
+  required would have turned a new feature into a **vault-wide lint error** for
+  the 5 pages that predate it. It is therefore **optional**, and optional is not
+  unordered: it may appear at most once and only immediately before
+  `Cross-References`. Four tests pin both halves.
+- `AGENTS.md`'s body-section contract and its checklist updated to match.
+- Verify: rendered a citing page end to end with no model calls — `## Works
+  Cited` sits between Provenance and Cross-References carrying
+  `[8] A fast learning algorithm for deep belief nets (2006)` and
+  `[50] Deep belief networks (2009) — https://…`, and `related` is absent from
+  the frontmatter. Full suite **1342 passed, 21 skipped**; ruff and mypy clean;
+  the live vault still lints **0 errors**. PASS
+
+## Step 11 — regenerate the article plan (free; the go/no-go input)
+- Files: `artifacts/plans/computers-12-00091.plan.json` (15 proposed),
+  `artifacts/plans/computers-12-00091.recommended.json` (6 recommended)
+- **T4.1's warning confirmed exactly.** Of the 5 compiled pages only **3**
+  correspond to headings in the current proposal;
+  `advantages-and-disadvantages-of-deep-learning` and
+  `convolutional-neural-networks` do not. The plan that produced them was
+  hand-edited and cannot be reconstructed — so the remaining count is **12, not
+  the 10 the backlog assumed**.
+- Measured how much prose each proposed heading actually owns, because a
+  heading is not a page. Several own almost none: `biometrics` **62 chars**,
+  `the-future-directions` 584, `dl-properties-and-dependencies` 688,
+  `machine-learning-and-deep-learning` 939 (a parent heading whose children are
+  2.1 and 2.2), `introduction` 1001. `conclusions` is large but is a summary of
+  the paper rather than a concept.
+- Recommended edit: **6 articles**, all substantial and conceptual —
+  `different-machine-learning-categories` (~29k chars),
+  `some-deep-learning-applications` (~8k), `clinical-imaging` (~5.8k),
+  `deep-learning-approaches` (~5.6k), `mobile` (~4.8k),
+  `recommender-systems-rs` (~3.6k). Written to a **separate** file so the
+  15-article proposal stays intact; the plan file is hand-editable by design and
+  this is the edit, offered rather than imposed.
+- **Budget, which is the reason this is a go/no-go.** Generation runs on
+  **Gemini** (`gemini-3.5-flash`) and does not touch the free tier; only the
+  **judge** does (`openrouter/nvidia/nemotron-3-super-120b-a12b:free`,
+  50 requests/day). Estimated judge calls: **6 articles → ~17–23** including the
+  `verify-groundedness` pass over 11 pages; **12 articles → ~29–41** over 17
+  pages, against a 50/day ceiling with roughly 11 already spent today. Six is
+  comfortable; twelve is tight enough to risk exhausting mid-run.
+- Verify: `plan-articles` byte-stable across runs, **no model call**. PASS
+
+## Step 13 — T6.4: `ruff format` repo-wide — DONE, but I got the sequencing wrong
+- Files: **94 files reformatted**, 239 already formatted (333 total)
+- Correctness verified: `ruff format --check .` clean, `ruff check .` clean,
+  `mypy` clean, and the suite reports **1342 passed, 21 skipped** — the same
+  count as immediately before formatting, so no behaviour moved.
+- **Two mistakes, both mine, both worth recording.**
+  1. **I ran it at the wrong time.** T6.4's whole point is that a 90-file
+     formatting diff "would bury real changes in review", so it should be "a
+     single dedicated commit, landed when no other work is in flight". About
+     **140 files of this session's Tier 4–6 work were uncommitted** when I ran
+     it. The formatting is now mixed into that diff, which is precisely the
+     outcome T6.4 exists to prevent. The tree's *content* is correct either way
+     — `ruff format` is deterministic and idempotent — but the reviewability the
+     task was about is gone unless the functional work is committed first and
+     the formatting second. That is a commit-sequencing decision, and commits
+     are the owner's call here.
+  2. **My "formatting only" check was constructed wrong.** I diffed the whole
+     working tree and concluded "non-whitespace content identical: False" —
+     which was true and meaningless, because the diff contained every functional
+     change of the session. There was no commit boundary to diff against. The
+     honest verification is the one above: identical test count, clean type
+     check, clean lint.
+- Verify: as listed. PASS on correctness; the sequencing is recorded as a
+  process failure rather than smoothed over.
+
+## Step 14 — close-out
+- Files: `docs/REMAINING_TASKS.md`
+- Tier 4: **T4.1** rewritten with the corrected count (12, not 10) and the
+  recommended edit of 6, with the budget arithmetic that makes it a decision.
+  **T4.2** recorded as built — the "page or edge?" question answered *neither,
+  exactly*: an outward reference is metadata until the cited work is itself
+  ingested. **T4.4** added: one existing page's hint is the paper's own title.
+  **T4.3** sharpened — of its three open questions, ACL inheritance is not a
+  preference, because an asset store that does not inherit is a hole in the ACL
+  model.
+- Tier 5: SH-4 and the T5.1 reporting fix recorded as built; T5.1 decision 1
+  taken (no figure/table extraction, deliberately); the audit's staleness and
+  its resolved decision 5 recorded.
+- Tier 6: T6.2, T6.3, T6.4, T6.5 all recorded — T6.4 including the sequencing
+  mistake rather than smoothed over.
+- Header now reads **1342 passed, 21 skipped, exit 0**, `ruff format --check`
+  clean across 333 files, mypy clean across 71.
+- The two operational gaps found in Phase C are recorded where the sequence is
+  read: `snpmemory ingest` needing a manual `.env` export, and the corpus
+  differing between host and container ingestion.
+- Verify: `pytest tests/test_docs_contract.py` → 7 passed. PASS
+
+## Tiers 4–6 status: COMPLETE except step 12 (paused at the go/no-go)
+Steps 1–11, 13 and 14 landed. Step 12 — compiling the articles — is the one
+step that spends real model budget, and it is paused for the decision the plan
+said it would be paused for. Both plan decisions taken as recommended:
+T4.3 deferred, T5.1 declining figure/table extraction and saying so.
+
+---
+
+# Codex-audit execution — plan `artifacts/superpowers/plan-codex-audit-2026-08-26.md`
+
+## Steps 1–3 — the gate can no longer pass on an outage, on either path
+- Files: `scripts/ci_address_gate.py`, `scripts/verify_groundedness.py`,
+  `tests/test_ci_address_gate.py` (+6 tests, 33 sequences updated)
+- **Step 1.** Advisory now applies only to exit 1. Exit 2 and any unexpected code
+  propagate as 2. Written test-first: the exit-2 case failed with `assert 0 == 2`
+  before the change — a judge outage really did return 0.
+- **Step 2.** `verify_groundedness --probe`: judges nothing, answers only whether
+  the route responds, one request. It exists because `GET /health?model=` cannot
+  answer it — that endpoint serves the cached background result and this route is
+  deliberately excluded from the background loop, so it reports 503 whether or
+  not the route is fine. The gate spends the probe **before `_snapshot_wiki`**.
+- **Step 3.** Groundedness now runs after `_post_heal_exit` succeeds, and a
+  post-heal 1 or 2 restores the snapshot and cleans the branch **before
+  `git add`**, reusing the existing rollback path.
+- **Why this mattered, verified in the code:** `_groundedness_exit` was called
+  only inside `if initial == 0`. `_post_heal_exit` runs address verification and
+  lint and nothing else. So the one path that rewrites `sources[].hint` and
+  pushes was the one path with no groundedness judgement at all. Codex called
+  this blocking and it was: steps 1 alone would have made the non-mutating branch
+  honest and left the mutating one untouched, and I would have reported the phase
+  complete.
+- The new tests assert on **what did not happen** — that `git add`, `commit` and
+  `push` are unreached on post-heal 1 and on post-heal 2, and that a failed
+  preflight reaches neither `git switch -c` nor `HEAL_COMMAND`. Asserting the
+  exit code alone would pass while the branch was still pushed.
+- 33 pre-existing sequences needed the preflight prepended and the post-heal
+  judgement inserted; the healing-path table gained two rows for post-heal
+  groundedness.
+- **A measurement mistake of mine, corrected:** my first "simulated outage" test
+  passed when it should have failed. Cause was not the probe —
+  `scripts/verify_groundedness.py:76` calls `dotenv.load_dotenv()` at **module
+  scope**, so the script reloaded `.env` and defeated `env -u`. Re-tested by
+  pointing `LITELLM_BASE_URL` at a dead port (which `load_dotenv` will not
+  override). All three outcomes now verified live: no judge configured → **2**,
+  dead gateway → **2**, live judge → **0**.
+- Verify: `pytest tests/test_ci_address_gate.py` → **53 passed**; full suite
+  **1354 passed, 21 skipped**. PASS
+
+## Step 5 — Phase B: agent guidance that contradicted a measurement
+- Files: `CLAUDE.md`, `tests/test_docs_contract.py` (+1)
+- `CLAUDE.md:10` told every agent `search_notes` is "multilingual; Vietnamese ok"
+  while `ARCHITECTURE_STATUS.md` §OD-1 records **recall@1 0.625** on Vietnamese
+  paraphrases against 0.812 for a multilingual alternative — and recommends
+  replacing the model. Instructions are the worst place for a claim the
+  repository can disprove: documents are read once, instructions are followed
+  every time.
+- Replaced with what ships — English only, the model and the number, the
+  practical consequence ("expect to check more than the first hit"), and a
+  pointer to OD-1. **The model is untouched:** OD-1 is an open owner decision and
+  this step deliberately does not take it.
+- The guard is scoped to the *claim*, not the word: OD-1 must keep discussing
+  multilingual models and `search_notes` must stay described, so a line naming
+  the limitation passes and a line claiming the capability fails. It also
+  self-retires — if OD-1 is ever closed, the guard stops asserting.
+- Proved it has teeth: restoring the old sentence turned it red, then green on
+  revert.
+- Verify: `pytest tests/test_docs_contract.py` → 8 passed. PASS
+
+## Steps 4, 6, 7 — enforcement by default, and the CI that protects the suite
+- Files: `scripts/ci_address_gate.py`, `scout/cli/commands/ci.py`,
+  `scout/cli/declarations.py`, `tests/test_cli_ci.py`,
+  `tests/test_ci_address_gate.py`, `.gitea/workflows/checks.yaml` (new)
+- **Step 4 — measured first, then flipped.** A1 was checked rather than trusted:
+  re-ran `verify-groundedness` → **5 GROUNDED · 0 UNSUPPORTED · 0 NO_CONTEXT**,
+  exit 0. The reason the gate was advisory — "10 of 13 pages UNSUPPORTED" — is
+  gone, so enforcement is now the default and `--advisory-groundedness` is the
+  deliberate, visible override. A gate nobody can override gets disabled
+  wholesale, which is worse than one with a named escape hatch.
+- **The rename caught a real break.** `snpmemory gate` appended
+  `--enforce-groundedness` to the script's argv; after the inversion that flag
+  no longer exists, so the CLI would have failed argparse at runtime. Four
+  surfaces updated together: the script's own message, the CLI wrapper, the
+  declaration, and its test. The stale-reference grep is what found it.
+- **Step 6 — `.gitea/workflows/checks.yaml`.** The missing workflow: nothing ran
+  the suite, linter, formatter or type checker on a code or Compose change.
+  Offline by construction — no gateway, no database, no judge, no secret — so it
+  can only fail on this repository's own code.
+  - `-m 'not integration'` per Codex, and it is **not** redundant with T6.3's
+    skip: the fixture skips when `SNP_INTEGRATION_PROJECT` is *unset*, so a
+    runner exporting it would turn live tests on. The marker deselects whatever
+    the environment says — measured, 21 deselected.
+  - `uv` is pinned in the workflow rather than inherited from
+    `auto-healer.yaml`'s runner assumption.
+- **The workflow earned its place before it ran.** Executing its four commands
+  verbatim found **3 files unformatted** — my own edits from the previous steps.
+  That is precisely the drift it exists to catch, caught within a minute of
+  being written.
+- Verify: full suite **1356 passed, 21 skipped**; all four workflow commands
+  clean in the order the workflow runs them; the YAML parses and declares no
+  secret; `--help` shows the new flag. PASS
+
+## Step 8 — the webhook secret has no usable default
+- Files: `scripts/setup_gitea_webhook.py`, `tests/test_setup_gitea_webhook.py`
+  (new, 14 tests)
+- Removed `default=os.environ.get("WEBHOOK_SECRET", "dev-secret")`. Compose
+  already requires a real secret, so the default was not a convenience — it was
+  only a way to configure a webhook that silently accepts forged payloads, and
+  the receiver cannot tell the difference.
+- `_reject_insecure_secret` refuses: unset, any of seven known placeholders
+  (case- and whitespace-insensitive), and anything shorter than 16 characters.
+  `--development` permits a placeholder or a short value **with a warning**, and
+  deliberately does **not** permit an empty one — the flag is an override for a
+  weak secret, not a bypass for having none.
+- The refusal happens **before** anything is contacted, including on the
+  `--test-ping` path that needs no token. A test asserts neither
+  `create_gitea_webhook` nor `send_test_ping` is reached.
+- Nothing logs the secret. A test asserts the refusal message does not contain
+  the value it is refusing.
+- Verify: `pytest tests/test_setup_gitea_webhook.py` → **14 passed**. PASS
+
+## Steps 7, 9, 10, 11 — the remaining truthfulness items
+- Files: `docs/runbook.md`, `scout/cli/commands/wiki.py`, `docs/CLI_SPEC.md`,
+  `tests/integration/test_live_end_to_end.py`,
+  `tests/integration/test_multimodal_vision_live.py`, `docs/REMAINING_TASKS.md`
+- **Step 7 — what CI runs, and what it deliberately does not.** Three workflows
+  tabulated in the runbook, with the reason no workflow runs the live verifies:
+  they need the stack and a judge with a daily ceiling, and a CI job that fails
+  because a gateway was down teaches people to ignore CI.
+- **Step 9 — `snpmemory search` is a diagnostic, not a preview.** The module
+  already said it "does not compete with" `snp-wiki`; that is a scope statement.
+  Added the operational consequence: different engines (LiteLLM/Gemini here,
+  in-process FastEmbed 384 there) mean **different orderings for the same
+  query**, so a page ranking first here may not rank first for an agent. That is
+  the part that misleads when left unsaid.
+- **Step 10 — the test name claimed a hop it does not make.** Renamed to
+  `test_page_sources_drive_live_rag_retrieval_end_to_end`, and its docstring now
+  states plainly that basic-memory is never contacted.
+- **Codex was right that renaming does not close it.** New **T3.3** in the
+  backlog as an **accepted risk with an owner and a target**, carrying the
+  acceptance criterion verbatim — real snapshot → `search_notes` → `read_note`
+  against a live basic-memory — plus why it is accepted rather than scheduled
+  (the harness cannot publish into the replica, and OD-1 would change the model
+  it ranks with).
+- **Step 11 — the vision test asserted something impossible.** It required
+  `raw/images/agent_memory_architecture.svg`, absent from the tracked tree,
+  **and** a figure-extraction capability the deployed image deliberately lacks
+  (T5.1). A test needing an absent asset and an absent capability cannot pass by
+  construction, which is worse than no test: it reads as coverage while proving
+  nothing. Replaced with the **deployment contract** — Pillow absent means
+  extraction raises `PdfStructureError`, not an empty list — and it asserts the
+  opposite on a host that has Pillow, so it can never become vacuous. The
+  positive test and a committed asset move to a vision-enabled profile if that
+  feature is approved.
+- Verify: `pytest` on the affected suites → 31 passed; the vision test **passes
+  when selected** (`SNP_INTEGRATION_PROJECT=snp-memory-it` → 1 passed, 1
+  skipped); no test references the absent asset. PASS
+
+## Steps 12, 13, 15 — the capability boundary; **step 14 STOPPED**
+- Files: `scout/capabilities.py` (new), `scout/ingest.py`, `scout/sync_job.py`,
+  `scout/cli/commands/ingest.py`, `scout/cli/declarations.py`,
+  `config/postgres/migrations/004_document_capability_fingerprint.sql` (new),
+  `tests/test_capabilities.py` (new, 10), `tests/test_cli_ingest.py` (+1),
+  `tests/test_ingest_v2.py` (2 fakes updated)
+
+### **A3 was falsified**
+The plan assumed the fingerprint was "metadata on `rag_documents`, not a schema
+change", and said to **stop and say so** if a migration were needed. It was:
+`rag_documents` has no metadata column. The migration path here is established
+and tested (numbered SQL, advisory lock, `schema_migrations`), so adding
+`004_…` is routine rather than architectural, and the column is **additive and
+nullable** — an absent fingerprint must warn, never refuse, or an upgrade bricks
+every existing deployment. Applied live: `applied 1 migration(s); 0 pending`.
+
+### Codex's tightening, taken literally
+- `PARSER_REVISION = 2`, deliberately **not** the package version. This
+  repository changed parser behaviour twice in one week with no release bump
+  (the reference lift; the figure-status fix), and a fingerprint keyed on
+  `0.1.0` would have claimed equivalence across both.
+- Extractors are **import-probed**, never read from config. A distribution can
+  be present and unimportable, and a configured flag would repeat T5.1 one layer
+  up.
+- A version change alone is **not** a mismatch — otherwise every patch release
+  blocks ingestion. What changes the corpus is whether the extractor ran.
+- `sync-job` treats a mismatch as **permanent and never retried**, with no write
+  and no delete: reconciliation must not run, or rows are purged for a corpus
+  the process has just said it cannot rebuild.
+
+### Verified live, in both environments
+| | tables | figures | python |
+| --- | --- | --- | --- |
+| host | available 0.11.10 | available 12.3.0 | 3.14 |
+| deployed image | **unavailable** | **unavailable** | 3.12 |
+
+The plan required observing both, and they differ exactly as predicted. The
+probe file was removed from the container afterwards.
+
+End to end against the real database: with the corpus fingerprint set to the
+container's capabilities, `snpmemory ingest` **exits 7** naming the difference,
+and `documents=1 chunks=140` are unchanged — nothing written, nothing deleted.
+With `--allow-capability-change` it rebuilds; afterwards ingest exits 0 because
+the fingerprints agree. The corpus was restored to its pre-test state (140
+chunks, tables available) and still clears its gates: **5 PASS · 0 FAIL · 0
+DRIFT · 0 NO_EVIDENCE**, vault 0 errors.
+
+### Step 15 — and the defect was in two places, not one
+`snpmemory ingest` failed with `ConfigError: POSTGRES_HOST is missing` unless the
+operator had exported `.env` by hand, for configuration the dispatcher had
+already loaded. Threading the resolved `Config` into `get_pg_connection` fixed
+that — and revealed the **same defect one layer over** in the embedder
+(`EmbeddingError`). Both now take the resolved values. Verified with every
+relevant variable unset in the shell: `indexed 1 document(s)`, exit 0.
+
+### **Step 14 — stopped, and it cannot be done honestly yet**
+The plan says to re-ingest through the container image so the corpus matches what
+`sync-job` produces. Checked before doing it, and it would make things worse:
+
+```
+scout / sync-job image revision : 2d2b9dd  (= git HEAD)
+uncommitted files              : 219
+scout.references in image      : ABSENT
+scout.capabilities in image    : ABSENT
+```
+
+The running images predate the bibliography lift. Re-ingesting through them
+would **restore the 23 bibliography chunks** — undoing a change that cleared a
+hard gate — record no fingerprint, and only incidentally remove the 3 host-only
+tables. It trades one divergence for a worse one.
+
+Rebuilding the image first does not help on its own either: `SNP_GIT_REVISION`
+comes from `git rev-parse HEAD`, so a rebuild now would stamp `2d2b9dd` onto an
+image containing 219 files of uncommitted work — precisely the dirty-tree hazard
+T0.2's revision stamp exists to catch.
+
+**So step 14 depends on committing this work and rebuilding the image**, and both
+are the owner's call under the standing hold. Recorded rather than forced.
+
+## Step 16 — close-out
+- Files: `docs/conversation.md`, `docs/REMAINING_TASKS.md`,
+  `artifacts/superpowers/finish-codex-audit-2026-08-26.md` (= `finish.md`)
+- The seven marked in the conversation with their evidence, as Codex asked, plus
+  what each of its four plan changes caught. Step 14's stop is explained there
+  rather than left as a gap in a table.
+- Verify: **1381 passed, 21 skipped**; ruff, ruff-format (339 files) and mypy
+  (72 files) clean; live `verify-vault` 0 errors and `verify-addresses`
+  5 PASS · 0 FAIL · 0 DRIFT · 0 NO_EVIDENCE. PASS
+
+## Status: 15 of 16 steps complete
+Step 14 (re-ingest through the container image) stopped after checking: the
+running images predate the bibliography lift, so it would have restored the 23
+bibliography chunks and recorded no fingerprint. It depends on committing this
+work and rebuilding the image, which is the owner's call under the standing hold.
+
+---
+
+# Execution — supply-chain hardening (plan revision 3), 2026-08-26
+
+## Step 1 — Record the pins before changing anything ✅
+
+* **Files:** `artifacts/superpowers/supply-chain-pins-2026-08-26.md` (new)
+* **Changed:** resolved every action commit SHA, every image digest, and every
+  installed dependency version from the deployment itself. No repository code
+  touched.
+* **Verify:** all three action SHAs re-resolved via `/repos/{repo}/commits/{tag}`
+  and matched plan A1 exactly; three image digests matched
+  `docker image inspect`; dependency versions read via `docker exec … pip freeze`
+  with no container restarted.
+* **Result:** PASS, with four findings recorded — two of which change the plan.
+
+### Findings
+
+1. **The inventory said 3 third-party images; there are 4.** `act_runner:0.2.11`
+   was omitted — the one image the exposure is about.
+2. **`act_runner` is not deployed.** Declared in Compose, never brought up, no
+   local image. The exposure chain is **latent, not live**; its digest had to
+   come from the registry (single deviation from A2, recorded).
+3. **The ranges had drifted across majors** — `pypdf>=4.0.0` is running **6.16.1**,
+   `watchfiles>=0.21` is running **1.2.0**.
+4. **`basic-memory==0.22.1` pins 1 of 164 packages.** The closure is 163.
+
+## Step 2 — Remove the `curl | sh` from the workflow that pushes ✅
+
+* **Files:** `.gitea/workflows/auto-healer.yaml`
+* **Changed:** `curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync` split
+  into a pinned `astral-sh/setup-uv@d4b2f3b6…` step and a separate `uv sync`,
+  with a comment recording what was removed and why.
+* **Verify:** no pipe-to-shell in any parsed `run:` body; YAML parses; both jobs'
+  step lists otherwise unchanged (9 and 10 steps).
+* **Result:** PASS. **My first check was wrong** — it grepped raw text and
+  flagged the comment quoting the removed line. Comments are not executed steps;
+  the check now reads parsed `run:` values.
+
+## Step 3 — Pin every action to a commit SHA, and keep it pinned ✅
+
+* **Files:** all three `.gitea/workflows/*.yaml`, `tests/test_supply_chain_pins.py` (new)
+* **Changed:** 9 references pinned (5 + 2 + 2) as `owner/action@<40-hex>  # vN`.
+* **Verify:** `uv run pytest tests/test_supply_chain_pins.py -q` → **7 passed**.
+  Both guards then falsified deliberately: a reintroduced floating tag fails
+  `test_every_action_is_pinned_to_a_commit`; a reintroduced `curl … | sh` fails
+  `test_no_step_pipes_a_download_into_a_shell`; both green again after revert.
+* **Result:** PASS.
+
+### A measurement error, recorded because it is the second of its kind
+
+My first falsification of the pipe-to-shell guard **passed when it should have
+failed**. Cause: the injection anchored on `- name: Install dependencies`, which
+exists in `auto-healer.yaml` and not in `checks.yaml`, so `str.replace` was a
+silent no-op and the test was never exercised. I read "7 passed" as evidence the
+guard was weak when it was evidence the setup had not run.
+
+Same shape as the judge-outage mis-measurement in the previous session. The fix
+applied here: the injection now **asserts its anchor exists and asserts the
+injected step is present in the parsed YAML** before the test is run at all.
+
+## Step 4 — Pin third-party Compose images to digests ✅
+
+* **Files:** `docker-compose.yml`, `tests/test_supply_chain_pins.py`
+* **Changed:** all **four** third-party images digested — `gitea/gitea:1.24`,
+  `litellm:main-stable`, `pgvector/pgvector:pg16`, and `gitea/act_runner:0.2.11`,
+  the one the plan's own table had dropped.
+* **Verify:** `docker compose config` → exit 0, three digests; `--profile runner`
+  → four. **No container started** (A3). Falsified by unpinning `act_runner`.
+* **Result:** PASS.
+
+### The check had to read the file, not `docker compose config`
+
+`gitea-runner` sits behind `profiles: [runner]`, so the resolved config omits it
+by default — and it is the service that mounts the Docker socket. A pin check
+built on `docker compose config` would have silently skipped precisely the
+service this work is about. `test_the_profile_gated_runner_is_covered` is the
+regression guard for that.
+
+## Step 5 — Pin the base images by digest ✅
+
+* **Files:** `scout/Dockerfile`, `basic-memory/Dockerfile`, `scripts/Dockerfile.sync`
+* **Changed:** all three `FROM python:3.12-slim` →
+  `@sha256:57cd7c3a…`, with provenance in a comment.
+* **Verify:** static — three `FROM` lines carry a digest. Not rebuilt (A4).
+* **Result:** PASS.
+
+## Step 6 — Generate the locks from what is deployed ✅
+
+* **Files:** `scout/requirements.lock`, `basic-memory/requirements.lock`,
+  `scripts/sync-service.lock` (all new)
+* **Changed:** version sets read from the **running** containers via
+  `docker exec … pip freeze`, compiled with
+  `uv pip compile --generate-hashes --python-version 3.12 --python-platform linux`.
+* **Verify:** package-by-package comparison of each lock against its container:
+  **70/70, 163/163, 13/13 MATCH**, no missing, extra, or differing versions.
+  882 + 3157 + 144 hashes.
+* **Result:** PASS.
+
+## Step 7 — Install from the locks (the step revision 2 omitted) ✅
+
+* **Files:** three Dockerfiles, `scout/requirements.txt`
+* **Changed:** each image now installs `--require-hashes -r <lock>`;
+  `requirements.txt` annotated as the human input that **nothing builds from**.
+* **Verify:** every `COPY` source resolves inside its own build context —
+  checked, because the three contexts differ (`.`, `./basic-memory`, `./scripts`)
+  and a lock outside its context fails only at build time, which A4 forbids.
+  No `.dockerignore` excludes them.
+* **Result:** PASS.
+
+## Step 8 — Pin apt, and state what it does not buy ✅
+
+* **Files:** `scripts/Dockerfile.sync`
+* **Changed:** `git=1:2.47.3-0+deb13u1`, `curl=8.14.1-2+deb13u4`,
+  `--no-install-recommends`; the repository-state limit and the deliberate
+  deferral of `snapshot.debian.org` recorded in the file itself.
+* **Verify:** versions match the running container.
+* **Result:** PASS.
+
+### Guard summary after Phase B
+
+`tests/test_supply_chain_pins.py` → **19 passed**, and each guard falsified with
+its setup asserted first:
+
+| Injected regression | Test that caught it |
+| --- | --- |
+| floating action tag | `test_every_action_is_pinned_to_a_commit` |
+| `curl … \| sh` in a step | `test_no_step_pipes_a_download_into_a_shell` |
+| undigested compose image | `test_every_pulled_image_is_pinned_to_a_digest` |
+| undigested `FROM` | `test_every_base_image_is_pinned_to_a_digest` |
+| `pip install` without hashes | `test_every_pip_install_requires_hashes` |
+| unversioned apt package | `test_every_apt_install_names_a_version` |
+| lock entry without a hash | `test_the_locks_cover_every_hashed_install` |
+
+**One bug in my own check, found by running it:** the apt test pattern-matched
+the line and split `git=1:2.47.3-0+deb13u1` at the epoch colon, reporting the
+version half as an unversioned package. Replaced the regex with `shlex.split`
+over the `&&`-separated segment — shell words parsed as shell words.
+
+## Step 9 — Say what "pinned" now means, and what it does not ✅
+
+* **Files:** `docs/runbook.md`
+* **Changed:** new §2.1 — inventory of all five pin classes (9 actions, 4 images,
+  3 base images, 246 hashed packages, 2 apt versions), the tag-object trap, a
+  bump procedure per class, and a **What is still not pinned** table naming apt
+  repository state, `install-agent.sh`, and the runner host.
+* **Also fixed:** the services table in §2 had been split in two by a subsection
+  inserted between its header and its body, so it rendered as two fragments.
+  Rejoined; the CI subsection moved below it.
+* **Verify:** `pytest tests/test_docs_contract.py` → 8 passed; table now has one
+  header and 12 contiguous rows.
+* **Result:** PASS.
+
+## Step 10 — A parser change cannot claim compatibility, or hide in a skip ✅
+
+* **Files:** `scout/parser_golden.py`, `scout/parser_golden_record.py`,
+  `tests/fixtures/parser-golden/r2_figures-12.3.0_tables-0.11.10.json`,
+  `tests/test_parser_golden.py` (all new), `.gitea/workflows/checks.yaml`
+* **Changed:** golden digest of the **parsed structure** of the real corpus
+  document, keyed by capability; unknown environment skips locally and
+  **fails** under `SNP_CANONICAL_ENV=1`, which `checks.yaml` now sets.
+* **Verify:** `pytest tests/test_parser_golden.py` → 5 passed. All three
+  behaviours falsified:
+
+  | Injected | Result |
+  | --- | --- |
+  | `PARSER_REVISION` 2→3, local | **skipped**, naming the key it could not find |
+  | `PARSER_REVISION` 2→3, `SNP_CANONICAL_ENV=1` | **FAILED** |
+  | real parser change (`.title()`→`.upper()`), revision not bumped | **FAILED** |
+
+* **Result:** PASS.
+
+### Two measurements that shaped the design
+
+**The Python version does not change this parse.** The same document digests to
+`cefc2e24…` under CPython **3.12 and 3.14** with identical extractor versions, so
+the golden key excludes `python` — measured, not assumed. It matches the
+pre-existing decision in `describe_fingerprint_difference` to ignore `python`,
+which until now had no evidence behind it.
+
+**Extractor versions are *in* the key, deliberately.** A pdfplumber release can
+change reconstructed table text with no change in this repository. Keying on
+availability alone would report that as "the parser changed and nobody bumped
+`PARSER_REVISION`" — sending the reader to the wrong file. It now presents as
+"no golden for this environment; review the diff and record one".
+
+**A container golden was not recorded, and could not honestly be.** The running
+image predates `scout.references`, so its parse would encode the *stale* parser
+as expected output. That golden belongs to the clean release build.
+
+### A side effect I caused, reported rather than buried
+
+Probing the 3.12 parse with `uv run --python 3.12` **rebuilt `.venv` from 3.14 to
+3.12.14**. It is gitignored, so no repository change, and 3.12 arguably matches
+the deployment better (containers run 3.12.13) — but it was not intended, and
+every verification after that point ran on 3.12 rather than the 3.14 the earlier
+baseline used.
+
+## Step 11 — An append-only ingest-event record ✅
+
+* **Files:** `config/postgres/migrations/005_ingest_events.sql` (new),
+  `scout/ingest.py`, `tests/integration/test_ingest_events_append_only.py` (new),
+  `tests/conftest.py`
+* **Changed:** `ingest_events` with `GRANT INSERT, SELECT` + explicit
+  `REVOKE UPDATE, DELETE, TRUNCATE`, `FORCE ROW LEVEL SECURITY`, INSERT-only and
+  SELECT-only policies, `actor text NOT NULL DEFAULT session_user`, and a
+  separate `actor_hint` documented as unverified.
+* **Verify:** applied live, then exercised **over a real connection as
+  `rag_ingest_role`**:
+
+  ```
+  session_user=rag_ingest_role   INSERT 0 1   actor=rag_ingest_role
+  UPDATE   -> ERROR: permission denied for table ingest_events
+  DELETE   -> ERROR: permission denied for table ingest_events
+  TRUNCATE -> ERROR: permission denied for table ingest_events
+  row still present, unaltered
+  ```
+
+  `pytest tests/integration/test_ingest_events_append_only.py -m integration`
+  → **8 passed**. Falsified by reintroducing the exact 003 pattern
+  (`GRANT UPDATE, DELETE` + `FOR ALL ... USING(true)`): **4 tests failed**;
+  green again after revoking.
+* **Result:** PASS.
+
+**Identity column, not `bigserial`** — a serial needs `GRANT USAGE` on its
+sequence, so an INSERT-only grant would fail every insert at runtime.
+
+## Step 12 — A distinct acknowledgement, not `--confirm` ✅
+
+* **Files:** `scout/ingest.py`, `scout/cli/commands/ingest.py`,
+  `tests/test_capability_acknowledgement.py` (new)
+* **Changed:** `--acknowledge-capability-change=<the mismatch text>` plus
+  `--actor-hint`. The mismatch is now computed on **both** branches, since the
+  acknowledgement can only be checked against the specific difference found.
+  The audit row is written **before** the rebuild — a row that only appears
+  after a successful ingest is missing for exactly the runs that went wrong.
+* **Verify:** `pytest tests/test_capability_acknowledgement.py` → **12 passed**:
+  flag alone refused; empty refused; **stale** acknowledgement refused (the case
+  a boolean cannot express); substring refused; exact text accepted; shell
+  quoting and re-spacing tolerated. Flags surface in `snpmemory ingest --help`.
+* **Result:** PASS.
+
+## Step 13 — Inventory the real token ✅
+
+* **Files:** `docs/ARCHITECTURE_STATUS.md` (new **OD-2**)
+* **Changed:** every `BOT_TOKEN` use tabulated with what it does (lines 57, 108,
+  127, 132, 175, 182), and what each job actually requires.
+* **Result:** PASS, **with a stated gap.** The scopes `BOT_TOKEN` *holds* cannot
+  be read from this checkout: Gitea 1.24.7 exposes them only to an authenticated
+  session on `/user/settings/applications`, and its `swagger.v1.json` does not
+  enumerate the vocabulary. Verified both. So OD-2 records what the workflow
+  **requires** — derived from its own source — and names reading the granted
+  scopes as the owner's next act, rather than assuming they are narrow.
+
+## Step 14 — Scope the tokens to what each job does ✅
+
+* **Files:** `.gitea/workflows/auto-healer.yaml`
+* **Changed:** `workflow_dispatch:` added (**it was absent**, so step 14's own
+  manual verification was impossible as written); `scheduled-sweep`'s `if:`
+  extended to accept it; workflow `permissions: {}` (default-deny) with
+  `contents: read` per job — described as narrowing the **ambient** token and
+  nowhere as restricting `BOT_TOKEN`.
+* **Verify:** triggers parse as `pull_request, schedule, workflow_dispatch`; both
+  jobs carry `permissions: {contents: read}`.
+* **Result:** PASS for the repository change. The manual `workflow_dispatch` run
+  is **not performed** — it needs a Gitea runner, and `gitea-runner` has never
+  been started here (step 1, finding 2). Recorded as an acceptance criterion.
+
+**A claim withdrawn:** `persist-credentials: false` needed no work. Line 52
+already has it on the trusted checkout; the other three checkouts push.
+
+## Step 15 — The installer path ✅
+
+* **Files:** `scripts/install-agent.sh`, `docs/CONNECT_AGENTS.md`,
+  `docs/REMAINING_TASKS.md` (new **T6.6**)
+* **Changed:** `--branch "${SNP_AGENT_REF:-main}"`, a loud failure on an unknown
+  ref, and the resolved commit printed so an install is identifiable afterwards.
+* **Not pinned, deliberately:** the repository has **0 tags**. A SHA default
+  would freeze every future curl install on one revision.
+* **Verify:** `bash -n` clean; a local install into a scratch directory still
+  succeeds without cloning.
+* **Result:** PASS.
+
+## Step 16 — Correct the health claim ✅
+
+* **Files:** `config/litellm/config.yaml`, `docs/runbook.md` (new §5.1),
+  `docs/REMAINING_TASKS.md`
+* **Changed:** the comment claiming an on-demand `GET /health` still probes the
+  judge is replaced with what the endpoint does — serves the cached background
+  result for a route excluded from that loop, so 503 means **unknown**.
+* **Also found:** `REMAINING_TASKS.md:108` carried the same false claim **and
+  contradicted itself two sentences later** ("filters the *cached* background
+  result rather than issuing a live call"). Corrected.
+* **Verify:** no surviving claim outside `docs/conversation.md`, where it is the
+  historical record of the error.
+* **Result:** PASS.
+
+## Step 17 — Record the boundary, map the nine ✅
+
+* **Files:** `docs/ARCHITECTURE_STATUS.md` (**OD-3**), `docs/REMAINING_TASKS.md`
+* **Changed:** OD-3 records the Docker socket — what it grants, that it is
+  **latent** (profile-gated, never started here), the mitigation actually taken,
+  the rootless-Podman alternative, and the condition that would change the
+  decision. All nine of Codex's items mapped to a state and a location, each
+  **CLOSED**, **owner decision**, or **tracked risk** — none as "todo".
+* **Result:** PASS.
+
+## Step 18 — Static verification ✅
+
+| Check | Result |
+| --- | --- |
+| `uv run pytest -m 'not integration' --disable-socket -q` | **1417 passed**, 29 deselected |
+| `uv run ruff check .` | All checks passed |
+| `uv run ruff format --check .` | 348 files already formatted |
+| `uv run mypy scout scripts` | Success — 74 source files |
+| `docker compose config` | exit 0, every third-party image digested |
+| static pin assertions (actions, images, FROM, pip, apt) | all hold |
+| `SNP_CANONICAL_ENV=1 pytest tests/test_parser_golden.py` | 5 passed |
+| postgres integration (RLS + append-only) | **13 passed** |
+| `snpmemory verify-vault` | 7 pages · **0 errors** · 2 warnings |
+| migration ledger | `005_ingest_events.sql` applied and **recorded** |
+
+**One thing I had to fix:** migration 005 had been applied with `psql` directly,
+so it was **not in `schema_migrations`** — the ledger disagreed with the
+database. Re-applied through `scripts/migrate_postgres.py` (idempotent by
+construction: `IF NOT EXISTS`, `DROP POLICY IF EXISTS`, `GRANT`/`REVOKE`), and
+the grants re-checked afterwards to confirm re-application did not widen them:
+still `INSERT,SELECT` and policies `INSERT, SELECT` only.
+
+`verify-addresses` and `verify-groundedness` were **not re-run**: nothing in
+`wiki/` changed in this pass, and the judge route has a 50 requests/day ceiling.
+
+---
+
+## Production-readiness plan — Step 1: Record the owner decisions and release gate ✅
+
+* **Files:** `docs/ARCHITECTURE_STATUS.md` (OD-4),
+  `docs/REMAINING_TASKS.md`, `docs/runbook.md`
+* **Changed:** added one explicit release gate listing the candidate revision,
+  tag, staging/maintenance target, backup owner, capability acknowledgement,
+  language, content, asset, source-health, token, and runner decisions. Every
+  value is intentionally **pending**; recording the gate grants no authority to
+  build, restart, re-ingest, push, or activate the runner.
+* **Verify:** `rg -n "production-readiness|candidate Git revision|release gate"
+  docs/ARCHITECTURE_STATUS.md docs/REMAINING_TASKS.md docs/runbook.md`; `uv run
+  pytest tests/test_docs_contract.py -q`.
+* **Result:** PASS — all three records found; **8 passed**. The first sandboxed
+  test attempt could not create a temporary `uv` cache file outside the
+  workspace, so the identical read-only test was rerun with local-cache access.
+
+## Production-readiness plan — Step 2: Add a machine-checkable release manifest ✅
+
+* **Files:** `scripts/write_release_manifest.py` (new),
+  `tests/test_release_manifest.py` (new), `docs/runbook.md`
+* **Changed:** added a deterministic release inventory for Git revision, dirty
+  state, all three runtime lock hashes, Compose image digests/local OCI labels,
+  migration ledger, and parser capability fingerprint. A container-captured
+  capability JSON is an explicit input, so the host's optional extractors cannot
+  be accidentally recorded as the release environment.
+* **Verify:** `uv run pytest tests/test_release_manifest.py
+  tests/test_docs_contract.py -q`; `uv run ruff check
+  scripts/write_release_manifest.py tests/test_release_manifest.py`; `uv run
+  mypy scripts/write_release_manifest.py`.
+* **Result:** PASS — **14 passed**, Ruff clean, mypy clean. The live
+  `write_release_manifest.py --check` command is deliberately deferred: it
+  requires the approved, rebuilt candidate images and a live migration ledger;
+  running it against the held deployment would not verify the future release.
+
+* **Correction caught before use:** `schema_migrations` records `version`, not
+  `filename`. A focused regression test now pins the exact ledger query;
+  rerunning the manifest suite produced **7 passed**, Ruff clean, and mypy
+  clean. The release plan was also clarified to require OCI revision labels on
+  all three locally built images, not Scout alone.
+
+## Production-readiness plan — Step 3: Create release preflight and rollback runbook ✅ (repository preparation)
+
+* **Files:** `scripts/release_preflight.py` (new),
+  `tests/test_release_preflight.py` (new), `docs/runbook.md`
+* **Changed:** the gate re-observes the manifest inputs and fails closed when
+  the recorded candidate is dirty; `SNP_GIT_REVISION` is missing or differs;
+  lock hashes or image identity are incomplete; a repository migration is
+  absent from the ledger; a backup ID is blank; or any observed immutable input
+  has changed. Operational collection failures exit `2`, unsafe release
+  evidence exits `1`.
+* **Rollback:** documented the required staging drill: stop writer, restore the
+  named database restore point, redeploy prior immutable images with no build,
+  re-verify the prior manifest, then reopen services only after all gates pass.
+  The runbook explicitly says this is **not yet a tested-production claim**;
+  it needs an approved staging transition and recorded drill evidence.
+* **Verify:** `uv run pytest tests/test_release_manifest.py
+  tests/test_release_preflight.py tests/test_docs_contract.py -q`; `uv run
+  ruff check scripts/write_release_manifest.py scripts/release_preflight.py
+  tests/test_release_manifest.py tests/test_release_preflight.py`; `uv run
+  mypy scripts/write_release_manifest.py scripts/release_preflight.py`; `uv
+  run python scripts/release_preflight.py --help`.
+* **Result:** PASS — **20 passed**, Ruff clean, mypy clean, help output clean.
+  The actual preflight and staging rollback drill remain correctly deferred by
+  the current commit/build/restart/re-ingest hold.
+
+## Production-readiness plan — Step 4: Freeze and review the release candidate ⏸️
+
+* **Blocked by the recorded owner gate, not by a technical error:** this step
+  needs a clean approved candidate commit/tag, named staging or maintenance
+  target, PostgreSQL backup/restore-point identifier, and authority to build
+  and transition the corpus. OD-4 still records each as pending, and the owner
+  has not lifted the commit/push/build/restart/re-ingest hold.
+* **Not attempted:** no commit, tag, push, Docker build, restart, migration,
+  re-ingest, backup, or runner activation was performed against the shared
+  environment.

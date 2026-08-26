@@ -27,7 +27,7 @@ import urllib.error
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import asyncpg
 import httpx
@@ -52,7 +52,18 @@ class IndexOutcome:
 
 
 class SyncFailure(RuntimeError):
-    """Raised after a sync attempt cannot produce a valid corpus."""
+    """Raised after a sync attempt cannot produce a valid corpus.
+
+    Carries the failed outcome's `retryable` flag across the raise, because the
+    caller has to distinguish a dependency that is down (wait for it) from a
+    corpus or policy that is wrong (stop). Defaults to False: a failure of
+    unknown provenance is treated as permanent, so an unclassified fault stops
+    loudly instead of retrying forever.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @runtime_checkable
@@ -126,6 +137,11 @@ class PgVectorDirectIndexer:
     raw_dir: Path = Path("raw")
     acl_path: Path | None = None
     embedder: LiteLLMBatchEmbedder | None = None
+    #: Parsed documents reused across the retries of one cycle. The failure that
+    #: actually occurs is at the embed step, and re-parsing the whole corpus to
+    #: reach it again costs work that scales with the corpus rather than with the
+    #: failure. Cleared on success so it never outlives its cycle.
+    parse_cache: Any = None
 
     def acl_file(self) -> Path:
         """Return the ACL map governing `raw_dir`."""
@@ -137,7 +153,12 @@ class PgVectorDirectIndexer:
 
     async def index(self) -> IndexOutcome:
         """Runs the direct V2 ingestion pipeline on raw_dir under its ACL map."""
-        from scout.ingest import AclPolicyError, DocumentAclMap, ingest_directory
+        from scout.ingest import (
+            AclPolicyError,
+            CapabilityMismatchError,
+            DocumentAclMap,
+            ingest_directory,
+        )
 
         acl_file = self.acl_file()
         try:
@@ -147,15 +168,32 @@ class PgVectorDirectIndexer:
             # ingest role has no authority to publish anything.
             print(f"[sync-job] FATAL: {exc}", file=sys.stderr)
             return IndexOutcome(ok=False, status="error:AclPolicyError")
+        if self.parse_cache is None:
+            from scout.ingest import ParseCache
+
+            self.parse_cache = ParseCache()
         try:
             results = await ingest_directory(
                 dir_path=self.raw_dir,
                 acl=acl,
                 dry_run=False,
                 embedder=self.embedder,
+                parse_cache=self.parse_cache,
             )
             count = len(results)
+            # The cycle finished. Holding a corpus-worth of parsed text past
+            # here would save work nobody is going to repeat.
+            self.parse_cache.clear()
             return IndexOutcome(ok=True, status=f"ingested_{count}_files")
+        except CapabilityMismatchError as exc:
+            # Permanent, and never retried: retrying changes nothing because the
+            # difference is this process's own environment. Nothing was written
+            # and nothing was deleted — reconciliation must not run, or rows are
+            # purged for a corpus this process has just said it cannot rebuild.
+            print(f"[sync-job] FATAL: {exc}", file=sys.stderr)
+            return IndexOutcome(
+                ok=False, status="error:CapabilityMismatchError", retryable=False
+            )
         except Exception as exc:
             return IndexOutcome(
                 ok=False,
@@ -170,6 +208,12 @@ def _is_transient(exc: BaseException) -> bool:
     while current is not None:
         if isinstance(current, urllib.error.HTTPError):
             return 500 <= current.code < 600 or current.code in {408, 429}
+        # The async embed path (`aembed_texts`) raises httpx errors, not urllib
+        # ones. Without this branch a 500 from that path is called permanent
+        # while the identical 500 from the sync path is called transient.
+        if isinstance(current, httpx.HTTPStatusError):
+            status = current.response.status_code
+            return 500 <= status < 600 or status in {408, 429}
         if isinstance(current, urllib.error.URLError):
             return True
         if isinstance(
@@ -258,13 +302,17 @@ async def watch(
     if initial_sync:
         outcome = await sync_once(indexer, regen=regen)
         if not outcome.ok:
-            raise SyncFailure("initial synchronization failed")
+            raise SyncFailure(
+                "initial synchronization failed", retryable=outcome.retryable
+            )
         handled += 1
 
     async for _batch in changes:
         outcome = await sync_once(indexer, regen=regen)
         if not outcome.ok:
-            raise SyncFailure("watched synchronization failed")
+            raise SyncFailure(
+                "watched synchronization failed", retryable=outcome.retryable
+            )
         handled += 1
     return handled
 
@@ -289,37 +337,93 @@ def _set_readiness(path: Path, ready: bool) -> None:
     temporary.replace(path)
 
 
+#: First wait after a transient failure, in seconds.
+COLD_START_BASE_DELAY = 5.0
+#: Ceiling on the wait between attempts, in seconds.
+COLD_START_MAX_DELAY = 300.0
+
+
 async def _async_main(
     indexer: RagIndexer,
     raw_dir: Path,
     readiness_path: Path | None = None,
+    *,
+    base_delay: float = COLD_START_BASE_DELAY,
+    max_delay: float = COLD_START_MAX_DELAY,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
+    """Index `raw_dir`, then watch it, surviving a dependency outage.
+
+    Exiting on a transient failure looks like the disciplined thing to do —
+    crash, let the orchestrator restart. It is not, here. Docker's restart
+    backoff resets once a container survives 10 seconds, and this container
+    always does (a DNS timeout alone takes longer), so the backoff never
+    accumulates and the process simply respawns forever. On 2026-08-24 that
+    produced 238 restarts, each re-reading the corpus and re-attempting paid
+    embedding calls, while the health check reported `starting` throughout
+    because every restart reset its start period.
+
+    So the wait lives here instead. While a retryable failure persists the
+    process stays up with readiness **cleared**, which is what lets the health
+    check say `unhealthy` — alive and honestly reporting failure, rather than
+    absent. A permanent failure (a corpus whose ACL policy cannot be read) still
+    exits immediately: waiting cannot fix a configuration fault.
+
+    The attempt counter is never reset within a process lifetime. Resetting it
+    on a successful cycle is exactly the mistake Docker makes, and it is how a
+    slow failure loop reappears; the cost is that a later, unrelated blip waits
+    at the ceiling rather than at `base_delay`.
+    """
     marker = readiness_path or Path(
         os.environ.get("SYNC_READY_FILE", "/tmp/snp-sync-job/ready")
     )
     _set_readiness(marker, False)
-    # Cold-start startup sync before entering watch loop
-    outcome = await sync_once(indexer)
-    if not outcome.ok:
+    attempt = 0
+
+    async def back_off(reason: str) -> None:
+        nonlocal attempt
+        delay = min(max_delay, base_delay * (2**attempt))
+        attempt += 1
         print(
-            f"[sync-job] FATAL: Initial cold-start sync failed: {outcome.status}",
+            f"[sync-job] {reason}; dependency looks transient, retrying in {delay:.0f}s "
+            f"(attempt {attempt}, readiness cleared)",
             file=sys.stderr,
         )
-        raise SystemExit(1)
-    _set_readiness(marker, True)
-    try:
-        await watch(indexer, raw_dir=raw_dir, initial_sync=False)
-    except SyncFailure as exc:
-        _set_readiness(marker, False)
-        print("[sync-job] FATAL: watched sync failed", file=sys.stderr)
-        raise SystemExit(1) from exc
+        await sleep(delay)
+
+    while True:
+        outcome = await sync_once(indexer)
+        if not outcome.ok:
+            if not outcome.retryable:
+                print(
+                    f"[sync-job] FATAL: Initial cold-start sync failed: {outcome.status}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            await back_off(f"cold-start sync failed: {outcome.status}")
+            continue
+
+        _set_readiness(marker, True)
+        try:
+            await watch(indexer, raw_dir=raw_dir, initial_sync=False)
+        except SyncFailure as exc:
+            _set_readiness(marker, False)
+            if not exc.retryable:
+                print("[sync-job] FATAL: watched sync failed", file=sys.stderr)
+                raise SystemExit(1) from exc
+            await back_off(f"watched sync failed: {exc}")
+            continue
+        return
 
 
 def main() -> int:  # pragma: no cover - process entry point
     """Watch ``$RAW_DIR`` and reindex into PostgreSQL on every change."""
     raw_dir = Path(os.environ.get("RAW_DIR", "/data/raw"))
     configured_acl = os.environ.get("RAW_ACL_FILE", "").strip()
-    if "POSTGRES_HOST" in os.environ or os.environ.get("RAG_BACKEND", "pgvector") == "pgvector":
+    if (
+        "POSTGRES_HOST" in os.environ
+        or os.environ.get("RAG_BACKEND", "pgvector") == "pgvector"
+    ):
         direct = PgVectorDirectIndexer(
             raw_dir=raw_dir,
             acl_path=Path(configured_acl) if configured_acl else None,

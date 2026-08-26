@@ -89,9 +89,31 @@ _MIN_TOKEN_LENGTH = 3
 #: A hint made only of these is not a retrieval key, so it can never ground.
 _STOPWORDS = frozenset(
     {
-        "and", "are", "but", "can", "for", "from", "has", "have", "how", "into",
-        "its", "not", "the", "that", "then", "this", "was", "were", "what",
-        "when", "which", "will", "with", "you", "your",
+        "and",
+        "are",
+        "but",
+        "can",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "into",
+        "its",
+        "not",
+        "the",
+        "that",
+        "then",
+        "this",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "will",
+        "with",
+        "you",
+        "your",
     }
 )
 
@@ -180,6 +202,13 @@ class VerifyStatus(StrEnum):
     PASS = "pass"
     FAIL = "fail"
     DRIFT = "drift"
+    #: The addressed source yields no evidence **at all** in this scope — not
+    #: merely nothing for this hint. SH-2/SH-4: a source that is present on disk
+    #: and contributes nothing retrievable is a different problem from an
+    #: address whose phrase stopped matching, and it needs a different fix.
+    #: Collapsing the two is why "the linter accepts a source that yields no
+    #: evidence" was possible.
+    NO_EVIDENCE = "no_evidence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +228,17 @@ class VerifyReport:
         return self.scoped_address.address.hint
 
 
+def _neutral_probe(path: str) -> str:
+    """A query for asking *whether a source has chunks*, not which ones match.
+
+    The source's own filename: it is always non-empty, needs no knowledge of the
+    document, and under a path pre-filter the vector side returns nearest
+    neighbours regardless of what it says.
+    """
+    stem = Path(path).stem.replace("-", " ").replace("_", " ").strip()
+    return stem or path
+
+
 def _on_source_locs(chunks: Sequence[RagChunk]) -> tuple[str, ...]:
     """Locators carried by on-source chunks, best-scoring first, deduplicated."""
     return tuple(dict.fromkeys(chunk.loc for chunk in chunks if chunk.loc))
@@ -213,8 +253,12 @@ async def verify_address(
               *and* the hint is grounded in the text that file returned.
     ``DRIFT`` the file is retrievable for this hint but lost the ranking, or won
               it without the hint being grounded — the phrase needs re-minting.
-    ``FAIL``  the file contributed nothing at all: unindexed, empty after
-              parsing, or outside the declaring page's department.
+    ``FAIL``  the file is retrievable in this scope but contributes nothing for
+              *this hint* — the address is the problem.
+    ``NO_EVIDENCE``
+              the file yields nothing at all in this scope: unindexed, empty
+              after parsing, or outside the declaring page's department. The
+              *source* is the problem, and re-minting the hint cannot fix it.
     """
     scope = Scope(departments=frozenset({scoped_address.department}))
     address = scoped_address.address
@@ -233,12 +277,36 @@ async def verify_address(
             address.path,
         )
         if not on_source:
+            # Distinguish "this hint retrieves nothing from a source that is
+            # otherwise fine" from "this source yields nothing at all". A
+            # path-filtered retrieval returns nearest neighbours *within* that
+            # path, so a neutral probe that also comes back empty means there
+            # are no chunks to find — SH-2's blind spot, made visible.
+            probe = post_filter(
+                await backend.retrieve(
+                    _neutral_probe(address.path),
+                    path=address.path,
+                    scope=scope,
+                    k=DIAGNOSTIC_K,
+                ),
+                address.path,
+            )
+            if not probe:
+                return VerifyReport(
+                    scoped_address,
+                    VerifyStatus.NO_EVIDENCE,
+                    matched_files,
+                    (),
+                    "source yields no retrievable chunks in this scope — "
+                    "unindexed, empty after parsing, or outside this page's "
+                    "department; re-minting the hint cannot fix it",
+                )
             return VerifyReport(
                 scoped_address,
                 VerifyStatus.FAIL,
                 matched_files,
                 (),
-                "addressed file returned no chunks for this hint",
+                "source is retrievable but this hint returns nothing from it",
             )
 
     locs = _on_source_locs(on_source)
@@ -251,9 +319,7 @@ async def verify_address(
             f"another file outranks it (rank {TOP_RANK} required)",
         )
     if not hint_is_grounded(address.hint, [chunk.text for chunk in on_source]):
-        coverage = grounding_coverage(
-            address.hint, [chunk.text for chunk in on_source]
-        )
+        coverage = grounding_coverage(address.hint, [chunk.text for chunk in on_source])
         return VerifyReport(
             scoped_address,
             VerifyStatus.DRIFT,
@@ -322,7 +388,9 @@ def _collect_addresses(pages: Iterable[vault.Page]) -> list[ScopedAddress]:
 
 def _print_report(reports: Sequence[VerifyReport]) -> None:
     for report in reports:
-        identity = f"{report.scoped_address.page_path}#{report.scoped_address.source_index}"
+        identity = (
+            f"{report.scoped_address.page_path}#{report.scoped_address.source_index}"
+        )
         print(f"{report.status.value.upper():5s} {identity} -> {report.path}")
         if report.status is not VerifyStatus.PASS:
             if report.detail:
@@ -346,7 +414,8 @@ def _print_report(reports: Sequence[VerifyReport]) -> None:
         f"\n{len(reports)} address(es) checked — "
         f"{counts.get(VerifyStatus.PASS, 0)} PASS · "
         f"{counts.get(VerifyStatus.FAIL, 0)} FAIL · "
-        f"{counts.get(VerifyStatus.DRIFT, 0)} DRIFT"
+        f"{counts.get(VerifyStatus.DRIFT, 0)} DRIFT · "
+        f"{counts.get(VerifyStatus.NO_EVIDENCE, 0)} NO_EVIDENCE"
     )
 
 

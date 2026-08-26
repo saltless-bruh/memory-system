@@ -1,6 +1,6 @@
 ---
 name: superpowers-python-automation
-description: Implements reliable automations in Python for REST APIs: httpx/requests patterns, retries, timeouts, pagination, typing, config, logging, and tests. Use when writing Python scripts/services that call external APIs.
+description: "Implements reliable automations in Python for REST APIs: httpx/requests patterns, retries, timeouts, pagination, typing, config, logging, and tests. Use when writing Python scripts/services that call external APIs."
 ---
 
 # Python Automation Skill

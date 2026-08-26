@@ -1,7 +1,35 @@
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+# Base pinned by digest 2026-08-26. The tag is kept for readability; the
+# digest is the pin. Resolved from the layer the running images were built
+# on (python 3.12.13, Debian 13 trixie), not from what the tag means today.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ARG SNP_GIT_REVISION=unknown
+LABEL org.opencontainers.image.revision=$SNP_GIT_REVISION
+LABEL org.opencontainers.image.source=https://github.com/saltless-bruh/snp-memory-system
+# Versions read from the running container on 2026-08-26. `--no-install-recommends`
+# keeps the installed set to what was measured.
+#
+# LIMIT, stated because a version pin looks like more than it is: this pins the
+# *packages*, not the *repository state*. Debian drops superseded versions from
+# the pool, so one day this line stops resolving and the build fails with a 404.
+# `snapshot.debian.org` is the mechanism that fixes that, and it is deliberately
+# not adopted here — this change set builds no image (plan A4), and an untested
+# archive URL is exactly the kind of edit that looks complete and is not. It is
+# an acceptance criterion for the clean release build instead.
+#
+# The trade is accepted knowingly: a pin that stops resolving fails LOUDLY,
+# where the unpinned range drifted silently for months.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git=1:2.47.3-0+deb13u1 \
+        curl=8.14.1-2+deb13u4 \
+    && rm -rf /var/lib/apt/lists/*
 RUN git config --global --add safe.directory /vault-replica/repository
-RUN pip install --no-cache-dir fastapi uvicorn
+# Was `pip install fastapi uvicorn` — no versions at all, so every rebuild
+# installed whatever PyPI served that day.
+COPY sync-service.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock \
+    && rm /tmp/requirements.lock
 COPY host_sync.py /app/host_sync.py
 WORKDIR /app
 EXPOSE 9000

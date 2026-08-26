@@ -108,9 +108,7 @@ class StrictJWTVerifier(JWTVerifier):
         if not isinstance(subject, str) or not subject.strip():
             return None
         try:
-            departments = validate_caller_departments(
-                claims.get(self.department_claim)
-            )
+            departments = validate_caller_departments(claims.get(self.department_claim))
         except PolicyValidationError:
             return None
 
@@ -182,7 +180,9 @@ def _parse_mode(environ: Mapping[str, str]) -> AuthMode:
     try:
         return AuthMode(raw_mode)
     except ValueError as exc:
-        raise AuthConfigError("SCOUT_AUTH_MODE must be jwt, static, or development") from exc
+        raise AuthConfigError(
+            "SCOUT_AUTH_MODE must be jwt, static, or development"
+        ) from exc
 
 
 def _load_jwt_config(environ: Mapping[str, str]) -> AuthConfig:
@@ -238,7 +238,9 @@ def _read_static_token_mapping(environ: Mapping[str, str]) -> str:
     try:
         raw_mapping = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise AuthConfigError("SCOUT_STATIC_TOKENS_FILE must contain UTF-8 JSON") from exc
+        raise AuthConfigError(
+            "SCOUT_STATIC_TOKENS_FILE must contain UTF-8 JSON"
+        ) from exc
     if not raw_mapping.strip():
         raise AuthConfigError("SCOUT_STATIC_TOKENS_FILE must not be empty")
     return raw_mapping

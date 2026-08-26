@@ -18,10 +18,17 @@ on:
       - 'wiki/**/*.md'
   schedule:
     - cron: '0 0 * * 0'   # weekly sweep, Sunday 00:00
+  # A weekly cron cannot verify itself: a change to the scheduled path would
+  # otherwise be observed for the first time, unattended, up to seven days
+  # later. `checks.yaml` and `security.yaml` already carry this trigger; the one
+  # workflow that pushes and opens PRs did not.
+  workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+# These govern the **ambient Actions token** only. Every privileged operation
+# below authenticates with `secrets.BOT_TOKEN` instead — see OD-2 in
+# docs/ARCHITECTURE_STATUS.md — so narrowing them narrows something real but
+# does NOT restrict the credential that pushes. Default-deny, then grant per job.
+permissions: {}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -32,6 +39,10 @@ jobs:
   pr-heal:
     if: github.event_name == 'pull_request'
     runs-on: self-hosted
+    # Reads the base checkout with the ambient token. The push to the
+    # contributor's branch at the end of this job uses BOT_TOKEN, not this.
+    permissions:
+      contents: read
     env:
       HEALER_BACKEND: pgvector
       POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'postgres' }}
@@ -44,7 +55,7 @@ jobs:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://internal-telemetry:4317"
     steps:
       - name: Checkout immutable trusted base code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: trusted
@@ -52,7 +63,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout exact untrusted PR objects without executing them
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           token: ${{ secrets.BOT_TOKEN }}
           ref: ${{ github.event.pull_request.head.sha }}
@@ -61,7 +72,7 @@ jobs:
           persist-credentials: true
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: '3.12'
 
@@ -112,8 +123,13 @@ jobs:
   # Scheduled sweep: drift in already-merged content -> healer opens a heal PR
   # ---------------------------------------------------------------------------
   scheduled-sweep:
-    if: github.event_name == 'schedule'
+    # `workflow_dispatch` is included so this path can be exercised on demand
+    # rather than waited for. The heal itself is unchanged: it still opens a
+    # human-reviewed PR and never commits to main (R-6.4/R-7.3).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
+    permissions:
+      contents: read
     env:
       HEALER_BACKEND: pgvector
       POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'postgres' }}
@@ -127,19 +143,27 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           token: ${{ secrets.BOT_TOKEN }}
           ref: main
           fetch-depth: 0
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: '3.12'
 
-      - name: Install uv and dependencies
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync --extra dev
+      # Was: `curl -LsSf https://astral.sh/uv/install.sh | sh`. A weekly,
+      # unattended fetch of an unpinned installer, executed on a self-hosted
+      # runner that holds BOT_TOKEN and mounts the Docker socket. Whatever that
+      # URL served on Sunday ran as the runner user with push credentials in
+      # reach. The pinned action fetches a named release instead.
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+
+      - name: Install dependencies
+        run: uv sync --extra dev
 
       - name: Security vulnerability audit (pip-audit)
         run: uv run --with pip-audit pip-audit

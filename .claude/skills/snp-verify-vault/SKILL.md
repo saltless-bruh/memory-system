@@ -1,7 +1,6 @@
 ---
 name: snp-verify-vault
-description: >-
-  Use this skill when validating that the Wiki knowledge vault is mechanically sound, frontmatter contracts are intact, and all RAG addresses resolve against PostgreSQL.
+description: "Use this skill when validating that the Wiki knowledge vault is mechanically sound, frontmatter contracts are intact, and all RAG addresses resolve against PostgreSQL."
 ---
 
 # snp-verify-vault

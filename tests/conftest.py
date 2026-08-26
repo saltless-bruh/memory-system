@@ -15,6 +15,9 @@ _POSTGRES_ROLES = {
     "test_postgres_migrations.py": ("QUERY", "INGEST", "MIGRATION"),
     "test_postgres_rls.py": ("QUERY", "INGEST", "MIGRATION"),
     "test_ingest_v2.py": ("INGEST",),
+    # Needs MIGRATION as well as INGEST: the audit rows it writes can only be
+    # cleaned up by an identity the append-only grant does not constrain.
+    "test_ingest_events_append_only.py": ("INGEST", "MIGRATION"),
     "test_eval_benchmarks.py": ("QUERY", "INGEST"),
 }
 
@@ -74,14 +77,30 @@ def isolate_offline_tests_from_ambient_live_env(
 
 @pytest.fixture(autouse=True)
 def require_live_integration_prerequisites(request: pytest.FixtureRequest) -> None:
-    """Fail any explicitly selected live test clearly instead of skipping."""
+    """Skip live tests that were not asked for; fail the ones that were.
+
+    The distinction is the whole point, and getting it wrong costs more than it
+    looks. `SNP_INTEGRATION_PROJECT` unset means *nobody asked for these* — a
+    developer running `pytest` on a laptop with no stack. Failing there makes the
+    default test command never report green, which trains everyone to read past
+    the summary line, which is exactly the condition under which a real
+    regression gets waved through.
+
+    Set-but-incomplete is the opposite case: somebody asked for the live suite
+    and it cannot run. That is a failure, loudly, with the missing names — a
+    skip there would hide the thing they were trying to test.
+    """
     if request.node.get_closest_marker("integration") is None:
         return
 
-    missing: list[str] = []
+    # Not selected. Not a failure: a skip says "not run", which is true.
     if os.environ.get("SNP_INTEGRATION_PROJECT") != "snp-memory-it":
-        missing.append("SNP_INTEGRATION_PROJECT=snp-memory-it")
+        pytest.skip(
+            "live integration tests not selected — set "
+            "SNP_INTEGRATION_PROJECT=snp-memory-it to run them"
+        )
 
+    missing: list[str] = []
     module_name = Path(str(request.node.path)).name
     if module_name in _POSTGRES_ROLES:
         missing.extend(_postgres_prerequisites(_POSTGRES_ROLES[module_name]))

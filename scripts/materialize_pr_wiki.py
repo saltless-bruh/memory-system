@@ -114,7 +114,9 @@ def _head_blob(repo: Path, head_sha: str, path: str) -> bytes | None:
         or fields[1] != b"blob"
         or returned_path != path
     ):
-        raise MaterializationError("wiki Markdown must be a non-executable regular blob")
+        raise MaterializationError(
+            "wiki Markdown must be a non-executable regular blob"
+        )
     oid = fields[2].decode("ascii")
     try:
         blob_size = int(_git(repo, "cat-file", "-s", oid).strip())
@@ -252,7 +254,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             export_wiki_markdown(args.source, args.destination)
             print("Exported trusted wiki Markdown to the PR checkout.")
     except (MaterializationError, OSError) as exc:
-        print(f"PR wiki materialization failed ({type(exc).__name__}).", file=sys.stderr)
+        print(
+            f"PR wiki materialization failed ({type(exc).__name__}).", file=sys.stderr
+        )
         return 1
     return 0
 

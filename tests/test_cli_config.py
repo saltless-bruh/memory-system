@@ -68,8 +68,14 @@ def test_remote_gets_connection_keys_only(tmp_path: Path) -> None:
         start=tmp_path,
     )
     assert config.get("SCOUT_URL") == "http://scout:8080"
-    for forbidden in ("POSTGRES_QUERY_PASSWORD", "LITELLM_MASTER_KEY", "GEMINI_API_KEY"):
-        assert config.get(forbidden) is None, f"{forbidden} leaked into a REMOTE command"
+    for forbidden in (
+        "POSTGRES_QUERY_PASSWORD",
+        "LITELLM_MASTER_KEY",
+        "GEMINI_API_KEY",
+    ):
+        assert config.get(forbidden) is None, (
+            f"{forbidden} leaked into a REMOTE command"
+        )
 
 
 def test_local_gets_the_repo_set(tmp_path: Path) -> None:
@@ -84,7 +90,12 @@ def test_local_gets_the_repo_set(tmp_path: Path) -> None:
 
 def test_provider_keys_are_in_no_allowlist() -> None:
     """GEMINI_API_KEY reaches the gateway through compose, never through the CLI."""
-    for key in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "WEBHOOK_SECRET"):
+    for key in (
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "WEBHOOK_SECRET",
+    ):
         assert key not in REPO_KEYS
         assert key not in CONNECTION_KEYS
 
@@ -110,7 +121,9 @@ def test_resolution_never_writes_to_os_environ(tmp_path: Path) -> None:
 
 def test_process_environment_beats_the_project_file(tmp_path: Path) -> None:
     _repo(tmp_path, "POSTGRES_HOST=from-file\n")
-    config = resolve(Prerequisite.LOCAL, environ={"POSTGRES_HOST": "from-env"}, start=tmp_path)
+    config = resolve(
+        Prerequisite.LOCAL, environ={"POSTGRES_HOST": "from-env"}, start=tmp_path
+    )
     assert config.get("POSTGRES_HOST") == "from-env"
 
 

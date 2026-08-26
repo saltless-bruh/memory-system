@@ -1,6 +1,6 @@
 ---
 name: superpowers-debug
-description: Systematic debugging: reproduce, isolate, form hypotheses, instrument, fix, and add regression tests. Use when troubleshooting errors, failing tests, or unexpected behavior.
+description: "Systematic debugging: reproduce, isolate, form hypotheses, instrument, fix, and add regression tests. Use when troubleshooting errors, failing tests, or unexpected behavior."
 ---
 
 # Debug Skill

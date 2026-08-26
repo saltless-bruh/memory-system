@@ -1,0 +1,23 @@
+{
+  "_comment": "Golden digest of the PARSED STRUCTURE of the corpus document, for one capability environment. Re-record with `uv run python -m scout.parser_golden_record`. A mismatch means the parser produces different output than when this was recorded: either the change was deliberate, in which case bump PARSER_REVISION in scout/capabilities.py and re-record, or it was not, in which case find out why.",
+  "fingerprint": {
+    "extractors": {
+      "figures": {
+        "available": true,
+        "version": "12.3.0"
+      },
+      "tables": {
+        "available": true,
+        "version": "0.11.10"
+      }
+    },
+    "parser_revision": 2,
+    "python": "3.12",
+    "schema_version": 1
+  },
+  "key": "r2_figures-12.3.0_tables-0.11.10",
+  "recorded": "2026-08-26",
+  "section_count": 26,
+  "sha256": "cefc2e2490f9fc76feea23dc68d154d090f0e10f9cc6ed607e1507672d31f26c",
+  "source_uri": "raw/papers/computers-12-00091.pdf"
+}

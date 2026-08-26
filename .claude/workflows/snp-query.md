@@ -7,11 +7,11 @@ description: Answers technical questions using dual-layer memory (Wiki Knowledge
 Follow the 5-step dual-layer retrieval protocol strictly:
 
 1. **Step 1 — Search Knowledge Vault**:
-   - Query `basic-memory.search_notes(query)` over MCP to find top relevant notes in the compiled Knowledge Vault.
+   - Query `snp-wiki.search_notes(query)` over MCP to find top relevant notes in the compiled Knowledge Vault.
    - Inspect the returned note summaries and identifiers.
 
 2. **Step 2 — Read Compiled Note**:
-   - Call `basic-memory.read_note(page_slug)` on the top candidate page.
+   - Call `snp-wiki.read_note(page_slug)` on the top candidate page.
    - Parse `## Technical Specifications` and inspect frontmatter `sources[]`.
 
 3. **Step 3 — Sufficiency Evaluation (Rule R-5.1)**:

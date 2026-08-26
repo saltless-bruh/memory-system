@@ -80,7 +80,9 @@ def _sign(body: bytes) -> str:
     return hmac.new(TEST_SECRET, body, hashlib.sha256).hexdigest()
 
 
-async def _post(client: AsyncClient, payload: object, *, event: str = "push") -> Response:
+async def _post(
+    client: AsyncClient, payload: object, *, event: str = "push"
+) -> Response:
     body = json.dumps(payload).encode("utf-8")
     return await client.post(
         "/hooks/wiki-update",
@@ -104,7 +106,9 @@ def _workspace_bytes(root: Path) -> dict[str, bytes | str]:
     return captured
 
 
-async def test_liveness_is_independent_from_initial_readiness(client: AsyncClient) -> None:
+async def test_liveness_is_independent_from_initial_readiness(
+    client: AsyncClient,
+) -> None:
     live = await client.get("/live")
     ready = await client.get("/ready")
 
@@ -127,7 +131,9 @@ async def test_ready_reports_published_commit(
     response = await client.get("/ready")
     assert response.status_code == 200
     assert response.json()["status"] == "ready"
-    assert response.json()["published_commit"] == _run_git(upstream, "rev-parse", "HEAD")
+    assert response.json()["published_commit"] == _run_git(
+        upstream, "rev-parse", "HEAD"
+    )
 
 
 def test_startup_begins_not_ready_and_queues_one_sync() -> None:
@@ -140,7 +146,9 @@ def test_startup_begins_not_ready_and_queues_one_sync() -> None:
     assert host_sync._read_state()["syncing"] is True
 
 
-async def test_webhook_rejects_missing_or_invalid_signature(client: AsyncClient) -> None:
+async def test_webhook_rejects_missing_or_invalid_signature(
+    client: AsyncClient,
+) -> None:
     unsigned = await client.post("/hooks/wiki-update", json={"ref": "refs/heads/main"})
     invalid = await client.post(
         "/hooks/wiki-update",
@@ -153,14 +161,18 @@ async def test_webhook_rejects_missing_or_invalid_signature(client: AsyncClient)
 
 
 @pytest.mark.parametrize("payload", [[], "text", 7, None])
-async def test_webhook_rejects_non_object_payloads(client: AsyncClient, payload: object) -> None:
+async def test_webhook_rejects_non_object_payloads(
+    client: AsyncClient, payload: object
+) -> None:
     response = await _post(client, payload)
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Payload must be a JSON object"
 
 
-async def test_webhook_rejects_malformed_json_without_scheduling(client: AsyncClient) -> None:
+async def test_webhook_rejects_malformed_json_without_scheduling(
+    client: AsyncClient,
+) -> None:
     body = b"{not-json"
     with patch("scripts.host_sync._perform_git_sync") as sync:
         response = await client.post(
@@ -183,7 +195,9 @@ async def test_webhook_rejects_malformed_json_without_scheduling(client: AsyncCl
         "",
     ],
 )
-async def test_webhook_requires_exact_target_branch_ref(client: AsyncClient, ref: str) -> None:
+async def test_webhook_requires_exact_target_branch_ref(
+    client: AsyncClient, ref: str
+) -> None:
     with patch("scripts.host_sync._perform_git_sync") as sync:
         response = await _post(client, {"ref": ref})
 
@@ -193,7 +207,9 @@ async def test_webhook_requires_exact_target_branch_ref(client: AsyncClient, ref
     sync.assert_not_called()
 
 
-async def test_webhook_queues_target_push_before_completion(client: AsyncClient) -> None:
+async def test_webhook_queues_target_push_before_completion(
+    client: AsyncClient,
+) -> None:
     with patch("scripts.host_sync._start_daemon_sync") as start:
         response = await _post(client, {"ref": "refs/heads/main"})
 
@@ -203,7 +219,9 @@ async def test_webhook_queues_target_push_before_completion(client: AsyncClient)
     start.assert_called_once_with(host_sync.VAULT_DIR)
 
 
-async def test_ping_and_non_push_events_never_schedule_sync(client: AsyncClient) -> None:
+async def test_ping_and_non_push_events_never_schedule_sync(
+    client: AsyncClient,
+) -> None:
     with patch("scripts.host_sync._perform_git_sync") as sync:
         ping = await _post(client, {"zen": "test"}, event="ping")
         issue = await _post(client, {"ref": "refs/heads/main"}, event="issues")
@@ -249,7 +267,9 @@ def test_sync_never_changes_a_separate_developer_repository(
     (developer / "wiki" / "delete.md").unlink()
     _run_git(developer, "mv", "src/rename.py", "src/renamed.py")
     (developer / "src" / "untracked.py").write_text("untracked\n", encoding="utf-8")
-    (developer / "wiki" / "untracked.md").write_text("untracked wiki\n", encoding="utf-8")
+    (developer / "wiki" / "untracked.md").write_text(
+        "untracked wiki\n", encoding="utf-8"
+    )
     before_bytes = _workspace_bytes(developer)
     before_status = _run_git(developer, "status", "--porcelain=v1", "-z")
     monkeypatch.setenv("GIT_SYNC_URL", str(upstream))
@@ -329,7 +349,9 @@ def test_publish_failure_keeps_previous_current_pointer(
         assert host_sync._perform_git_sync(str(replica)) is False
 
     assert os.readlink(replica / "current") == current_before
-    assert (replica / "current" / "wiki" / "page.md").read_text(encoding="utf-8") == "# Wiki v1\n"
+    assert (replica / "current" / "wiki" / "page.md").read_text(
+        encoding="utf-8"
+    ) == "# Wiki v1\n"
 
 
 def test_prune_failure_keeps_previous_current_pointer(
@@ -364,13 +386,17 @@ def test_snapshot_pruning_retains_current_and_previous(
     third = _commit_wiki(upstream, "# Wiki v3\n")
     assert host_sync._perform_git_sync(str(replica)) is True
 
-    snapshots = {path.name for path in (replica / "snapshots").iterdir() if path.is_dir()}
+    snapshots = {
+        path.name for path in (replica / "snapshots").iterdir() if path.is_dir()
+    }
     assert snapshots == {second, third}
     assert first not in snapshots
     assert os.readlink(replica / "current") == f"snapshots/{third}"
 
 
-def test_nonempty_unmarked_replica_root_is_rejected_without_changes(tmp_path: Path) -> None:
+def test_nonempty_unmarked_replica_root_is_rejected_without_changes(
+    tmp_path: Path,
+) -> None:
     unsafe = tmp_path / "developer-like-directory"
     unsafe.mkdir()
     file = unsafe / "important.txt"
@@ -387,7 +413,9 @@ def test_project_workspace_is_rejected() -> None:
         host_sync._validate_replica_root(host_sync.PROJECT_ROOT)
 
 
-def test_sync_calls_are_serialized(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_sync_calls_are_serialized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     active = 0
     maximum_active = 0
     first_entered = threading.Event()
@@ -414,10 +442,14 @@ def test_sync_calls_are_serialized(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     monkeypatch.setattr(host_sync, "_sync_once", fake_sync_once)
     results: list[bool] = []
     first = threading.Thread(
-        target=lambda: results.append(host_sync._perform_git_sync(str(tmp_path / "replica")))
+        target=lambda: results.append(
+            host_sync._perform_git_sync(str(tmp_path / "replica"))
+        )
     )
     second = threading.Thread(
-        target=lambda: results.append(host_sync._perform_git_sync(str(tmp_path / "replica")))
+        target=lambda: results.append(
+            host_sync._perform_git_sync(str(tmp_path / "replica"))
+        )
     )
     threads = [first, second]
     first.start()

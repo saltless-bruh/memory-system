@@ -1,0 +1,70 @@
+# .gitea/workflows/checks.yaml
+# Offline correctness gate for code and configuration changes.
+#
+# This is the workflow that was missing. `auto-healer.yaml` checks the vault and
+# `security.yaml` scans for secrets; nothing ran the test suite, the linter, the
+# formatter or the type checker on a code or Compose change.
+#
+# **Offline by construction.** No LiteLLM, no PostgreSQL, no judge, no secret.
+# It can only fail on this repository's own code, which is the only thing it
+# should be able to fail on — a gate that fails for environmental reasons trains
+# people to ignore it.
+#
+# The 21 live-integration tests are deselected by marker rather than left to the
+# skip fixture. The fixture skips when SNP_INTEGRATION_PROJECT is *unset*, so a
+# runner that happens to export it would turn live tests on; `-m 'not
+# integration'` deselects them whatever the environment says.
+
+name: Offline Checks
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Pinned here rather than assumed from the runner image. `auto-healer.yaml`
+      # assuming a capable self-hosted runner is an assumption, not a
+      # reproducibility guarantee, and a new workflow should not inherit it.
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        with:
+          version: "0.5.29"
+
+      - name: Sync the locked environment
+        run: uv sync --frozen --all-extras
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy scout scripts
+
+      # This is the environment whose parse defines the corpus, so an
+      # unrecognised parsing environment is a finding here rather than a skip.
+      # Locally the same test skips with the key it could not find; a skip in a
+      # suite that already reports 21 of them is not a guard.
+      - name: Declare this the canonical environment
+        run: echo "SNP_CANONICAL_ENV=1" >> "$GITHUB_ENV"
+
+      # `--disable-socket` is already in `addopts`; stating it means this
+      # workflow does not depend on that staying true.
+      - name: Offline test suite
+        run: uv run pytest -m 'not integration' --disable-socket -q

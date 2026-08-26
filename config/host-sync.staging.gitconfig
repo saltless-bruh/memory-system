@@ -1,0 +1,4 @@
+[protocol "file"]
+	allow = always
+[safe]
+	directory = /staging-source

@@ -1,7 +1,6 @@
 ---
 name: snp-compile-wiki
-description: >-
-  Use this skill when synthesizing, compiling, or summarizing a newly indexed raw file (e.g. an RFC, a report, a spreadsheet) into the Wiki Knowledge Vault.
+description: "Use this skill when synthesizing, compiling, or summarizing a newly indexed raw file (e.g. an RFC, a report, a spreadsheet) into the Wiki Knowledge Vault."
 ---
 
 # snp-compile-wiki

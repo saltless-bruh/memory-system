@@ -28,7 +28,9 @@ async def provision_roles(conn: Any) -> list[str]:
             role_name,
         )
         if not exists:
-            raise ConfigError(f"database role {role_name} does not exist; run migrations first")
+            raise ConfigError(
+                f"database role {role_name} does not exist; run migrations first"
+            )
         statement = await conn.fetchval(
             "SELECT format('ALTER ROLE %I LOGIN PASSWORD %L', $1::text, $2::text)",
             role_name,

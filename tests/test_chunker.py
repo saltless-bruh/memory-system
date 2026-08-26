@@ -56,7 +56,10 @@ def test_contextual_chunker_basic() -> None:
     assert chunk.loc == "Section 1"
     assert chunk.metadata["title"] == "Sample RFC"
     assert chunk.metadata["author"] == "alice"
-    assert "[Document: Sample RFC | Source: raw/rfc/sample.md | Context: Section 1]" in chunk.context_prefix
+    assert (
+        "[Document: Sample RFC | Source: raw/rfc/sample.md | Context: Section 1]"
+        in chunk.context_prefix
+    )
     assert chunk.contextual_text.startswith("[Document: Sample RFC")
     assert "Short section content." in chunk.contextual_text
 
@@ -95,7 +98,9 @@ def test_split_csv_section_chunks_do_not_all_claim_the_parent_rows() -> None:
     assert [section.loc for section in doc.sections] == ["Rows 1-10"]
 
     # Production chunking parameters (scout.ingest builds ContextualChunker()).
-    chunks = ContextualChunker(max_chunk_chars=1000, overlap_chars=100).chunk_document(doc)
+    chunks = ContextualChunker(max_chunk_chars=1000, overlap_chars=100).chunk_document(
+        doc
+    )
 
     assert len(chunks) == 3
     locs = [chunk.loc for chunk in chunks]
@@ -119,7 +124,9 @@ def test_split_csv_section_chunks_do_not_all_claim_the_parent_rows() -> None:
 def test_unsplit_section_keeps_its_parsed_locator() -> None:
     """A section that fits in one chunk keeps the locator the parser assigned."""
     doc = parse_csv(_benchmark_csv(2), "raw/data/small.csv")
-    chunks = ContextualChunker(max_chunk_chars=1000, overlap_chars=100).chunk_document(doc)
+    chunks = ContextualChunker(max_chunk_chars=1000, overlap_chars=100).chunk_document(
+        doc
+    )
     assert [chunk.loc for chunk in chunks] == ["Rows 1-2"]
 
 
@@ -169,6 +176,7 @@ def test_litellm_batch_embedder_fails_fast_on_network_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When LiteLLM is unreachable, EmbeddingError must be raised."""
+
     def fail_request(*_args: Any, **_kwargs: Any) -> None:
         raise urllib.error.URLError("synthetic offline transport failure")
 
@@ -180,50 +188,66 @@ def test_litellm_batch_embedder_fails_fast_on_network_error(
         embedder.embed_texts(["test string"])
 
 
-def test_litellm_batch_embedder_rejects_dimension_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_litellm_batch_embedder_rejects_dimension_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeResponse:
         def __enter__(self) -> FakeResponse:
             return self
+
         def __exit__(self, *args: Any) -> None:
             pass
+
         def read(self) -> bytes:
             payload = {"data": [{"embedding": [0.1] * 512, "index": 0}]}
             return json.dumps(payload).encode("utf-8")
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse()
+    )
 
     embedder = LiteLLMBatchEmbedder(dim=1024, api_key="test-key")
     with pytest.raises(EmbeddingError, match="Embedding dimension mismatch"):
         embedder.embed_texts(["test text"])
 
 
-def test_litellm_batch_embedder_rejects_non_finite_values(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_litellm_batch_embedder_rejects_non_finite_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeResponse:
         def __enter__(self) -> FakeResponse:
             return self
+
         def __exit__(self, *args: Any) -> None:
             pass
+
         def read(self) -> bytes:
             # Inject float("nan") or float("inf") equivalent via JSON number issue or inf
             vec = [0.1] * 1023 + [float("inf")]
             payload = {"data": [{"embedding": vec, "index": 0}]}
             return json.dumps(payload).replace("Infinity", "1e999").encode("utf-8")
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse()
+    )
 
     embedder = LiteLLMBatchEmbedder(dim=1024, api_key="test-key")
     with pytest.raises(EmbeddingError, match="non-finite"):
         embedder.embed_texts(["test text"])
 
 
-def test_litellm_batch_embedder_successful_exact_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_litellm_batch_embedder_successful_exact_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, urllib.request.Request] = {}
 
     class FakeResponse:
         def __enter__(self) -> FakeResponse:
             return self
+
         def __exit__(self, *args: Any) -> None:
             pass
+
         def read(self) -> bytes:
             payload = {
                 "data": [
@@ -270,7 +294,9 @@ def test_litellm_batch_embedder_orders_out_of_order_response(
                 }
             ).encode()
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse()
+    )
     embedder = LiteLLMBatchEmbedder(dim=2, api_key="test-key")
     assert embedder.embed_texts(["first", "second"]) == [[0.1, 0.2], [0.3, 0.4]]
 
@@ -304,7 +330,9 @@ def test_litellm_batch_embedder_rejects_malformed_items(
         def read(self) -> bytes:
             return json.dumps({"data": items}).encode()
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse()
+    )
     embedder = LiteLLMBatchEmbedder(dim=2, api_key="test-key")
     texts = ["first"] if match == "non-numeric" else ["first", "second"]
     with pytest.raises(EmbeddingError, match=match):

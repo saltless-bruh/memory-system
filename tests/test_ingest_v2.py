@@ -24,7 +24,9 @@ from tests.fakes import FakeEmbedder
 
 def test_parse_markdown_file(tmp_path: Path) -> None:
     sample = tmp_path / "rfc101.md"
-    sample.write_text("# Overview\n\nSome overview text.\n\n## Details\n\nDeep technical detail.")
+    sample.write_text(
+        "# Overview\n\nSome overview text.\n\n## Details\n\nDeep technical detail."
+    )
 
     doc = parse_file(sample, base_dir=tmp_path)
     assert doc.title == "Rfc101"
@@ -38,7 +40,9 @@ def test_parse_markdown_file(tmp_path: Path) -> None:
 
 def test_parse_csv_file(tmp_path: Path) -> None:
     csv_file = tmp_path / "slo.csv"
-    csv_file.write_text("model,p95_ms,cost\ngpt-4o,250,5.0\nclaude-3-5-sonnet,220,3.0\n")
+    csv_file.write_text(
+        "model,p95_ms,cost\ngpt-4o,250,5.0\nclaude-3-5-sonnet,220,3.0\n"
+    )
 
     doc = parse_file(csv_file, base_dir=tmp_path)
     assert doc.title == "Slo"
@@ -88,7 +92,9 @@ def test_allowed_departments_are_canonical_document_acls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embedding_failure_happens_before_database_mutation(tmp_path: Path) -> None:
+async def test_embedding_failure_happens_before_database_mutation(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source.md"
     source.write_text("# Source\n\nContent", encoding="utf-8")
 
@@ -109,7 +115,9 @@ async def test_embedding_failure_happens_before_database_mutation(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_document_insert_failure_rolls_back_last_good_rows(tmp_path: Path) -> None:
+async def test_document_insert_failure_rolls_back_last_good_rows(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source.md"
     source.write_text("# Source\n\n" + ("content " * 200), encoding="utf-8")
 
@@ -119,7 +127,10 @@ async def test_document_insert_failure_rolls_back_last_good_rows(tmp_path: Path)
 
         @asynccontextmanager
         async def transaction(self) -> AsyncIterator[None]:
-            snapshot = {"title": self.state["title"], "chunks": list(self.state["chunks"])}
+            snapshot = {
+                "title": self.state["title"],
+                "chunks": list(self.state["chunks"]),
+            }
             try:
                 yield
             except Exception:
@@ -167,6 +178,11 @@ async def test_directory_batch_rolls_back_earlier_files_on_later_failure(
             self.rows = ["last-good"]
             self.closed = False
 
+        async def fetch(self, _sql: str, *_args: object) -> list[object]:
+            # No document carries a capability fingerprint, which is the
+            # backward-compatible case: ingestion proceeds rather than refusing.
+            return []
+
         @asynccontextmanager
         async def transaction(self) -> AsyncIterator[None]:
             snapshot = list(self.rows)
@@ -181,7 +197,9 @@ async def test_directory_batch_rolls_back_earlier_files_on_later_failure(
 
     conn = BatchConnection()
 
-    async def fake_get_connection() -> Any:
+    async def fake_get_connection(_env: object = None) -> Any:
+        # `get_pg_connection` now takes the resolved configuration, so a caller
+        # that already loaded `.env` does not lose it to an `os.environ` read.
         return conn
 
     async def fake_ingest(file_path: Path, **_kwargs: object) -> dict[str, Any]:
@@ -207,7 +225,9 @@ async def test_ingest_document_to_postgres() -> None:
     embedder = FakeEmbedder()
 
     with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
-        f.write("# Ingestion Test\n\nThis is a live integration test for Postgres V2 ingestion.")
+        f.write(
+            "# Ingestion Test\n\nThis is a live integration test for Postgres V2 ingestion."
+        )
         temp_path = Path(f.name)
 
     try:

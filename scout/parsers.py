@@ -164,6 +164,13 @@ def parse_pdf(
     if not sections:
         raise ParserError(f"PDF {source_uri} contains no extractable text")
 
+    # The reference list becomes structured metadata rather than retrievable
+    # prose. It is 18% of this corpus's chunks and dense with exact paper
+    # titles, so a query that *is* a paper title ranked the bibliography above
+    # the section discussing it — and the same entries are the citation graph's
+    # raw material. Moving them serves both. See `scout/references.py`.
+    sections = _lift_references(sections, metadata)
+
     sections.extend(_pdf_table_sections(file_path, source_uri, metadata))
     sections.extend(
         _pdf_figure_sections(file_path, source_uri, metadata, vision_extractor)
@@ -175,6 +182,49 @@ def parse_pdf(
         sections=sections,
         metadata=metadata,
     )
+
+
+def _lift_references(
+    sections: list[ParsedSection], metadata: dict[str, Any]
+) -> list[ParsedSection]:
+    """Move the reference list out of the retrievable text and into metadata.
+
+    Records `reference_count` and `references` either way, so a document with no
+    bibliography is distinguishable from one whose bibliography was not found —
+    the same distinction `figures_status` had to learn.
+    """
+    from scout.references import (
+        REFERENCE_HEADING,
+        parse_references,
+        split_reference_text,
+    )
+
+    full_text = "\n\n".join(s.text for s in sections if s.text.strip())
+    references = parse_references(full_text)
+    metadata["reference_count"] = len(references)
+    metadata["references"] = [r.to_dict() for r in references]
+    if not references:
+        metadata["references_status"] = "no_evidence"
+        return sections
+
+    drop, truncate = split_reference_text(sections)
+    metadata["references_status"] = "lifted"
+    kept: list[ParsedSection] = []
+    for index, section in enumerate(sections):
+        if index in drop:
+            continue
+        if index == truncate:
+            # Prose and bibliography share this page; keep the prose half.
+            heading = REFERENCE_HEADING.search(section.text)
+            head = section.text[: heading.start()].strip() if heading else section.text
+            if not head:
+                continue
+            kept.append(
+                ParsedSection(loc=section.loc, text=head, metadata=section.metadata)
+            )
+            continue
+        kept.append(section)
+    return kept
 
 
 def _pdf_table_sections(
@@ -191,7 +241,12 @@ def _pdf_table_sections(
         logger.warning("Table extraction unavailable for %s: %s", source_uri, exc)
         return []
 
-    metadata["tables_status"] = "ok"
+    # Three states, not two. `ok` means the parser ran and found something;
+    # `no_evidence` means it ran fully and found nothing — a fact about the
+    # document; `unavailable` means it could not look at all — a fact about the
+    # installation. Collapsing the last two is SH-4, and it is what let a
+    # document with 7 figures be recorded as a document with none.
+    metadata["tables_status"] = "ok" if tables else "no_evidence"
     metadata["table_count"] = len(tables)
     return [
         ParsedSection(
@@ -235,7 +290,9 @@ def _pdf_figure_sections(
 
     metadata["figure_count"] = len(figures)
     if not figures:
-        metadata["figures_status"] = "ok"
+        # The parser looked and this document captions no figures. That is a
+        # different statement from "could not look", which is `unavailable`.
+        metadata["figures_status"] = "no_evidence"
         return []
 
     have_route = bool(
@@ -267,7 +324,11 @@ def _pdf_figure_sections(
             if not described_text or not described_text.strip():
                 continue
             described += 1
-            body = f"{figure.caption}\n\n{described_text}" if figure.caption else described_text
+            body = (
+                f"{figure.caption}\n\n{described_text}"
+                if figure.caption
+                else described_text
+            )
             sections.append(
                 ParsedSection(
                     loc=figure.loc,
@@ -471,7 +532,9 @@ def parse_image(
             status, failure = VLM_STATUS_UNAVAILABLE, str(exc)
     else:
         status = VLM_STATUS_UNCONFIGURED
-        failure = "no vision route configured (LITELLM_BASE_URL/LITELLM_MASTER_KEY unset)"
+        failure = (
+            "no vision route configured (LITELLM_BASE_URL/LITELLM_MASTER_KEY unset)"
+        )
 
     if extracted_markdown and extracted_markdown.strip():
         doc = parse_markdown(extracted_markdown, source_uri)

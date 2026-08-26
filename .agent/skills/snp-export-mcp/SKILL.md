@@ -1,13 +1,12 @@
 ---
 name: snp-export-mcp
-description: >-
-  Use this skill when you are asked to help a user connect their AI coding agent or editor (like Claude, Cursor, or Gemini) to the SNP Memory System.
+description: "Use this skill when you are asked to help a user connect their AI coding agent or editor (like Claude, Cursor, or Gemini) to the SNP Memory System."
 ---
 
 # snp-export-mcp
 
 ## Purpose
-The SNP Memory System exposes two independent MCP endpoints (`basic-memory` at port 8765, and `scout` at port 8080). This skill teaches you how to generate the correct client configuration JSON so a new user can instantly plug their agent into the system.
+The SNP Memory System exposes three MCP servers: `snp-wiki` (port 8765, the compiled wiki), `scout` (port 8080, the only door into RAG), and `snpmemory` (a local stdio server for authoring and verification). This skill teaches you how to generate the correct client configuration JSON so a new user can instantly plug their agent into the system.
 
 ## How to use
 
@@ -39,5 +38,5 @@ The SNP Memory System exposes two independent MCP endpoints (`basic-memory` at p
    that the Claude Code `.mcp.json` file configures Desktop.
 
 3. **Verify Connectivity**
-   Test basic-memory search and an authenticated Scout fetch. A missing or
+   Test snp-wiki search and an authenticated Scout fetch. A missing or
    unauthorized bearer token must be rejected.

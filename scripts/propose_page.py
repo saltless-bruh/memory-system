@@ -144,8 +144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     staged = _staged_paths()
     if staged:
         print(
-            "Refusing to propose while staged paths exist: "
-            + ", ".join(sorted(staged))
+            "Refusing to propose while staged paths exist: " + ", ".join(sorted(staged))
         )
         return 1
 
@@ -195,7 +194,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selected=selected,
             )
             if restored:
-                print("PROPOSAL FAILED — restored the original branch and unstaged changes.")
+                print(
+                    "PROPOSAL FAILED — restored the original branch and unstaged changes."
+                )
             else:
                 print(
                     "PROPOSAL FAILED — automatic recovery was incomplete; "

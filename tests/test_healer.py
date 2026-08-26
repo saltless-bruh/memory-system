@@ -127,7 +127,9 @@ sources:
 """
 
 
-def test_apply_heal_edit_ignores_source_yaml_inside_the_page_body(tmp_path: Path) -> None:
+def test_apply_heal_edit_ignores_source_yaml_inside_the_page_body(
+    tmp_path: Path,
+) -> None:
     """m7: a fenced YAML block in the body must not shift the sources[] index.
 
     AGENTS.md itself carries such a block. The old whole-file `- path:` scan
@@ -187,7 +189,9 @@ def test_apply_heal_edit_never_rewrites_a_sources_block_in_the_page_body(
         department="infra",
         address=Address(path="raw/b.md", hint="second", loc="p.2"),
     )
-    assert not apply_heal_edit(_page(path), phantom, Address("raw/b.md", "healed", "p.2"))
+    assert not apply_heal_edit(
+        _page(path), phantom, Address("raw/b.md", "healed", "p.2")
+    )
     assert path.read_text(encoding="utf-8") == body
 
 
@@ -288,7 +292,11 @@ def test_apply_heals_rolls_back_only_healer_owned_bytes_on_failure(
         patch("scout.healer.apply_heal_edit", side_effect=[True, False]),
     ):
         assert apply_heals_in_place([_heal(first), _heal(second)]) == 1
-    assert (first_path.read_bytes(), second_path.read_bytes(), log.read_bytes()) == before
+    assert (
+        first_path.read_bytes(),
+        second_path.read_bytes(),
+        log.read_bytes(),
+    ) == before
     assert unrelated.read_text(encoding="utf-8") == "user bytes"
 
 
@@ -360,8 +368,12 @@ async def test_injected_drift_is_detected_healed_and_verifies_again(
         {
             # the declared hint now pulls a different file to the top
             "stale phrase": [
-                RagChunk(text="stale phrase", file_path="raw/other.md", score=1.0, loc="p.9"),
-                RagChunk(text="stale phrase", file_path="raw/a.md", score=0.1, loc="p.1"),
+                RagChunk(
+                    text="stale phrase", file_path="raw/other.md", score=1.0, loc="p.9"
+                ),
+                RagChunk(
+                    text="stale phrase", file_path="raw/a.md", score=0.1, loc="p.1"
+                ),
             ],
             # the page's own title still lands squarely on the addressed file
             "Title": [

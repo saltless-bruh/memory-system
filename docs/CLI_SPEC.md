@@ -1,7 +1,10 @@
 # `snpmemory` — CLI Specification
 
-> **Status: ACTIVE SPEC (not implemented).** Nothing here exists yet. This is the
-> contract the implementation must satisfy. Dated 2026-08-20.
+> **Status: ACTIVE SPEC, partially implemented.** Dated 2026-08-20, revised
+> 2026-08-24. `snpmemory schema` reports what actually exists; the tables below
+> are the contract, including the commands still to be built.
+> `tests/test_cli_schema_conformance.py` asserts that every implemented command
+> appears here, so this document cannot drift ahead of the registry unnoticed.
 
 ## Why this exists
 
@@ -29,6 +32,13 @@ consequences:
 Serving all three is what drives every rule below. This follows the conventions
 in [The CLI Spec](https://clispec.dev/) where they do not conflict with contracts
 this repository already relies on; divergences are stated explicitly.
+
+**Conformance is checked, not claimed.** `snpmemory schema` emits a document
+that validates against The CLI Spec **v0.3** (`clispec.dev/schema/v0.3.json`),
+vendored at `tests/fixtures/clispec-v0.3.json` and asserted by
+`tests/test_cli_schema_conformance.py`. The schema is vendored rather than
+fetched because this suite blocks network access; a conformance test that
+reaches the internet fails for reasons unrelated to the code.
 
 ---
 
@@ -69,6 +79,12 @@ accepted as an alias.
   divergence: existing CI steps and agent workflows read the text output of
   these scripts, and silently switching to JSON when piped would break them.
   Machines ask for `-o json` explicitly.
+
+  The spec permits this exactly once — *"a tool that keeps a human-readable
+  default MAY do so if it declares that default in the top-level `output`
+  field"* — so `schema` emits `"output": {"tty": "text", "piped": "text"}`.
+  That declaration is what makes the divergence conformant instead of silent,
+  and a consumer reads it rather than discovering the default by piping.
 * Every command supports every format. Not just the interesting ones — an agent
   has no way to know which commands were considered interesting.
 
@@ -113,8 +129,25 @@ scanner's diagnostics; the CLI holds the same line.
 snpmemory schema            # machine-readable description of every command
 ```
 
+```
+snpmemory schema <command>  # the same document, narrowed to one command
+```
+
 Emits commands, arguments, cardinality, output shape, and the error kinds each
 command can raise. **Agents should never need to parse `--help`.**
+
+That principle is load-bearing, and it is why every command declares `args` and
+`output_fields`. A command that takes flags and declares none teaches an agent
+that it takes none — worse than saying nothing. Command-level `errors` and
+`outcomes` are *references* into the tool-level tables, so an exit code is
+resolved in one place rather than restated per command and left to drift; the
+resolved codes are repeated under `error_codes` / `outcome_codes` for a reader
+that would otherwise have to join the tables itself.
+
+Narrowing keeps the tool-level tables, because a consumer reading one command
+still has to resolve the error kinds it references. An unknown name exits `3`;
+it never returns an empty document, which would turn a typo into "that command
+does not exist".
 
 `schema` must work **before anything else does** — no authentication, no config
 file, no network, no running stack. It is how a tool server learns what to
@@ -159,13 +192,17 @@ when it cannot meet them.
 **Remote** — needs only a server URL and token; works anywhere the package is
 installed.
 
-| Command | Purpose |
-|---|---|
-| `snpmemory search <query>` | wiki semantic search |
-| `snpmemory read <page>` | read a compiled page |
-| `snpmemory fetch --path --hint [--loc] [--dept]` | verbatim evidence |
+*(None yet. `search`, `read` and `fetch` were specified here and are implemented
+as **Local** instead — see the note below. The remote route to the vault remains
+the `snp-wiki` MCP server's `search_notes` / `read_note`.)*
 
 **Local** — needs a repository checkout.
+
+| Command | Purpose | Notable codes |
+|---|---|---|
+| `snpmemory search <query> [--limit]` | rank vault pages against a query. **Diagnostic, not parity**: a different engine from `snp-wiki` (LiteLLM/Gemini here, in-process FastEmbed 384 there), so orderings differ. `score` is an RRF weight, never a similarity | |
+| `snpmemory read <page>` | read a compiled page by title, slug, or path | `3` ambiguous title |
+| `snpmemory fetch --path --hint [--loc] --dept [--k]` | verbatim evidence | `1` no source · `3` unknown department |
 
 | Command | Purpose | Notable codes |
 |---|---|---|
@@ -176,8 +213,9 @@ installed.
 | `snpmemory propose --page` | PR-first commit | `7` pre-staged work |
 | `snpmemory ingest --path │ --dir` | index into pgvector | |
 | `snpmemory extract --path │ --dir` | figures + tables → `derived/` | `3` path outside `raw/` |
-| `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started |
-| `snpmemory mcp [--list-tools]` | serve these operations to an agent over stdio | |
+| `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started / failed / cancelled |
+| `snpmemory compile-cancel <handle>` | ask a running batch to stop at its next article boundary | `3` unknown handle |
+| `snpmemory mcp [--root] [--list-tools]` | serve these operations to an agent over stdio | `3` `--root` is not a checkout |
 | `snpmemory verify-vault` | frontmatter + index lint | `1` lint errors |
 | `snpmemory verify-addresses` | address merge gate | `1` drift/fail |
 | `snpmemory verify-groundedness` | faithfulness gate | `1` unsupported claims |
@@ -187,13 +225,32 @@ installed.
 | `snpmemory gate --mode pr│scheduled` | closed-loop CI state machine | |
 | `snpmemory up │ down │ status │ logs [service]` | stack lifecycle | `2` docker unavailable |
 | `snpmemory init` | bootstrap secrets and `.env` | |
-| `snpmemory install-agent [dir]` | install the agent package | |
-| `snpmemory mcp-config` | emit MCP client configuration | |
+| `snpmemory install-agent [dir] [--dry-run] [--confirm]` | install the agent package | `3` target is not a directory · `5` target already has `.agent/` |
+| `snpmemory mcp-config --client [--out] [--confirm]` | emit MCP client configuration | `5` `--out` exists · `7` target unparseable |
 | `snpmemory schema` | capability description | |
 
 `up`/`down`/`status`/`logs` shell out to `docker compose` and forward unknown
 arguments, so `snpmemory up --build` behaves as expected. They are a
 convenience over a tool people already know — not a replacement for it.
+
+### Why `search`, `read` and `fetch` are Local, not Remote
+
+They were specified as Remote. Implemented, all three answer from the checkout:
+
+* `read` parses the page file. A compiled page **is** a file in `wiki/`, and
+  reading it should not require the stack to be up or a token to exist.
+* `search` runs `scout.diy_engine.ScoutDiyEngine` over the same vault. It needs
+  the embedding route, but not a wiki server, so it works in CI from a clone.
+* `fetch` calls `scout.core.rag_fetch` — the same function the Scout MCP server
+  calls — against the RLS backend, so there is one retrieval path with one
+  post-filter and one no-source contract, not a second implementation behind an
+  HTTP hop.
+
+The tradeoff this accepts: none of the three is usable from a machine with no
+checkout. That audience is served by the MCP servers, which is what they are
+for. `R-4.1` is unaffected — `rag_fetch` on the Scout server remains the only
+*agent-facing* door into RAG, and `scout/cli/mcp_policy.py` keeps `fetch` off
+the local tool surface for exactly that reason.
 
 ## 7. Architecture
 

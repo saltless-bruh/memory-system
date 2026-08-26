@@ -101,8 +101,10 @@ def _wire_body_seams(
     monkeypatch.setattr("scripts.compile_note.collect_context", _collect)
     monkeypatch.setattr(
         "scripts.compile_note.generate_page_body",
-        lambda *_a, **_k: body
-        or GeneratedBody("A grounded sentence.", ("A grounded technical claim.",)),
+        lambda *_a, **_k: (
+            body
+            or GeneratedBody("A grounded sentence.", ("A grounded technical claim.",))
+        ),
     )
 
     async def _verify(*_a: object, **_k: object) -> GroundednessReport:
@@ -620,7 +622,7 @@ def valid_body() -> GeneratedBody:
         specifications=(
             "Acme sustains 4.2 requests per second on the measured configuration.",
             "The scheduler admits a request only when its KV blocks are resident.",
-        )
+        ),
     )
 
 
@@ -769,9 +771,15 @@ def test_body_is_generated_from_retrieved_passages_not_the_document(
     "bad",
     [
         {"summary": "A grounded sentence.", "specifications": ["## Injected heading"]},
-        {"summary": "A grounded sentence.", "specifications": ["See [[other-page]] for detail."]},
+        {
+            "summary": "A grounded sentence.",
+            "specifications": ["See [[other-page]] for detail."],
+        },
         {"summary": "A grounded sentence.", "specifications": ["---"]},
-        {"summary": "A grounded sentence.", "specifications": ["text with \x00 control char"]},
+        {
+            "summary": "A grounded sentence.",
+            "specifications": ["text with \x00 control char"],
+        },
         {"summary": "A grounded sentence.", "specifications": []},
         {"summary": "A grounded sentence.", "specifications": ["ok"], "extra": "field"},
         {"specifications": ["ok"]},
@@ -812,7 +820,10 @@ def test_body_request_fences_passages_with_a_nonce(
                     {
                         "message": {
                             "content": json.dumps(
-                                {"summary": "A grounded sentence.", "specifications": ["A grounded claim."]}
+                                {
+                                    "summary": "A grounded sentence.",
+                                    "specifications": ["A grounded claim."],
+                                }
                             )
                         }
                     }
@@ -970,7 +981,9 @@ def test_unconfigured_judge_reports_cleanly_and_writes_nothing(
     )
     monkeypatch.setattr("scripts.compile_note.PgVectorRlsBackend", MagicMock())
 
-    async def _collect(*_a: object, **_k: object) -> tuple[list[SourceContext], list[str]]:
+    async def _collect(
+        *_a: object, **_k: object
+    ) -> tuple[list[SourceContext], list[str]]:
         return list(retrieved), []
 
     monkeypatch.setattr("scripts.compile_note.collect_context", _collect)
@@ -978,13 +991,15 @@ def test_unconfigured_judge_reports_cleanly_and_writes_nothing(
     def _raise() -> object:
         raise GroundednessError("missing judge configuration: LITELLM_BASE_URL")
 
-    monkeypatch.setattr(
-        "scripts.compile_note.LiteLLMJudge", MagicMock(from_env=_raise)
-    )
+    monkeypatch.setattr("scripts.compile_note.LiteLLMJudge", MagicMock(from_env=_raise))
 
     with pytest.raises(CompileNoteError, match="not configured"):
         compile_note(
-            path, "Acme Capability", "concept", department="blueteam", loc="Section Acme"
+            path,
+            "Acme Capability",
+            "concept",
+            department="blueteam",
+            loc="Section Acme",
         )
 
     assert not (repo / "wiki" / "concepts" / "acme-capability.md").exists()

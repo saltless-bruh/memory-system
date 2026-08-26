@@ -292,7 +292,9 @@ class LiteLLMEmbedder:
                 if isinstance(index, bool) or not isinstance(index, int):
                     raise EmbeddingError("embedding response index must be an integer")
                 if index in indexed:
-                    raise EmbeddingError("embedding response contains a duplicate index")
+                    raise EmbeddingError(
+                        "embedding response contains a duplicate index"
+                    )
                 if not isinstance(raw_vector, list):
                     raise EmbeddingError("embedding response vector must be an array")
 
@@ -318,7 +320,9 @@ class LiteLLMEmbedder:
                 indexed[index] = vector
 
             if set(indexed) != set(range(len(texts))):
-                raise EmbeddingError("embedding response indices do not match the request")
+                raise EmbeddingError(
+                    "embedding response indices do not match the request"
+                )
             return [indexed[index] for index in range(len(texts))]
         finally:
             if owned_client:

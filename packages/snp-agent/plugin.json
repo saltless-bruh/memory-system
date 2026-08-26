@@ -1,0 +1,79 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "snp-memory-agent",
+  "version": "2.0.0",
+  "description": "Connects an AI coding agent to the SNP Memory System: a dual-layer institutional memory of a compiled Git wiki (Layer 1) and a PostgreSQL pgvector data vault reachable only through Scout's rag_fetch (Layer 2).",
+  "author": {
+    "name": "SNP Architecture Team"
+  },
+  "repository": "https://github.com/saltless-bruh/snp-memory-system",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "rag",
+    "knowledge-vault",
+    "institutional-memory",
+    "pgvector"
+  ],
+  "extensions": {
+    "io.snp.memory": {
+      "rbac": {
+        "departments": ["redteam", "blueteam", "ai_eng", "infra"],
+        "defaultScope": "ai_eng",
+        "note": "A tool argument may narrow the caller's departments but never expand them. The document ACL value `all` is not caller authority."
+      },
+      "entrypoints": {
+        "rules": "rules/snp-memory.md",
+        "instructions": "instructions/",
+        "workflows": "workflows/"
+      },
+      "requiredTools": {
+        "note": "The tools each server in mcp.json must actually offer. Tested against what the servers really serve, so a config cannot advertise a tool that does not exist.",
+        "snp-wiki": ["search_notes", "read_note", "write_note", "list_notes"],
+        "scout": ["rag_fetch"],
+        "snpmemory": ["verify", "plan_articles", "compile_plan", "compile_status"]
+      },
+      "ships": {
+        "note": "The authoritative list of what this package distributes. A component missing from the package, or present but undeclared, fails tests/test_agent_package_sync.py. The 25-file gap this closes was an accident that no test could see.",
+        "skills": [
+          "snp-auto-heal-vault",
+          "snp-bootstrap-system",
+          "snp-compile-wiki",
+          "snp-export-mcp",
+          "snp-ingest-raw-data",
+          "snp-rag-fetch",
+          "snp-search-wiki",
+          "snp-verify-vault"
+        ],
+        "workflows": [
+          "snp-compile.md",
+          "snp-heal.md",
+          "snp-ingest.md",
+          "snp-query.md",
+          "snp-reload.md",
+          "snp-verify.md"
+        ],
+        "instructions": [
+          "agent_guide.instructions.md",
+          "frontmatter_schema.instructions.md",
+          "query_protocol.instructions.md"
+        ],
+        "rules": ["snp-memory.md"]
+      },
+      "repoLocal": {
+        "note": "Deliberately NOT distributed. The superpowers layer is this repository's own development discipline, not part of the memory system's operating contract. Shipping it would tell a consumer's agent to write brainstorms and plans into their `artifacts/superpowers/`, for work that has nothing to do with the memory system. It lives in `.agent/` and `.claude/` and stays there.",
+        "prefixes": ["superpowers-"],
+        "rules": ["superpowers.md"],
+        "instructions": [
+          "Roadmap.instructions.md",
+          "coding_standards.instructions.md",
+          "documentation_standards.instructions.md",
+          "git_workflow.instructions.md",
+          "internet_search.instructions.md",
+          "task_completion_workflow.instructions.md",
+          "testing_strategy.instructions.md"
+        ]
+      }
+    }
+  }
+}

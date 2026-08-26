@@ -25,7 +25,9 @@ def test_bootstrap_secrets_are_restrictive_and_not_overwritten(tmp_path: Path) -
     }
 
     assert ensure_secrets(secret_dir) == []
-    assert {name: (secret_dir / name).read_bytes() for name in managed_names} == originals
+    assert {
+        name: (secret_dir / name).read_bytes() for name in managed_names
+    } == originals
 
     token_before_refresh = (secret_dir / "scout_test_token").read_bytes()
     (secret_dir / SCOUT_TOKEN_MAP_NAME).write_text("{}\n", encoding="utf-8")
@@ -43,5 +45,7 @@ def test_bootstrap_secrets_are_restrictive_and_not_overwritten(tmp_path: Path) -
     originals = {name: (secret_dir / name).read_bytes() for name in managed_names}
     rotated = ensure_secrets(secret_dir, rotate=True)
     assert {path.name for path in rotated} == managed_names
-    assert all((secret_dir / name).read_bytes() != originals[name] for name in managed_names)
+    assert all(
+        (secret_dir / name).read_bytes() != originals[name] for name in managed_names
+    )
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in rotated)

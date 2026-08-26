@@ -24,7 +24,7 @@ services:
   # R-9.3: if the company already runs GitLab, delete this service and
   # point WIKI_REMOTE at the existing GitLab repo. Nothing else changes.
   git:
-    image: gitea/gitea:1.24
+    image: gitea/gitea:1.24@sha256:918955f16b1e91732af6c449bb2db3a34271748dbed1ccfbae48f8a2fb5480b8
     restart: unless-stopped
     environment:
       USER_UID: "1000"
@@ -57,7 +57,7 @@ services:
   #   1. basic-memory's FastEmbed runs in-process, not through LiteLLM
   #   2. The member's own coding-agent model is OUTSIDE this boundary
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    image: ghcr.io/berriai/litellm:main-stable@sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af
     restart: unless-stopped
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
@@ -78,25 +78,58 @@ services:
       # Liveliness alone is NOT enough: the proxy answers 200 even when every
       # configured model group 404s upstream (a retired model reports healthy).
       # /health runs the real per-deployment check, so "healthy" means the
-      # snp-embed / snp-llm / snp-vlm routes actually resolve.
+      # probed routes actually resolve.
+      #
+      # Gate on the routes the stack cannot run without, and only those.
+      # `sync-job` waits on `condition: service_healthy` here, so every group
+      # named below can stop ingestion. snp-vlm is optional (nothing consumes it
+      # yet) and snp-judge runs on a free-tier key: gating on either would let a
+      # route nobody is calling take down the corpus. Both are still visible in
+      # `GET /health` — reported, not load-bearing.
+      #
+      # With `background_health_checks` on, `?model=` filters the cached result
+      # rather than issuing a live request, so this probe costs no tokens at any
+      # interval. It answers 503 when the targeted group has no healthy
+      # deployment, which is a distinct case from the endpoint being unreachable
+      # and is handled as such below.
+      #
       # The litellm image ships python but NOT curl, so probe via urllib.
       test:
         - CMD
         - python
         - -c
         - |
-          import json, os, sys, urllib.request
-          req = urllib.request.Request(
-              "http://localhost:4000/health",
-              headers={"Authorization": "Bearer " + os.environ["LITELLM_MASTER_KEY"]},
-          )
-          data = json.load(urllib.request.urlopen(req, timeout=20))
-          if data.get("unhealthy_count", 1) or not data.get("healthy_count", 0):
-              sys.exit("unhealthy model routes: %s" % data.get("unhealthy_endpoints"))
+          import json, os, sys, urllib.error, urllib.request
+
+          REQUIRED = ("snp-embed", "snp-llm")
+          key = os.environ["LITELLM_MASTER_KEY"]
+          broken = []
+          for group in REQUIRED:
+              request = urllib.request.Request(
+                  "http://localhost:4000/health?model=" + group,
+                  headers={"Authorization": "Bearer " + key},
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=10) as response:
+                      data = json.load(response)
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 503:
+                      broken.append(group + ": no healthy deployment")
+                      continue
+                  sys.exit("%s: /health returned %s" % (group, exc.code))
+              except Exception as exc:
+                  sys.exit("%s: health endpoint unreachable (%s)" % (group, exc))
+              if data.get("unhealthy_count", 1) or not data.get("healthy_count", 0):
+                  broken.append("%s: %s" % (group, data.get("unhealthy_endpoints")))
+          if broken:
+              sys.exit("unhealthy required routes: " + "; ".join(broken))
       interval: 30s
-      timeout: 25s
+      timeout: 15s
       retries: 5
       start_period: 90s
+      # Probe often while starting so a healthy proxy is marked healthy in
+      # seconds rather than after a full interval; steady state stays at 30s.
+      start_interval: 5s
 
   # ── Scout — the RAG bridge; the ONLY door into rag (R-4.1, R-4.2) ─
   # Agent-facing MCP exposing exactly one tool, `rag_fetch`. It reaches
@@ -106,7 +139,12 @@ services:
     build:
       context: .
       dockerfile: scout/Dockerfile
-    image: snp-scout
+      args:
+        # Stamped into org.opencontainers.image.revision so a stale image is
+        # detectable (scripts/preflight_stack.py). Unset in an export-only
+        # checkout, which the preflight reports as unverifiable, not as healthy.
+        SNP_GIT_REVISION: ${SNP_GIT_REVISION:-unknown}
+    image: ${SNP_SCOUT_IMAGE:-snp-scout}
     restart: unless-stopped
     environment:
       RAG_BACKEND: pgvector
@@ -148,7 +186,7 @@ services:
   # Same image as scout: watches raw/ and triggers a direct V2
   # PostgreSQL reindex on every change so dropped files are seen automatically.
   sync-job:
-    image: snp-scout
+    image: ${SNP_SCOUT_IMAGE:-snp-scout}
     restart: unless-stopped
     command: ["python", "-m", "scout.sync_job"]
     environment:
@@ -177,11 +215,16 @@ services:
       litellm:
         condition: service_healthy
     healthcheck:
+      # The marker is written only after a cold-start sync succeeds and is
+      # cleared while a retry is pending, so this reports the real state: a
+      # process waiting on a dependency stays up and reads `unhealthy` instead
+      # of vanishing into a restart loop (see scout/sync_job.py::_async_main).
       test: ["CMD-SHELL", "test -f /tmp/snp-sync-job/ready"]
       interval: 10s
       timeout: 3s
       retries: 6
       start_period: 30s
+      start_interval: 2s
 
   # ── basic-memory — LLM-Wiki engine, search/read MCP ────────────────
   # The single AGPL piece (runbook §4). Config baked from the validated
@@ -189,6 +232,9 @@ services:
   basic-memory:
     build:
       context: ./basic-memory
+      args:
+        SNP_GIT_REVISION: ${SNP_GIT_REVISION:-unknown}
+    image: ${SNP_BASIC_MEMORY_IMAGE:-snp-basic-memory}
     restart: unless-stopped
     ports:
       - "127.0.0.1:${BASIC_MEMORY_PORT:-8765}:8765"
@@ -207,9 +253,12 @@ services:
 
   # ── host-sync — Zero-Credential Git Puller (Phase 1) ─────────────
   host-sync:
-    build: 
+    build:
       context: ./scripts
       dockerfile: Dockerfile.sync
+      args:
+        SNP_GIT_REVISION: ${SNP_GIT_REVISION:-unknown}
+    image: ${SNP_HOST_SYNC_IMAGE:-snp-host-sync}
     restart: unless-stopped
     environment:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET}
@@ -230,7 +279,7 @@ services:
 
   # ── PostgreSQL 16 + pgvector — V2 Hybrid RAG Store (Phase 2) ─────
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-snp_rag}
@@ -250,7 +299,7 @@ services:
       start_period: 10s
 
   postgres-migrate:
-    image: snp-scout
+    image: ${SNP_SCOUT_IMAGE:-snp-scout}
     restart: "no"
     command:
       - sh
@@ -276,7 +325,7 @@ services:
 
   # ── Gitea Actions Runner — Phase 3 Auto-Healer CI Runner ──────────
   gitea-runner:
-    image: gitea/act_runner:0.2.11
+    image: gitea/act_runner:0.2.11@sha256:eabea0883261fa3378849a1b9ce86dce6a2e906c8db48ad8553edc3f2bd9ff68
     restart: unless-stopped
     environment:
       GITEA_INSTANCE_URL: ${GITEA_INSTANCE_URL:-http://git:3000}

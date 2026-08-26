@@ -8,8 +8,8 @@ When answering any user inquiry or performing technical investigation, execute t
 
 ```
 +---------------------------------------------------------------------------------------------------------------+
-| STEP 1: Search Wiki Vault       | basic-memory.search_notes(query)                                            |
-| STEP 2: Read Compiled Note      | basic-memory.read_note(page_slug)                                           |
+| STEP 1: Search Wiki Vault       | snp-wiki.search_notes(query)                                            |
+| STEP 2: Read Compiled Note      | snp-wiki.read_note(page_slug)                                           |
 | STEP 3: Sufficiency Evaluation  | If answered -> STOP & CITE [[page-slug]]. DO NOT CALL RAG. (Rule R-5.1)      |
 | STEP 4: Verbatim RAG Fetch      | Scout.rag_fetch(path=sources[0].path, hint=sources[0].hint)                  |
 | STEP 5: Response & Citation     | Synthesize answer with full provenance: [[page-slug]] -> raw/file (loc)     |
@@ -21,10 +21,10 @@ When answering any user inquiry or performing technical investigation, execute t
 ## 2. Step Details & Tool Invocations
 
 ### Step 1 — Search Knowledge Vault
-Call `basic-memory.search_notes(query)` over MCP with the user's semantic topic. Inspect top candidate note summaries and slugs. **Do NOT load the whole index into context.**
+Call `snp-wiki.search_notes(query)` over MCP with the user's semantic topic. Inspect top candidate note summaries and slugs. **Do NOT load the whole index into context.**
 
 ### Step 2 — Read Compiled Note
-Call `basic-memory.read_note(page_slug)`. Inspect `## Technical Specifications`, `## TL;DR`, and the frontmatter `sources[]` address block.
+Call `snp-wiki.read_note(page_slug)`. Inspect `## Technical Specifications`, `## TL;DR`, and the frontmatter `sources[]` address block.
 
 ### Step 3 — Sufficiency Evaluation (Rule R-5.1)
 - **Question**: Does the compiled note body answer the user's question?

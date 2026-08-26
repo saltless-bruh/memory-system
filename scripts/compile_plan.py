@@ -32,7 +32,17 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scout import vault  # noqa: E402
 from scout.backends.pgvector import PgVectorRlsBackend  # noqa: E402
-from scout.cli.tasks import write_run_marker  # noqa: E402
+from scout.cli.tasks import (  # noqa: E402
+    TaskState,
+    cancel_requested,
+    clear_cancel,
+    describe_plan_drift,
+    finish_run,
+    heartbeat,
+    plan_fingerprints,
+    read_run_marker,
+    write_run_marker,
+)
 from scout.types import RagBackend  # noqa: E402
 from scripts.compile_note import (  # noqa: E402
     CATEGORY_PLURALS,
@@ -52,6 +62,15 @@ MAX_ARTICLES = 100
 
 class CompilePlanError(RuntimeError):
     """Raised when a batch cannot be compiled safely."""
+
+
+class CompilePlanCancelled(CompilePlanError):
+    """Raised when a batch stopped because it was asked to.
+
+    A subclass, so every existing handler treats it as the semantic outcome it
+    is rather than as an infrastructure failure — but distinguishable, so the
+    run is not then recorded as `failed`. It stopped because somebody said to.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,9 +182,7 @@ def _staged_path(staging: Path, article: PlannedArticle) -> Path:
     return staging / f"{article.slug}.md"
 
 
-def publish_batch(
-    prepared: list[PreparedPage], *, dry_run: bool = False
-) -> list[Path]:
+def publish_batch(prepared: list[PreparedPage], *, dry_run: bool = False) -> list[Path]:
     """Publish a fully prepared batch, compensating for a partial publish.
 
     Compensation is idempotent: removing a page that is already gone is a
@@ -204,6 +221,54 @@ def publish_batch(
     return [page.path for page in prepared]
 
 
+def _guard_resume(
+    plan_path: Path,
+    staging: Path,
+    articles: list[PlannedArticle],
+    fingerprint: str,
+    article_fingerprints: dict[str, str],
+) -> None:
+    """Refuse to resume onto pages generated from a different plan.
+
+    The plan file is hand-editable by design, and nothing prunes staging when it
+    changes. Before this guard, editing a plan and re-running reused the pages
+    generated from the *old* one and reported success — the batch published prose
+    that no version of the plan had ever asked for.
+    """
+    staged_any = any(_staged_path(staging, article).exists() for article in articles)
+    if not staged_any:
+        return
+
+    marker = read_run_marker(plan_path)
+    recorded = str((marker or {}).get("plan_fingerprint") or "")
+    if not recorded:
+        # A run started before fingerprints existed. Warn rather than refuse: a
+        # batch already in flight must not be stranded by an upgrade.
+        print(
+            "  WARNING: this staging directory predates plan fingerprinting, so "
+            "it cannot be checked against the current plan. Pass --no-resume to "
+            "regenerate from scratch if the plan has changed since.",
+            file=sys.stderr,
+        )
+        return
+
+    if recorded == fingerprint:
+        return
+
+    drift = describe_plan_drift(
+        {
+            str(k): str(v)
+            for k, v in (marker or {}).get("article_fingerprints", {}).items()
+        },
+        article_fingerprints,
+    )
+    raise CompilePlanError(
+        f"The plan changed after this batch staged pages: {drift}. Resuming "
+        f"would publish pages generated from the previous plan. Re-run with "
+        f"--no-resume to regenerate, or restore the plan this batch started from."
+    )
+
+
 def compile_plan(
     plan_path: Path,
     *,
@@ -214,6 +279,28 @@ def compile_plan(
 ) -> list[Path]:
     """Compile every article in an approved plan. Writes nothing until all pass."""
     source, articles = load_plan(plan_path)
+
+    staging = staging_dir(plan_path)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    fingerprint, article_fingerprints = plan_fingerprints(plan_path)
+    if resume:
+        _guard_resume(plan_path, staging, articles, fingerprint, article_fingerprints)
+
+    # Record who is working and on which version of the plan **before** the
+    # pre-flight, not after. A detached batch whose pre-flight refuses has
+    # nobody watching it, and with no marker to record the refusal against,
+    # `compile-status` could only report `not_started` — the most misleading
+    # answer available, because it says nothing happened when something did.
+    write_run_marker(
+        plan_path,
+        pid=os.getpid(),
+        fingerprint=fingerprint,
+        article_fingerprints=article_fingerprints,
+    )
+    # Starting is an intent to run. A request left over from a previous attempt
+    # must not silently kill this one.
+    clear_cancel(plan_path)
 
     preflight = run_preflight(source, articles)
     unmintable = [(a, why) for a, ok, why in preflight if not ok]
@@ -233,22 +320,30 @@ def compile_plan(
     # Every slug up front, so article 1 may legally link to article 5.
     all_slugs = tuple(article.slug for article in articles)
 
-    staging = staging_dir(plan_path)
-    staging.mkdir(parents=True, exist_ok=True)
-    # Record who is working, so `compile-status` can tell a live compile from a
-    # crashed one rather than reporting a dead run as still in progress.
-    write_run_marker(plan_path, pid=os.getpid())
-
     prepared: list[PreparedPage] = []
-    for article in articles:
+    for index, article in enumerate(articles):
+        # Between articles: staging is consistent here, so stopping leaves every
+        # page that was paid for on disk and nothing half-written.
+        if cancel_requested(plan_path):
+            clear_cancel(plan_path)
+            detail = f"cancelled after {index} of {len(articles)} article(s)"
+            finish_run(
+                plan_path, state=TaskState.CANCELLED, detail=detail, exit_code=130
+            )
+            raise CompilePlanCancelled(
+                f"{detail}; staged pages are kept — re-run to resume from them"
+            )
         staged = _staged_path(staging, article)
         if resume and staged.exists():
             print(f"  resume: reusing staged {article.slug}", file=sys.stderr)
+            heartbeat(plan_path)
             content = staged.read_text(encoding="utf-8")
             page = vault.parse_page(staged)
             target = (
-                REPO_ROOT / "wiki" / CATEGORY_PLURALS[article.category] /
-                f"{article.slug}.md"
+                REPO_ROOT
+                / "wiki"
+                / CATEGORY_PLURALS[article.category]
+                / f"{article.slug}.md"
             )
             prepared.append(PreparedPage(target, page.frontmatter, content))
             continue
@@ -266,6 +361,9 @@ def compile_plan(
         # Checkpoint immediately: this page cost two generations and a judge.
         _atomic_write(staged, page_result.content.encode("utf-8"))
         prepared.append(page_result)
+        # One small write per article. It is what lets a `running` claim expire,
+        # rather than resting forever on a pid that may have been reused.
+        heartbeat(plan_path)
 
     published = publish_batch(prepared, dry_run=dry_run)
     if not dry_run:
@@ -281,17 +379,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--allow-uncertain", action="store_true")
     args = parser.parse_args(argv)
+    plan_path = Path(args.plan)
     try:
         pages = compile_plan(
-            Path(args.plan),
+            plan_path,
             skip_groundedness=args.skip_groundedness,
             dry_run=args.dry_run,
             resume=not args.no_resume,
             allow_uncertain=args.allow_uncertain,
         )
+    except CompilePlanCancelled as exc:
+        # Already recorded as `cancelled` at the boundary where it stopped.
+        # Recording `failed` over it would misreport a deliberate stop.
+        print(f"CANCELLED: {exc}", file=sys.stderr)
+        return 130
     except (CompilePlanError, CompileNoteError) as exc:
+        # Record the outcome where `compile-status` will find it. A batch that
+        # ended by itself must not read as `stalled` forever, and an operator
+        # polling a detached run has nothing else to read.
+        finish_run(plan_path, state=TaskState.FAILED, detail=str(exc), exit_code=1)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        finish_run(
+            plan_path,
+            state=TaskState.CANCELLED,
+            detail="interrupted at the terminal",
+            exit_code=130,
+        )
+        print("ERROR: interrupted", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001 - recorded, then re-raised
+        finish_run(
+            plan_path,
+            state=TaskState.FAILED,
+            detail=f"{type(exc).__name__} during compilation",
+            exit_code=1,
+        )
+        raise
     verb = "would publish" if args.dry_run else "published"
     print(f"{verb} {len(pages)} page(s)")
     for page in pages:

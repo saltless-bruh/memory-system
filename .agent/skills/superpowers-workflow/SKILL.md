@@ -1,6 +1,6 @@
 ---
 name: superpowers-workflow
-description: Enforces a disciplined workflow for coding, debugging, refactoring, and automation: brainstorm -> plan -> implement with verification (prefer TDD) -> review -> finish. Use for almost any non-trivial change.
+description: "Enforces a disciplined workflow for coding, debugging, refactoring, and automation: brainstorm then plan then implement with verification (prefer TDD) then review then finish. Use for almost any non-trivial change."
 ---
 
 # Superpowers Workflow

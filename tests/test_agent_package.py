@@ -135,22 +135,103 @@ def test_installer_non_destructive_merge(tmp_path: Path) -> None:
 
 def test_installer_idempotent(tmp_path: Path) -> None:
     """Test that running install-agent.sh multiple times is idempotent."""
-    subprocess.run([str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True)
-    res2 = subprocess.run([str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        [str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True
+    )
+    res2 = subprocess.run(
+        [str(INSTALLER_SCRIPT), str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     assert "Successfully Installed" in res2.stdout
 
 
 def test_installer_nested_path(tmp_path: Path) -> None:
     """Test installer against deeply nested directory that does not exist yet."""
     deep_path = tmp_path / "deeply" / "nested" / "target" / "workspace"
-    subprocess.run([str(INSTALLER_SCRIPT), str(deep_path)], check=True, capture_output=True)
+    subprocess.run(
+        [str(INSTALLER_SCRIPT), str(deep_path)], check=True, capture_output=True
+    )
     assert (deep_path / ".agent" / "rules" / "snp-memory.md").is_file()
     assert (deep_path / ".mcp.json").is_file()
 
 
 def test_package_and_root_skills_synchronized() -> None:
     """Verify all 8 domain skills in packages/snp-agent/skills match .agent/skills/."""
-    root_skills = sorted(p.name for p in (REPO_ROOT / ".agent" / "skills").glob("snp-*"))
+    root_skills = sorted(
+        p.name for p in (REPO_ROOT / ".agent" / "skills").glob("snp-*")
+    )
     pkg_skills = sorted(p.name for p in PACKAGE_DIR.glob("skills/snp-*"))
     assert root_skills == pkg_skills
     assert len(pkg_skills) == 8
+
+
+# ── the three config surfaces must not drift (T2.1) ───────────────────────
+
+
+def _manifest_servers(root: Path) -> dict[str, dict[str, object]]:
+    """MCP servers now live in `mcp.json`, never inline in the manifest."""
+    import json
+
+    data = json.loads((root / "mcp.json").read_text(encoding="utf-8"))
+    servers: dict[str, dict[str, object]] = data["mcpServers"]
+    return servers
+
+
+def test_the_manifest_and_the_exporter_describe_the_same_servers() -> None:
+    """Two files describing the same thing must not be allowed to disagree.
+
+    They already had: the manifest listed the two read paths and the exporter
+    listed the same two, and neither knew about the local authoring server. An
+    agent installed from this package could search and fetch but not compile.
+    """
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    import scripts.export_mcp_config as exporter
+
+    exported = set(exporter.generate_config("claude")["mcpServers"])
+    # Only the package declares servers: `.agent/` is this repository's working
+    # contract, not a distributable plugin.
+    assert set(_manifest_servers(PACKAGE_DIR)) == exported
+
+
+def test_the_manifest_lists_the_local_servers_real_tools() -> None:
+    """`requiredTools` has to name tools the server actually serves."""
+    import asyncio
+    import json
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from scout.mcp.local_server import build_server
+
+    served = {tool.name for tool in asyncio.run(build_server().list_tools())}
+    declared = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))[
+        "extensions"
+    ]["io.snp.memory"]["requiredTools"]["snpmemory"]
+    assert set(declared) == served
+
+
+def test_the_local_server_is_declared_stdio_and_carries_no_url() -> None:
+    """It has the authority of whoever launches it; a URL would publish that."""
+    local = _manifest_servers(PACKAGE_DIR)["snpmemory"]
+    # Agent Plugins types the transport rather than leaving it free text.
+    assert local["type"] == "stdio"
+    assert "url" not in local
+    assert local["command"] == "snpmemory"
+
+
+def test_the_installer_scaffolds_all_three_servers(tmp_path: Path) -> None:
+    """The surface an installed agent actually reads."""
+    import json
+
+    subprocess.run(
+        [str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True
+    )
+    scaffolded = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+
+    assert set(scaffolded["mcpServers"]) == {"snp-wiki", "scout", "snpmemory"}
+    local = scaffolded["mcpServers"]["snpmemory"]
+    assert local["command"] == "snpmemory"
+    assert local["args"] == ["mcp", "--root", str(REPO_ROOT)]

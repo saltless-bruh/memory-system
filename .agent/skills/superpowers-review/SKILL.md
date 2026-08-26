@@ -1,6 +1,6 @@
 ---
 name: superpowers-review
-description: Reviews changes for correctness, edge cases, style, security, and maintainability with severity levels (Blocker/Major/Minor/Nit). Use before finalizing changes.
+description: "Reviews changes for correctness, edge cases, style, security, and maintainability with severity levels (Blocker/Major/Minor/Nit). Use before finalizing changes."
 ---
 
 # Review Skill

@@ -1,10 +1,21 @@
 # Source Health — Audit and Design Proposal
 
-> **Status: ACTIVE PROPOSAL (not implemented).** Nothing described under
-> "Proposed design" exists in the codebase today. The "Findings" section below
-> records verified defects in the current system and is factual. Dated
-> 2026-08-19, against branch `fix/architecture-security-hardening` at `92f5b42`
-> plus the in-flight remediation of `artifacts/superpowers/plan.md`.
+> **Status: ACTIVE PROPOSAL (partly implemented).** Dated 2026-08-19, against
+> branch `fix/architecture-security-hardening` at `92f5b42`.
+>
+> **CORPUS HAS CHANGED SINCE THIS WAS WRITTEN (2026-08-25).** The two files this
+> audit uses as worked examples — `raw/images/inference_dashboard.png` and
+> `raw/reports/vllm_high_throughput_serving.pdf` — **no longer exist**, and no
+> wiki page cites either. `raw/` now holds one source,
+> `raw/papers/computers-12-00091.pdf`. The **findings stand as classes of
+> failure**; the **worked examples describe a corpus state that is gone**. Read
+> any passage naming those files as illustration, not as current fact. See §6
+> decision 5.
+>
+> **Implemented since:** SH-4's `NO_EVIDENCE` status now exists in
+> `scripts/verify_addresses.py` and is reported by `snpmemory verify-addresses`;
+> the T5.1 figure-status lie is fixed in `scout/pdf_structure.py`. Everything
+> else under "Proposed design" is still unbuilt.
 
 ## What this document covers
 
@@ -413,11 +424,21 @@ depend on steps 1 or 2.
    source health slips until parsers exist.
 4. **Where the linter check runs.** Offline lint behind a flag, or alongside
    `verify_addresses.py` where live services are already required? (SH-2)
-5. **The two motivating files.** Owner has stated the preference: replace the
-   flawed test data rather than work around it. Both
-   `raw/images/inference_dashboard.png` and
-   `raw/reports/vllm_high_throughput_serving.pdf` need real content, and four
-   wiki pages cite the latter as a technical report.
+5. ~~**The two motivating files.**~~ **RESOLVED 2026-08-25.** The owner's stated
+   preference — replace the flawed test data rather than work around it — was
+   carried out. Both `raw/images/inference_dashboard.png` and
+   `raw/reports/vllm_high_throughput_serving.pdf` are **absent** from `raw/`,
+   and **no wiki page cites either** (verified by search). The corpus now holds
+   one source, `raw/papers/computers-12-00091.pdf`, and all five compiled pages
+   cite it and verify PASS.
+
+   **Read the rest of this document accordingly.** Its *findings* stand as
+   classes of failure — SH-1 through SH-10 describe how integrity checking,
+   provenance, and quarantine can go wrong, and those arguments do not depend on
+   which files were in `raw/`. Its *worked examples* do not: any passage naming
+   those two files is describing a corpus state that no longer exists.
+
+   Four decisions remain, not five.
 
 ---
 

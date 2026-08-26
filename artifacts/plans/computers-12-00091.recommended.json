@@ -1,0 +1,53 @@
+{
+  "source": "raw/papers/computers-12-00091.pdf",
+  "articles": [
+    {
+      "section": "2.2",
+      "title": "Different Machine Learning Categories",
+      "loc": "p.5",
+      "slug": "different-machine-learning-categories",
+      "category": "concept",
+      "department": "ai_eng"
+    },
+    {
+      "section": "2.5",
+      "title": "Deep Learning Approaches",
+      "loc": "p.13",
+      "slug": "deep-learning-approaches",
+      "category": "concept",
+      "department": "ai_eng"
+    },
+    {
+      "section": "3",
+      "title": "Some Deep Learning Applications",
+      "loc": "p.15",
+      "slug": "some-deep-learning-applications",
+      "category": "concept",
+      "department": "ai_eng"
+    },
+    {
+      "section": "3.4",
+      "title": "Recommender Systems (RS)",
+      "loc": "p.19",
+      "slug": "recommender-systems-rs",
+      "category": "concept",
+      "department": "ai_eng"
+    },
+    {
+      "section": "3.5",
+      "title": "Mobile",
+      "loc": "p.19",
+      "slug": "mobile",
+      "category": "concept",
+      "department": "ai_eng"
+    },
+    {
+      "section": "3.6",
+      "title": "Clinical Imaging",
+      "loc": "p.19",
+      "slug": "clinical-imaging",
+      "category": "concept",
+      "department": "ai_eng"
+    }
+  ]
+}

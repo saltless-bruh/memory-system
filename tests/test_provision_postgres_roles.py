@@ -24,7 +24,9 @@ def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_provision_uses_server_side_quoting(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_provision_uses_server_side_quoting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _environment(monkeypatch)
     conn = MagicMock()
     conn.fetchval = AsyncMock(
@@ -37,13 +39,17 @@ async def test_provision_uses_server_side_quoting(monkeypatch: pytest.MonkeyPatc
     )
     conn.execute = AsyncMock()
     assert await provision_roles(conn) == ["rag_app_role", "rag_ingest_role"]
-    format_calls = [call for call in conn.fetchval.await_args_list if "format(" in call.args[0]]
+    format_calls = [
+        call for call in conn.fetchval.await_args_list if "format(" in call.args[0]
+    ]
     assert len(format_calls) == 2
     assert format_calls[0].args[1:] == ("rag_app_role", "synthetic-query-value")
 
 
 @pytest.mark.asyncio
-async def test_provision_rejects_unexpected_role_name(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_provision_rejects_unexpected_role_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _environment(monkeypatch)
     monkeypatch.setenv("POSTGRES_QUERY_USER", "postgres")
     with pytest.raises(ConfigError, match="rag_app_role"):

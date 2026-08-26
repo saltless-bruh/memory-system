@@ -128,6 +128,7 @@ def judge_concurrency(env: Mapping[str, str] | None = None) -> int:
         )
     return value
 
+
 #: Refs tried in order to find the merge base for `--changed-only`.
 DEFAULT_BASE_REFS = ("origin/main", "origin/master", "main", "master")
 
@@ -206,8 +207,7 @@ class Judge(Protocol):
 
     def __call__(
         self, *, title: str, body: str, context: Sequence[SourceContext]
-    ) -> Judgment:
-        ...
+    ) -> Judgment: ...
 
 
 # ── prompt construction ──────────────────────────────────────────────────────
@@ -762,6 +762,47 @@ async def _execute(
         await _close_backend(backend)
 
 
+def _probe_exit(judge_factory: JudgeFactory) -> int:
+    """Answer one question: does the judge route respond?
+
+    Exists because `GET /health?model=snp-judge` cannot answer it. That endpoint
+    serves the *cached* background-health result, and this route is deliberately
+    excluded from the background loop — probing it 288 times a day would spend
+    roughly six times its free-tier daily budget before a single page was judged.
+    A route excluded from that loop is never in the cache, so the endpoint reports
+    503 whether or not the route is fine.
+
+    So the only honest liveness signal is a real call, and this makes the
+    smallest one there is: one trivial judgement whose answer is not used. It
+    costs **one** request, and `ci_address_gate` spends it before mutating
+    anything rather than discovering an outage after a heal has already rewritten
+    `sources[]`.
+    """
+    try:
+        judge = judge_factory()
+    except GroundednessError as exc:
+        print(f"INFRASTRUCTURE ERROR: {exc}")
+        return 2
+    except Exception:  # noqa: BLE001 - configuration errors are redacted
+        print("INFRASTRUCTURE ERROR: judge configuration failed.")
+        return 2
+    if judge is None:
+        print("No judge configured; groundedness cannot run.")
+        return 2
+
+    try:
+        judge(
+            title="probe",
+            body="The sky is blue.",
+            context=[SourceContext(path="probe", loc=None, text="The sky is blue.")],
+        )
+    except Exception:  # noqa: BLE001 - transport detail may carry a credential
+        print("INFRASTRUCTURE ERROR: the judge route did not respond.")
+        return 2
+    print("Judge route responded; groundedness can run.")
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -794,7 +835,17 @@ def main(
         dest="pages",
         help="judge only this page path (repeatable)",
     )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="judge nothing; answer only whether the judge route responds "
+        "(exit 0 operational, 2 not). One request. Used by ci_address_gate "
+        "before it mutates anything.",
+    )
     args = parser.parse_args(argv)
+
+    if args.probe:
+        return _probe_exit(judge_factory)
 
     try:
         pages = list(pages_loader())

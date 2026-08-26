@@ -26,7 +26,7 @@ from scout.cli.errors import CliError
 from scout.cli.invoke import invoke
 from scout.cli.registry import CommandSpec
 from scout.cli.render import OutputFormat, render
-from scout.cli.result import CommandResult, ErrorKind
+from scout.cli.result import CommandResult, ErrorKind, ExitCode
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
@@ -153,6 +153,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise
         result = _to_result(exc)
 
+    if result is None:
+        # cyclopts handled the invocation itself and has already written to the
+        # terminal: `--help`, `--version`, and the bare no-command form each
+        # print and return None rather than raising SystemExit. There is no
+        # result to render, and nothing went wrong. Falling through to the
+        # branch below would report a healthy `--help` as exit 2 — the
+        # INFRASTRUCTURE code — while printing "this is a bug in snpmemory",
+        # which is how a working binary reads as broken to a CI smoke test.
+        #
+        # Treating None as success is safe only because no command can return
+        # it: every declared implementation is annotated `-> CommandResult`,
+        # which `tests/test_cli_core.py` pins for the whole registry.
+        return int(ExitCode.SUCCESS)
     if not isinstance(result, CommandResult):
         # A command returned something else; treat it as a programming error
         # rather than printing an unknown object to stdout.

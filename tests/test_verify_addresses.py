@@ -216,7 +216,8 @@ async def test_gibberish_is_rejected_even_though_it_wins_rank_one() -> None:
     assert va.holds_top_rank(chunks, _VLLM)
     assert va.grounding_coverage(_GIBBERISH_HINT, [_VLLM_TEXT]) == 0.0
     report = await verify_address(
-        backend, _scoped(path=_VLLM, hint=_GIBBERISH_HINT, department="ai_eng", loc="p.2")
+        backend,
+        _scoped(path=_VLLM, hint=_GIBBERISH_HINT, department="ai_eng", loc="p.2"),
     )
     assert report.status is VerifyStatus.DRIFT
     assert "ungrounded" in report.detail
@@ -244,7 +245,9 @@ def test_grounding_coverage_of_a_contentless_hint_is_zero() -> None:
 
 
 def test_grounding_coverage_counts_only_the_addressed_file_text() -> None:
-    assert va.grounding_coverage("alpha beta gamma", ["alpha beta only"]) == pytest.approx(2 / 3)
+    assert va.grounding_coverage(
+        "alpha beta gamma", ["alpha beta only"]
+    ) == pytest.approx(2 / 3)
     assert va.hint_is_grounded("alpha beta gamma", ["alpha beta only"])
     assert not va.hint_is_grounded("alpha beta gamma", ["alpha only"])
 
@@ -266,8 +269,11 @@ def test_holds_top_rank_treats_exact_score_ties_as_sharing_rank_one() -> None:
     [
         ("p.2", ("p.2", "p.1"), True),
         # the chunker's (i/n) split marker still satisfies a section locator
-        ("Section System Architecture Overview",
-         ("Section System Architecture Overview (1/2)",), True),
+        (
+            "Section System Architecture Overview",
+            ("Section System Architecture Overview (1/2)",),
+            True,
+        ),
         ("Rows 1-10", ("Rows 1-4", "Rows 5-8"), False),
         ("Image Asset", ("Section Visual Overview",), False),
         ("p.2", (), False),  # nothing to verify against is not verified
@@ -284,7 +290,9 @@ def test_loc_is_consistent(
 # ── statuses ──────────────────────────────────────────────────────────────
 async def test_verify_address_passes_page_department_scope_to_backend() -> None:
     backend = RecordingBackend(
-        chunks=[RagChunk(text="needle in the haystack", file_path="raw/a.md", score=1.0)]
+        chunks=[
+            RagChunk(text="needle in the haystack", file_path="raw/a.md", score=1.0)
+        ]
     )
     report = await verify_address(backend, _scoped())
     assert report.status is VerifyStatus.PASS
@@ -293,22 +301,34 @@ async def test_verify_address_passes_page_department_scope_to_backend() -> None:
     assert backend.paths == [None]  # the ranking query is deliberately global
 
 
-async def test_verify_address_fails_when_the_addressed_file_returns_nothing() -> None:
-    """FAIL is reachable again: it now means *this source* has no content."""
+async def test_a_source_that_returns_nothing_at_all_is_no_evidence() -> None:
+    """This case moved from FAIL to NO_EVIDENCE, and that is the point (SH-2).
+
+    `raw/a.md` contributes nothing for *any* query here, not merely nothing for
+    this hint. Reporting it as FAIL sent an operator to re-mint a phrase against
+    a source that has no chunks to match — the fix and the finding did not
+    correspond. FAIL now means the source is retrievable and the address is
+    stale; NO_EVIDENCE means the source itself is the problem.
+    """
     backend = RecordingBackend(
-        chunks=[RagChunk(text="needle in the haystack", file_path="raw/other.md", score=1.0)]
+        chunks=[
+            RagChunk(text="needle in the haystack", file_path="raw/other.md", score=1.0)
+        ]
     )
     report = await verify_address(backend, _scoped())
-    assert report.status is VerifyStatus.FAIL
+    assert report.status is VerifyStatus.NO_EVIDENCE
     assert report.matched_files == ("raw/other.md",)
-    # it re-asked with the path pre-filter before calling the source empty
-    assert backend.paths == [None, "raw/a.md"]
+    # It re-asked with the path pre-filter, then probed neutrally, before
+    # calling the source empty — three questions, not one.
+    assert backend.paths == [None, "raw/a.md", "raw/a.md"]
 
 
 async def test_verify_address_drifts_when_another_file_outranks_the_target() -> None:
     backend = RecordingBackend(
         chunks=[
-            RagChunk(text="needle in the haystack", file_path="raw/other.md", score=0.9),
+            RagChunk(
+                text="needle in the haystack", file_path="raw/other.md", score=0.9
+            ),
             RagChunk(text="needle in the haystack", file_path="raw/a.md", score=0.5),
         ]
     )
@@ -317,14 +337,21 @@ async def test_verify_address_drifts_when_another_file_outranks_the_target() -> 
     assert "outranks" in report.detail
 
 
-async def test_verify_address_drifts_when_target_is_below_the_diagnostic_window() -> None:
+async def test_verify_address_drifts_when_target_is_below_the_diagnostic_window() -> (
+    None
+):
     """A file outside the display window is DRIFT, never a false FAIL."""
     filler = [
-        RagChunk(text="needle in the haystack", file_path=f"raw/f{i}.md", score=1.0 - i / 100)
+        RagChunk(
+            text="needle in the haystack", file_path=f"raw/f{i}.md", score=1.0 - i / 100
+        )
         for i in range(va.DIAGNOSTIC_K)
     ]
     backend = RecordingBackend(
-        chunks=[*filler, RagChunk(text="needle in the haystack", file_path="raw/a.md", score=0.1)]
+        chunks=[
+            *filler,
+            RagChunk(text="needle in the haystack", file_path="raw/a.md", score=0.1),
+        ]
     )
     report = await verify_address(backend, _scoped())
     assert report.status is VerifyStatus.DRIFT
@@ -334,7 +361,12 @@ async def test_verify_address_drifts_when_target_is_below_the_diagnostic_window(
 async def test_verify_address_reports_the_locators_the_source_carries() -> None:
     backend = RecordingBackend(
         chunks=[
-            RagChunk(text="needle in the haystack", file_path="raw/a.md", score=1.0, loc="p.7"),
+            RagChunk(
+                text="needle in the haystack",
+                file_path="raw/a.md",
+                score=1.0,
+                loc="p.7",
+            ),
             RagChunk(text="needle again", file_path="raw/a.md", score=0.5, loc="p.7"),
         ]
     )
@@ -346,11 +378,16 @@ async def test_verify_address_reports_the_locators_the_source_carries() -> None:
 def test_collect_addresses_preserves_duplicate_page_and_source_identity() -> None:
     source = {"path": "raw/shared.md", "hint": "same", "loc": "p.1"}
     addresses = _collect_addresses(
-        [_page("one", [source], department="infra"), _page("two", [source], department="redteam")]
+        [
+            _page("one", [source], department="infra"),
+            _page("two", [source], department="redteam"),
+        ]
     )
     assert len(addresses) == 2
     assert addresses[0].address == addresses[1].address
-    assert {(item.page_slug, item.source_index, item.department) for item in addresses} == {
+    assert {
+        (item.page_slug, item.source_index, item.department) for item in addresses
+    } == {
         ("one", 0, "infra"),
         ("two", 0, "redteam"),
     }
@@ -358,7 +395,9 @@ def test_collect_addresses_preserves_duplicate_page_and_source_identity() -> Non
 
 def test_collect_addresses_rejects_invalid_page_department_before_backend() -> None:
     with pytest.raises(ValueError, match="canonical"):
-        _collect_addresses([_page("bad", [{"path": "raw/a", "hint": "h"}], department="all")])
+        _collect_addresses(
+            [_page("bad", [{"path": "raw/a", "hint": "h"}], department="all")]
+        )
 
 
 async def test_verify_all_preserves_duplicate_order() -> None:
@@ -387,7 +426,11 @@ async def test_verify_all_preserves_duplicate_order() -> None:
 # ── total CLI exit contract: 0 pass · 1 semantic · 2 infrastructure ────────
 def test_main_returns_0_for_pass_and_closes_backend() -> None:
     backend = RecordingBackend(
-        [RagChunk(text="kerberoasting service tickets", file_path="raw/a.md", score=1.0)]
+        [
+            RagChunk(
+                text="kerberoasting service tickets", file_path="raw/a.md", score=1.0
+            )
+        ]
     )
     rc = main(
         backend_factory=lambda: backend,
@@ -421,7 +464,9 @@ def test_main_returns_1_only_for_semantic_failure_and_closes_backend() -> None:
     backend = RecordingBackend()
     rc = main(
         backend_factory=lambda: backend,
-        pages_loader=lambda: [_page("page", [{"path": "raw/a.md", "hint": "none", "loc": "p.1"}])],
+        pages_loader=lambda: [
+            _page("page", [{"path": "raw/a.md", "hint": "none", "loc": "p.1"}])
+        ],
     )
     assert rc == 1
     assert backend.closed
@@ -444,7 +489,10 @@ def test_main_reports_a_stale_locator_without_changing_the_exit_code(
     rc = main(
         backend_factory=lambda: backend,
         pages_loader=lambda: [
-            _page("page", [{"path": "raw/a.md", "hint": "kerberoasting", "loc": "Rows 1-10"}])
+            _page(
+                "page",
+                [{"path": "raw/a.md", "hint": "kerberoasting", "loc": "Rows 1-10"}],
+            )
         ],
     )
     assert rc == 0
@@ -460,7 +508,9 @@ def test_main_returns_2_for_infrastructure_error_redacts_and_closes(
     backend = RecordingBackend(error=ConnectionError(secret))
     rc = main(
         backend_factory=lambda: backend,
-        pages_loader=lambda: [_page("page", [{"path": "raw/a.md", "hint": "x", "loc": "p.1"}])],
+        pages_loader=lambda: [
+            _page("page", [{"path": "raw/a.md", "hint": "x", "loc": "p.1"}])
+        ],
     )
     assert rc == 2
     assert backend.closed
@@ -488,3 +538,69 @@ def test_production_backend_factory_ignores_fake_embedder_environment(
     from scout.backends.pgvector import PgVectorRlsBackend
 
     assert isinstance(_default_backend_factory(), PgVectorRlsBackend)
+
+
+# ── SH-2 / SH-4: a source that yields nothing is not a broken hint ─────────
+
+
+def test_a_source_with_no_chunks_at_all_is_no_evidence_not_fail() -> None:
+    """SH-2: "the linter accepts a source that yields no evidence".
+
+    A source present on disk that contributes nothing retrievable needs a
+    different fix from an address whose phrase stopped matching. Reporting both
+    as FAIL sends an operator to re-mint a hint against a source that has no
+    chunks for any hint.
+    """
+    import asyncio
+
+    from scout.backends.fake import FakeRagBackend
+    from scripts.verify_addresses import VerifyStatus, verify_address
+
+    backend = FakeRagBackend(chunks=[])
+    report = asyncio.run(
+        verify_address(backend, _scoped(path="raw/reports/empty.pdf", hint="anything"))
+    )
+
+    assert report.status is VerifyStatus.NO_EVIDENCE
+    assert "re-minting the hint cannot fix it" in report.detail
+
+
+def test_an_indexed_source_that_this_hint_misses_is_still_fail() -> None:
+    """The other half of the split, or the distinction is worthless."""
+    import asyncio
+
+    from scout.backends.fake import FakeRagBackend
+    from scout.types import RagChunk
+    from scripts.verify_addresses import VerifyStatus, verify_address
+
+    # The probe (the filename stem) matches; the address's own hint does not.
+    backend = FakeRagBackend(
+        chunks=[
+            RagChunk(
+                text="acme report body about kerberoasting",
+                file_path="raw/reports/acme.pdf",
+                score=0.9,
+                loc="p.1",
+            )
+        ]
+    )
+    report = asyncio.run(
+        verify_address(
+            backend, _scoped(path="raw/reports/acme.pdf", hint="nothing matches this")
+        )
+    )
+
+    assert report.status is not VerifyStatus.NO_EVIDENCE
+
+
+def test_the_neutral_probe_never_asks_an_empty_question() -> None:
+    """A probe that is empty would make every source look unindexed."""
+    from scripts.verify_addresses import _neutral_probe
+
+    assert (
+        _neutral_probe("raw/reports/vllm_high_throughput.pdf") == "vllm high throughput"
+    )
+    assert _neutral_probe("raw/a-b-c.md") == "a b c"
+    # Degenerate input must still yield a question.
+    # Degenerate input must still yield a question rather than an empty one.
+    assert _neutral_probe("raw/x.md") == "x"

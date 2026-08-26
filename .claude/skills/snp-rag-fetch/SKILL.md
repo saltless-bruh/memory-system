@@ -1,7 +1,6 @@
 ---
 name: snp-rag-fetch
-description: >-
-  Use this skill when the wiki page does not contain enough detail, or you specifically need to quote the original verbatim text from a raw source document via Scout MCP.
+description: "Use this skill when the wiki page does not contain enough detail, or you specifically need to quote the original verbatim text from a raw source document via Scout MCP."
 ---
 
 # snp-rag-fetch

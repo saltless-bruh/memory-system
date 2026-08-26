@@ -66,9 +66,9 @@ def test_auth_is_four_not_two() -> None:
 
 def test_outcomes_permit_mutation_and_errors_do_not() -> None:
     assert CommandResult(exit_code=ExitCode.SUCCESS).mutating_is_allowed
-    assert CommandResult(
-        exit_code=ExitCode.SEMANTIC_FAILURE
-    ).mutating_is_allowed, "drift is a finding to act on, not a reason to stop"
+    assert CommandResult(exit_code=ExitCode.SEMANTIC_FAILURE).mutating_is_allowed, (
+        "drift is a finding to act on, not a reason to stop"
+    )
     for kind in ErrorKind:
         assert not CommandResult.failure(kind, "x").mutating_is_allowed
 
@@ -124,7 +124,10 @@ def test_structured_error_envelope_is_the_last_line_of_stderr() -> None:
     out, err = io.StringIO(), io.StringIO()
     render(
         CommandResult.failure(
-            ErrorKind.CONFLICT, "page exists", hint="pass --overwrite", details={"page": "x.md"}
+            ErrorKind.CONFLICT,
+            "page exists",
+            hint="pass --overwrite",
+            details={"page": "x.md"},
         ),
         OutputFormat.JSON,
         stdout=out,
@@ -139,8 +142,12 @@ def test_structured_error_envelope_is_the_last_line_of_stderr() -> None:
 
 def test_text_mode_emits_no_json_envelope() -> None:
     out, err = io.StringIO(), io.StringIO()
-    render(CommandResult.failure(ErrorKind.AUTH, "denied"), OutputFormat.TEXT,
-           stdout=out, stderr=err)
+    render(
+        CommandResult.failure(ErrorKind.AUTH, "denied"),
+        OutputFormat.TEXT,
+        stdout=out,
+        stderr=err,
+    )
     with pytest.raises(json.JSONDecodeError):
         json.loads(err.getvalue().strip().splitlines()[-1])
 
@@ -215,8 +222,12 @@ def test_no_ansi_escape_reaches_either_stream() -> None:
 def test_schema_runs_with_no_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """It must answer before anything else does: no creds, no database, no stack."""
     for name in (
-        "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_QUERY_USER",
-        "POSTGRES_QUERY_PASSWORD_FILE", "LITELLM_BASE_URL", "LITELLM_MASTER_KEY",
+        "POSTGRES_HOST",
+        "POSTGRES_DB",
+        "POSTGRES_QUERY_USER",
+        "POSTGRES_QUERY_PASSWORD_FILE",
+        "LITELLM_BASE_URL",
+        "LITELLM_MASTER_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
     code, out, _ = _run(["schema", "-o", "json"])
@@ -344,3 +355,60 @@ def test_importing_every_command_module_reads_no_environment() -> None:
     assert result.returncode == 0, (
         f"loading commands added environment variables: {result.stdout}{result.stderr}"
     )
+
+
+# ── `--help` is not a malfunction (CLI Spec: root --help must work) ────────
+#
+# cyclopts prints help and returns None rather than raising SystemExit, so the
+# dispatcher's "a command returned something other than a CommandResult" branch
+# fired on a perfectly healthy invocation and exited 2 — the INFRASTRUCTURE
+# code. Any CI step or wrapper that smoke-tests `snpmemory --help` read a
+# working binary as a broken one, and the tool printed its own "this is a bug"
+# banner while doing it.
+
+
+def test_help_exits_zero_and_prints_no_bug_banner() -> None:
+    code, out, err = _run(["--help"])
+    assert code == 0
+    assert "did not return a CommandResult" not in (out + err)
+
+
+def test_bare_invocation_exits_zero() -> None:
+    code, out, err = _run([])
+    assert code == 0
+    assert "did not return a CommandResult" not in (out + err)
+
+
+def test_subcommand_help_exits_zero() -> None:
+    code, out, err = _run(["verify-vault", "--help"])
+    assert code == 0
+    assert "did not return a CommandResult" not in (out + err)
+
+
+def test_version_exits_zero() -> None:
+    code, _out, err = _run(["--version"])
+    assert code == 0
+    assert "did not return a CommandResult" not in err
+
+
+def test_unknown_command_is_still_input_validation() -> None:
+    """The fix must not swallow real failures into a clean exit."""
+    code, _out, _err = _run(["definitely-not-a-command"])
+    assert code == int(ExitCode.INPUT_VALIDATION)
+
+
+def test_every_declared_command_returns_a_command_result() -> None:
+    """The guard that lets `None` mean "cyclopts handled it".
+
+    Treating `None` as success is only safe because no command can legitimately
+    return it. This pins that: every declared implementation is annotated
+    `-> CommandResult`, so a command that returned `None` would be a type error
+    caught before it could be mistaken for a help invocation.
+    """
+    import typing
+
+    from scout.cli.declarations import DECLARED
+
+    for spec in DECLARED:
+        hints = typing.get_type_hints(spec.load())
+        assert hints.get("return") is CommandResult, spec.name

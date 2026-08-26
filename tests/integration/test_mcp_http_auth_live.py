@@ -14,13 +14,17 @@ def _integration_token() -> str:
     direct = os.environ.get("SCOUT_INTEGRATION_INFRA_TOKEN", "").strip()
     if direct:
         return direct
-    return Path(os.environ["SCOUT_INTEGRATION_INFRA_TOKEN_FILE"]).read_text(
-        encoding="utf-8"
-    ).strip()
+    return (
+        Path(os.environ["SCOUT_INTEGRATION_INFRA_TOKEN_FILE"])
+        .read_text(encoding="utf-8")
+        .strip()
+    )
 
 
 @pytest.mark.integration
-async def test_live_authorization_header_narrows_and_denial_precedes_retrieval() -> None:
+async def test_live_authorization_header_narrows_and_denial_precedes_retrieval() -> (
+    None
+):
     url = os.environ["SCOUT_INTEGRATION_URL"]
     token = _integration_token()
 

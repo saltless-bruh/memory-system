@@ -33,10 +33,14 @@ def rsa_keys() -> Iterator[tuple[str, str]]:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    public_pem = private.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    public_pem = (
+        private.public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
     yield private_pem, public_pem
 
 
@@ -301,9 +305,7 @@ def test_static_configuration_errors_never_echo_token_content(tmp_path: Path) ->
     secret = "sensitive-static-token-material"
     secret_file = tmp_path / "scout_static_tokens"
     secret_file.write_text(
-        json.dumps(
-            {secret: {"subject": "bad", "departments": ["all"]}}
-        ),
+        json.dumps({secret: {"subject": "bad", "departments": ["all"]}}),
         encoding="utf-8",
     )
     env = {
@@ -374,7 +376,9 @@ def test_development_mode_requires_loopback_and_has_server_owned_identity() -> N
 
 
 @pytest.mark.asyncio
-async def test_static_token_value_is_never_logged(caplog: pytest.LogCaptureFixture) -> None:
+async def test_static_token_value_is_never_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     secret = "never-log-this-static-token"
     config = load_auth_config(_static_env(secret))
     assert config.provider is not None

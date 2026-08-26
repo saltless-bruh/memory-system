@@ -9,7 +9,7 @@ This document is the authoritative handbook for AI Coding Agents (Cursor, Claude
 The memory infrastructure is organized into two distinct vault layers connected via fail-closed Model Context Protocol (MCP) servers:
 
 ```
-  YOU (AGENT) ──MCP search/read──►  basic-memory (Port 8765)   (Layer 1: Knowledge Vault — compiled map)
+  YOU (AGENT) ──MCP search/read──►  snp-wiki (Port 8765)        (Layer 1: Knowledge Vault — compiled map)
   YOU (AGENT) ──MCP rag_fetch────►  Scout        (Port 8080)   (Layer 2: Data Vault — verbatim quotes)
                                       └─────────────────────►  PostgreSQL 16 + pgvector (RLS)
 ```
@@ -58,8 +58,8 @@ When answering any user question or researching code, follow this sequence:
 
 ```mermaid
 graph TD
-    Q[User Question] --> S1[1. basic-memory.search_notes query]
-    S1 --> S2[2. basic-memory.read_note page_slug]
+    Q[User Question] --> S1[1. snp-wiki.search_notes query]
+    S1 --> S2[2. snp-wiki.read_note page_slug]
     S2 --> S3{3. Does note body answer the question?}
     S3 -- YES --> S4[STOP. Answer with [[page-slug]] citation. DO NOT CALL RAG.]
     S3 -- NO / Verbatim Needed --> S5[4. Extract sources block: path, loc, hint]
@@ -89,7 +89,7 @@ title: PagedAttention Engine
 summary: Allocates non-contiguous physical GPU VRAM blocks for KV-caches to eliminate memory fragmentation in high-throughput LLM serving.
 entities: [paged-attention, vllm, kv-cache, memory-management]
 department: ai_eng         # Department scope hook (redteam | blueteam | ai_eng | infra)
-sources:                   # RAG address pointers — Scout reads this; basic-memory ignores it
+sources:                   # RAG address pointers — Scout reads this; snp-wiki ignores it
   - path: raw/reports/vllm_high_throughput_serving.pdf
     loc: p.2
     hint: PagedAttention KV-Cache Virtual Block Allocation

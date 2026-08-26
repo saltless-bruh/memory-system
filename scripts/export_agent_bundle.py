@@ -21,7 +21,20 @@ from typing import Any
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.export_mcp_config import (  # noqa: E402
+    _load_existing,
+    generate_config,
+    merge_configs,
+)
+
 DEFAULT_PACKAGE_DIR = REPO_ROOT / "packages" / "snp-agent"
+
+#: The Agent Plugins release this package targets. Pinned rather than accepted
+#: loosely: the schema identifiers are immutable and a new release must use a
+#: new one, so a mismatch is a migration to make, not a version to tolerate.
+PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 DEFAULT_AGENT_DIR = REPO_ROOT / ".agent"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist"
 
@@ -31,26 +44,40 @@ class PackageError(Exception):
 
 
 def load_manifest(package_dir: Path) -> dict[str, Any]:
-    """Load and validate manifest.json."""
-    manifest_path = package_dir / "manifest.json"
+    """Load and validate `plugin.json` (Agent Plugins 1.0.0).
+
+    Replaces the bespoke `manifest.json`, whose shape only this repository's own
+    tests understood. Two fields the old manifest carried are gone by design and
+    not by omission: MCP servers now live in `mcp.json`, because the
+    specification says they are "never inline in the manifest"; and
+    `entrypoints` moved under the project's `extensions` namespace, because
+    `skills/` is a fixed location the specification already defines.
+    """
+    manifest_path = package_dir / "plugin.json"
     if not manifest_path.is_file():
-        raise PackageError(f"Missing manifest.json in {package_dir}")
+        raise PackageError(f"Missing plugin.json in {package_dir}")
     try:
         data: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise PackageError("manifest.json must contain a JSON object")
-        for key in ("name", "version", "mcpServers", "entrypoints"):
-            if key not in data:
-                raise PackageError(f"manifest.json missing required field '{key}'")
-        return data
     except json.JSONDecodeError as exc:
-        raise PackageError(f"Invalid JSON in manifest.json: {exc}") from exc
+        raise PackageError(f"Invalid JSON in plugin.json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PackageError("plugin.json must contain a JSON object")
+    for key in ("$schema", "name"):
+        if key not in data:
+            raise PackageError(f"plugin.json missing required field '{key}'")
+    if data["$schema"] != PLUGIN_SCHEMA:
+        raise PackageError(
+            f"plugin.json targets {data['$schema']!r}; this tooling implements "
+            f"{PLUGIN_SCHEMA!r}"
+        )
+    return data
 
 
 def verify_package(package_dir: Path) -> bool:
     """Verify manifest, schemas, and frontmatter across the package."""
     manifest = load_manifest(package_dir)
-    print(f"✓ Valid manifest: {manifest['name']} v{manifest['version']}")
+    version = manifest.get("version", "unversioned")
+    print(f"✓ Valid plugin.json: {manifest['name']} v{version}")
 
     # Verify skills frontmatter
     skills_dir = package_dir / "skills"
@@ -64,10 +91,18 @@ def verify_package(package_dir: Path) -> bool:
             content = skill_md.read_text(encoding="utf-8")
             match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
             if not match:
-                raise PackageError(f"SKILL.md in {skill_dir.name} missing YAML frontmatter")
+                raise PackageError(
+                    f"SKILL.md in {skill_dir.name} missing YAML frontmatter"
+                )
             frontmatter = yaml.safe_load(match.group(1))
-            if not isinstance(frontmatter, dict) or "name" not in frontmatter or "description" not in frontmatter:
-                raise PackageError(f"SKILL.md in {skill_dir.name} has invalid frontmatter schema")
+            if (
+                not isinstance(frontmatter, dict)
+                or "name" not in frontmatter
+                or "description" not in frontmatter
+            ):
+                raise PackageError(
+                    f"SKILL.md in {skill_dir.name} has invalid frontmatter schema"
+                )
             print(f"  ✓ Skill: {skill_dir.name}")
 
     # Verify workflows frontmatter
@@ -107,7 +142,7 @@ def sync_packages(
                 # If filtering, only copy snp-* or manifest files
                 parts = rel_path.parts
                 if not (
-                    rel_path.name in ("manifest.json", "package.json")
+                    rel_path.name in ("plugin.json", "mcp.json", "package.json")
                     or (len(parts) > 1 and parts[1].startswith("snp-"))
                     or (parts[0] in ("rules", "instructions"))
                 ):
@@ -119,7 +154,9 @@ def sync_packages(
                 shutil.copy2(src_file, dst_file)
                 synced_files.append(dst_file)
 
-    print(f"✓ Synchronized {len(synced_files)} file(s) from {source_dir.name}/ -> {target_dir.name}/")
+    print(
+        f"✓ Synchronized {len(synced_files)} file(s) from {source_dir.name}/ -> {target_dir.name}/"
+    )
     return synced_files
 
 
@@ -139,7 +176,9 @@ def bundle_package(package_dir: Path, output_dir: Path = DEFAULT_DIST_DIR) -> Pa
                 arcname = file_path.relative_to(package_dir)
                 tar.add(file_path, arcname=str(arcname))
 
-    print(f"✓ Successfully built distribution bundle: {bundle_path} ({bundle_path.stat().st_size} bytes)")
+    print(
+        f"✓ Successfully built distribution bundle: {bundle_path} ({bundle_path.stat().st_size} bytes)"
+    )
     return bundle_path
 
 
@@ -153,73 +192,36 @@ def install_to_client(
     created_files: dict[str, Path] = {}
     target = target_client.lower().strip()
 
-    if target == "cursor":
-        cursor_dir = base_dir / ".cursor"
-        cursor_dir.mkdir(parents=True, exist_ok=True)
-        mcp_path = cursor_dir / "mcp.json"
-        cursor_config = {
-            "mcpServers": {
-                "basic-memory": {
-                    "url": "http://localhost:8765/mcp"
-                },
-                "scout": {
-                    "url": "http://localhost:8080/mcp",
-                    "headers": {
-                        "Authorization": "Bearer ${env:SCOUT_AUTH_TOKEN}"
-                    }
-                }
-            }
-        }
-        mcp_path.write_text(json.dumps(cursor_config, indent=2) + "\n", encoding="utf-8")
-        created_files["cursor_mcp"] = mcp_path
+    # Client MCP configuration comes from `export_mcp_config.generate_config`,
+    # never from a copy kept here. This file used to carry its own — naming the
+    # wiki server `basic-memory` and authenticating with `SCOUT_AUTH_TOKEN`
+    # while the documentation, the exporter and the installer all used
+    # `snp-wiki` and `SCOUT_AUTH_HEADER`. A user who followed the docs got a
+    # config from this path that could not authenticate.
+    project_config_paths = {
+        "cursor": base_dir / ".cursor" / "mcp.json",
+        "claude": base_dir / ".mcp.json",
+        "vscode": base_dir / ".vscode" / "mcp.json",
+    }
 
-    elif target == "claude":
-        mcp_path = base_dir / ".mcp.json"
-        claude_config = {
-            "mcpServers": {
-                "basic-memory": {
-                    "url": "http://localhost:8765/mcp"
-                },
-                "scout": {
-                    "url": "http://localhost:8080/mcp",
-                    "headers": {
-                        "Authorization": "Bearer ${SCOUT_AUTH_TOKEN}"
-                    }
-                }
-            }
-        }
-        mcp_path.write_text(json.dumps(claude_config, indent=2) + "\n", encoding="utf-8")
-        created_files["claude_mcp"] = mcp_path
-
-    elif target == "vscode":
-        vscode_dir = base_dir / ".vscode"
-        vscode_dir.mkdir(parents=True, exist_ok=True)
-        mcp_path = vscode_dir / "mcp.json"
-        vscode_config = {
-            "servers": {
-                "basic-memory": {
-                    "type": "http",
-                    "url": "http://localhost:8765/mcp"
-                },
-                "scout": {
-                    "type": "http",
-                    "url": "http://localhost:8080/mcp",
-                    "headers": {
-                        "Authorization": "Bearer ${env:SCOUT_AUTH_TOKEN}"
-                    }
-                }
-            }
-        }
-        mcp_path.write_text(json.dumps(vscode_config, indent=2) + "\n", encoding="utf-8")
-        created_files["vscode_mcp"] = mcp_path
+    if target in project_config_paths:
+        mcp_path = project_config_paths[target]
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        # Merge, so servers this project knows nothing about survive. Replacing
+        # the file outright is data loss for anyone who already had one.
+        merged = merge_configs(_load_existing(mcp_path), generate_config(target))
+        mcp_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        created_files[f"{target}_mcp"] = mcp_path
 
     elif target == "antigravity":
         agent_dir = base_dir / ".agent"
         sync_packages(package_dir, agent_dir)
         created_files["antigravity_agent"] = agent_dir
 
-    else:
-        raise PackageError(f"Unsupported target client: '{target}'. Supported: cursor, claude, vscode, antigravity")
+    elif target not in project_config_paths:
+        raise PackageError(
+            f"Unsupported target client: '{target}'. Supported: cursor, claude, vscode, antigravity"
+        )
 
     for _name, path in created_files.items():
         print(f"✓ Configured {target_client} target: {path}")
@@ -229,9 +231,15 @@ def install_to_client(
 def main(argv: list[str] | None = None) -> int:
     """CLI Entrypoint."""
     parser = argparse.ArgumentParser(description="SNP Agent Package Manager")
-    parser.add_argument("--verify", action="store_true", help="Verify package manifest and schema")
-    parser.add_argument("--bundle", action="store_true", help="Build distributable tar.gz archive")
-    parser.add_argument("--sync", action="store_true", help="Synchronize packages/snp-agent <-> .agent")
+    parser.add_argument(
+        "--verify", action="store_true", help="Verify package manifest and schema"
+    )
+    parser.add_argument(
+        "--bundle", action="store_true", help="Build distributable tar.gz archive"
+    )
+    parser.add_argument(
+        "--sync", action="store_true", help="Synchronize packages/snp-agent <-> .agent"
+    )
     parser.add_argument(
         "--direction",
         choices=["packages-to-agent", "agent-to-packages"],
@@ -243,8 +251,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar="CLIENT",
         help="Install agent config for target client (cursor, claude, vscode, antigravity)",
     )
-    parser.add_argument("--package-dir", type=Path, default=DEFAULT_PACKAGE_DIR, help="Path to package directory")
-    parser.add_argument("--dist-dir", type=Path, default=DEFAULT_DIST_DIR, help="Path to output dist directory")
+    parser.add_argument(
+        "--package-dir",
+        type=Path,
+        default=DEFAULT_PACKAGE_DIR,
+        help="Path to package directory",
+    )
+    parser.add_argument(
+        "--dist-dir",
+        type=Path,
+        default=DEFAULT_DIST_DIR,
+        help="Path to output dist directory",
+    )
 
     args = parser.parse_args(argv)
 

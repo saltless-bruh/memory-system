@@ -87,17 +87,20 @@ class MintStatus(StrEnum):
 class CandidateOutcome(StrEnum):
     """Why one candidate hint was accepted or rejected.
 
-    The first three mirror `VerifyStatus` exactly — minting delegates the
-    PASS/DRIFT/FAIL decision to the single `verify_address` implementation the
-    merge gate runs, so there is no second heuristic that could drift from it.
-    `LOC_MISMATCH` is the one extra rejection minting adds on top (m2): the
-    hint retrieves the right file, but the locator the author declared is not
-    one the retrieval actually returned.
+    The first four mirror `VerifyStatus` exactly — minting delegates the
+    decision to the single `verify_address` implementation the merge gate runs,
+    so there is no second heuristic that could drift from it. `LOC_MISMATCH` is
+    the one extra rejection minting adds on top (m2): the hint retrieves the
+    right file, but the locator the author declared is not one the retrieval
+    actually returned.
     """
 
     PASS = "pass"
     FAIL = "fail"
     DRIFT = "drift"
+    #: The source yields nothing at all. No hint can fix that, so minting stops
+    #: rather than spending the remaining candidates on a source with no chunks.
+    NO_EVIDENCE = "no_evidence"
     LOC_MISMATCH = "loc_mismatch"
 
 
@@ -183,6 +186,12 @@ async def mint_address(
             ),
         )
         seen_locs.update(dict.fromkeys(report.matched_locs))
+        if report.status is VerifyStatus.NO_EVIDENCE:
+            # The source has no retrievable chunks. Every remaining candidate
+            # would fail identically, and reporting the last one tried would
+            # blame the phrase for a problem the phrase cannot have.
+            tried.append((hint, CandidateOutcome.NO_EVIDENCE))
+            break
         if report.status is not VerifyStatus.PASS:
             tried.append((hint, CandidateOutcome(report.status.value)))
             continue
@@ -236,8 +245,10 @@ def _print_result(result: MintResult) -> None:
     for hint, outcome in result.tried:
         print(f"  {outcome.value.upper():13s}  {hint!r}")
     if result.available_locs:
-        print(f"\n  locators carried by {result.path}: "
-              f"{', '.join(repr(loc) for loc in result.available_locs)}")
+        print(
+            f"\n  locators carried by {result.path}: "
+            f"{', '.join(repr(loc) for loc in result.available_locs)}"
+        )
     if result.status is MintStatus.MINTED and result.address is not None:
         print("\nMINTED — paste into the page's `sources:` block:\n")
         print(format_source_block(result.address))

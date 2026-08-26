@@ -22,9 +22,7 @@ from scout.types import RagBackend, RagChunk, Scope
 
 
 def _development_config() -> AuthConfig:
-    return load_auth_config(
-        {"SCOUT_AUTH_MODE": "development"}, bind_host="127.0.0.1"
-    )
+    return load_auth_config({"SCOUT_AUTH_MODE": "development"}, bind_host="127.0.0.1")
 
 
 def _identity(*departments: str) -> CallerIdentity:
@@ -114,9 +112,7 @@ async def test_department_expansion_or_malformed_request_never_calls_backend(
 
 
 def test_build_server_wires_native_auth_provider() -> None:
-    token_mapping = (
-        '{"opaque-token":{"subject":"automation","departments":["infra"]}}'
-    )
+    token_mapping = '{"opaque-token":{"subject":"automation","departments":["infra"]}}'
     config = load_auth_config(
         {
             "SCOUT_AUTH_MODE": "static",

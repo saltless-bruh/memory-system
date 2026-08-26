@@ -225,13 +225,21 @@ rolls the wiki back. Scheduled mode starts from a protected base, creates a
 - [`docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`](docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md):
   active proposal for handling sources that ingest cleanly but are not evidence;
   its findings are factual, its design is not implemented
-- [`packages/snp-agent/`](packages/snp-agent): portable instructions, rules,
-  skills, and workflows. `.agent/` is authoritative; `.claude/` and
-  `packages/snp-agent/` are **tracked byte-for-byte mirrors** of the files they
-  share with it, enforced by `tests/test_agent_package_sync.py` and
-  `tests/test_docs_contract.py`. Edit `.agent/`, then mirror — a one-tree edit
-  fails the suite. (`.claude/` deliberately omits `manifest.json` and
-  `package.json`, which are bundle distribution metadata.)
+- [`packages/snp-agent/`](packages/snp-agent): the portable distribution — an
+  **Agent Plugins 1.0.0** plugin (`plugin.json` + `mcp.json` + `skills/`).
+  `.agent/` is authoritative; `.claude/` and `packages/snp-agent/` are **tracked
+  byte-for-byte mirrors** of the files they share with it, enforced by
+  `tests/test_agent_package_sync.py` and `tests/test_docs_contract.py`. Edit
+  `.agent/`, then mirror — a one-tree edit fails the suite.
+
+  The trees are not identical, and the difference is a decision rather than an
+  accident: the `superpowers-*` layer is **repo-local**. It is this repository's
+  own development discipline, and shipping it would tell a consumer's agent to
+  write brainstorms and plans into *their* `artifacts/superpowers/` for work
+  unrelated to the memory system. `plugin.json` declares both what ships and
+  what does not, and a test holds the package to that declaration in both
+  directions. `plugin.json` / `mcp.json` live only in the package — `.agent/` is
+  a working contract, not a plugin — while `package.json` is shared.
 
 Documents explicitly marked historical or superseded preserve design context;
 they are not deployment instructions.

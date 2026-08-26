@@ -54,6 +54,32 @@ REQUIRED_HEADINGS = (
     "Cross-References",
 )
 
+#: Headings a page **may** carry, at a fixed position, without being required
+#: to. `Works Cited` (T4.2) lists the works the page's own source passages cite.
+#: It is optional rather than required so that pages compiled before it existed
+#: stay valid — making it mandatory would fail every page already in the vault
+#: and turn a new feature into a vault-wide lint error.
+OPTIONAL_HEADINGS: dict[str, str] = {"Works Cited": "Cross-References"}
+
+
+def _headings_are_ordered(actual: tuple[str, ...]) -> bool:
+    """True when `actual` is the required sequence, optionally interleaved.
+
+    An optional heading may appear at most once, and only immediately before
+    the required heading it is anchored to — so the order stays a contract
+    rather than a suggestion.
+    """
+    expected: list[str] = []
+    for heading in REQUIRED_HEADINGS:
+        anchored = [
+            optional
+            for optional, before in OPTIONAL_HEADINGS.items()
+            if before == heading and optional in actual
+        ]
+        expected.extend(anchored)
+        expected.append(heading)
+    return actual == tuple(expected)
+
 
 def write_transcript(path: Path, obj: dict[str, Any]) -> bool:
     """Persist a transcript as JSON. Returns True on success."""
@@ -307,7 +333,11 @@ def lint_page(
         if not isinstance(raw_path, str) or not raw_path.strip():
             continue
         source_path = Path(raw_path)
-        if source_path.is_absolute() or not source_path.parts or source_path.parts[0] != "raw":
+        if (
+            source_path.is_absolute()
+            or not source_path.parts
+            or source_path.parts[0] != "raw"
+        ):
             res.errors.append(
                 f"{page.rel}: sources[{i}].path must be relative beneath raw/: {raw_path}"
             )
@@ -316,24 +346,24 @@ def lint_page(
         try:
             disk.relative_to(source_root)
         except ValueError:
-            res.errors.append(
-                f"{page.rel}: sources[{i}].path escapes raw/: {raw_path}"
-            )
+            res.errors.append(f"{page.rel}: sources[{i}].path escapes raw/: {raw_path}")
             continue
         if not disk.is_file():
-            res.errors.append(
-                f"{page.rel}: sources[{i}].path not on disk: {raw_path}"
-            )
+            res.errors.append(f"{page.rel}: sources[{i}].path not on disk: {raw_path}")
 
     # 7. Ordered Body Headings (for standard notes)
     actual_headings = tuple(
         match.group(1).strip()
         for match in re.finditer(r"^##[ \t]+(.+?)[ \t]*$", page.body, re.MULTILINE)
     )
-    if actual_headings != REQUIRED_HEADINGS:
+    if not _headings_are_ordered(actual_headings):
+        optional = ", ".join(
+            f"{name} (before {before})" for name, before in OPTIONAL_HEADINGS.items()
+        )
         res.errors.append(
             f"{page.rel}: section headings must appear exactly once in order: "
             + " -> ".join(REQUIRED_HEADINGS)
+            + f"; optional: {optional}"
         )
 
     # 8. Wikilinks validation

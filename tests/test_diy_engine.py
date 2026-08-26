@@ -294,9 +294,7 @@ async def test_litellm_embedder_builds_request_and_parses_response(
 
 async def test_litellm_embedder_context_reuses_then_closes_transport() -> None:
     transport = _TrackingTransport()
-    embedder = LiteLLMEmbedder(
-        api_key="test-only-token", dim=2, transport=transport
-    )
+    embedder = LiteLLMEmbedder(api_key="test-only-token", dim=2, transport=transport)
 
     async with embedder:
         await embedder.embed(["first", "second"])

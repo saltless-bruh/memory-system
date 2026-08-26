@@ -1,7 +1,6 @@
 ---
 name: snp-bootstrap-system
-description: >-
-  Use this skill when you need to deploy, restart, or bring up the entire SNP Memory System V2 infrastructure via Docker, PostgreSQL 16, and LiteLLM.
+description: "Use this skill when you need to deploy, restart, or bring up the entire SNP Memory System V2 infrastructure via Docker, PostgreSQL 16, and LiteLLM."
 ---
 
 # snp-bootstrap-system

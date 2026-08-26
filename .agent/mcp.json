@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "snp-wiki": {
+      "type": "streamable-http",
+      "url": "http://localhost:8765/mcp"
+    },
+    "scout": {
+      "type": "streamable-http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "${SCOUT_AUTH_HEADER}"
+      }
+    },
+    "snpmemory": {
+      "type": "stdio",
+      "command": "snpmemory",
+      "args": ["mcp"],
+      "env": {
+        "SNP_MEMORY_ROOT": ""
+      }
+    }
+  }
+}

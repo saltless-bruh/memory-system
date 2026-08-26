@@ -75,7 +75,10 @@ def test_all_seven_frontmatter_fields_are_required(
     del frontmatter[field]
     page = vault.Page(tmp_path / "wiki" / "page.md", frontmatter, VALID_BODY)
 
-    assert any(f"missing frontmatter field '{field}'" in error for error in _errors(page, raw_dir))
+    assert any(
+        f"missing frontmatter field '{field}'" in error
+        for error in _errors(page, raw_dir)
+    )
 
 
 @pytest.mark.parametrize(
@@ -107,7 +110,10 @@ def test_empty_sources_list_is_valid_for_source_free_concepts(
 def test_type_must_be_an_exact_canonical_string(
     tmp_path: Path, raw_dir: Path, page_type: object
 ) -> None:
-    assert any("invalid type" in error for error in _errors(_page(tmp_path, type=page_type), raw_dir))
+    assert any(
+        "invalid type" in error
+        for error in _errors(_page(tmp_path, type=page_type), raw_dir)
+    )
 
 
 @pytest.mark.parametrize("department", ["all", "AI_ENG", 7, None])
@@ -124,7 +130,10 @@ def test_department_must_be_an_exact_canonical_string(
 def test_entities_must_be_a_nonempty_list_of_nonempty_strings(
     tmp_path: Path, raw_dir: Path, entities: object
 ) -> None:
-    assert any("entities" in error for error in _errors(_page(tmp_path, entities=entities), raw_dir))
+    assert any(
+        "entities" in error
+        for error in _errors(_page(tmp_path, entities=entities), raw_dir)
+    )
 
 
 @pytest.mark.parametrize(
@@ -139,7 +148,10 @@ def test_entities_must_be_a_nonempty_list_of_nonempty_strings(
 def test_summary_is_exactly_one_nonempty_line_and_sentence(
     tmp_path: Path, raw_dir: Path, summary: object
 ) -> None:
-    assert any("summary" in error for error in _errors(_page(tmp_path, summary=summary), raw_dir))
+    assert any(
+        "summary" in error
+        for error in _errors(_page(tmp_path, summary=summary), raw_dir)
+    )
 
 
 @pytest.mark.parametrize("compiled", ["20260818", "2026-02-30", "18-08-2026", 20260818])
@@ -153,10 +165,11 @@ def test_last_compiled_is_an_exact_iso_calendar_date(
 
 
 @pytest.mark.parametrize("sources", ["raw/source.txt", {}, None])
-def test_sources_must_be_a_list(
-    tmp_path: Path, raw_dir: Path, sources: object
-) -> None:
-    assert any("sources must be a list" in error for error in _errors(_page(tmp_path, sources=sources), raw_dir))
+def test_sources_must_be_a_list(tmp_path: Path, raw_dir: Path, sources: object) -> None:
+    assert any(
+        "sources must be a list" in error
+        for error in _errors(_page(tmp_path, sources=sources), raw_dir)
+    )
 
 
 def test_malformed_source_entries_are_not_filtered_before_validation(
@@ -181,7 +194,10 @@ def test_malformed_source_entries_are_not_filtered_before_validation(
 def test_source_keys_are_nonempty_strings(
     tmp_path: Path, raw_dir: Path, source: dict[str, object]
 ) -> None:
-    assert any("sources[0]" in error for error in _errors(_page(tmp_path, sources=[source]), raw_dir))
+    assert any(
+        "sources[0]" in error
+        for error in _errors(_page(tmp_path, sources=[source]), raw_dir)
+    )
 
 
 @pytest.mark.parametrize(
@@ -200,7 +216,10 @@ def test_source_path_must_resolve_beneath_raw(
     outside.write_text("outside", encoding="utf-8")
     source = {"path": path, "loc": "lines 1-2", "hint": "phrase"}
 
-    assert any("sources[0].path" in error for error in _errors(_page(tmp_path, sources=[source]), raw_dir))
+    assert any(
+        "sources[0].path" in error
+        for error in _errors(_page(tmp_path, sources=[source]), raw_dir)
+    )
 
 
 def test_source_symlink_cannot_escape_raw(tmp_path: Path, raw_dir: Path) -> None:
@@ -209,11 +228,17 @@ def test_source_symlink_cannot_escape_raw(tmp_path: Path, raw_dir: Path) -> None
     (raw_dir / "escape.txt").symlink_to(outside)
     source = {"path": "raw/escape.txt", "loc": "line 1", "hint": "phrase"}
 
-    assert any("escapes raw" in error for error in _errors(_page(tmp_path, sources=[source]), raw_dir))
+    assert any(
+        "escapes raw" in error
+        for error in _errors(_page(tmp_path, sources=[source]), raw_dir)
+    )
 
 
 def test_related_frontmatter_is_forbidden(tmp_path: Path, raw_dir: Path) -> None:
-    assert any("forbidden 'related:'" in error for error in _errors(_page(tmp_path, related=[]), raw_dir))
+    assert any(
+        "forbidden 'related:'" in error
+        for error in _errors(_page(tmp_path, related=[]), raw_dir)
+    )
 
 
 @pytest.mark.parametrize(
@@ -237,7 +262,9 @@ def test_body_has_exactly_one_of_each_required_h2_in_order(
     assert any("section headings" in error for error in _errors(page, raw_dir))
 
 
-def test_broken_wikilinks_are_warnings_not_errors(tmp_path: Path, raw_dir: Path) -> None:
+def test_broken_wikilinks_are_warnings_not_errors(
+    tmp_path: Path, raw_dir: Path
+) -> None:
     page = _page(tmp_path)
 
     result = vault.lint_page(page, raw_dir=raw_dir, known_slugs={page.slug})
@@ -251,7 +278,13 @@ def test_load_pages_includes_navigation_and_excludes_only_generated_root_index(
 ) -> None:
     wiki = tmp_path / "wiki"
     (wiki / "concepts").mkdir(parents=True)
-    for relative in ("index.md", "archive.md", "log.md", "concepts/index.md", "concepts/page.md"):
+    for relative in (
+        "index.md",
+        "archive.md",
+        "log.md",
+        "concepts/index.md",
+        "concepts/page.md",
+    ):
         target = wiki / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("body", encoding="utf-8")
@@ -283,3 +316,71 @@ def test_load_pages_rejects_symlinked_category(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="symlink"):
         vault.load_pages(wiki)
+
+
+# ── T4.2: the optional Works Cited section ────────────────────────────────
+
+
+def test_a_page_without_works_cited_is_still_valid(tmp_path: Path) -> None:
+    """Every page already in the vault predates this section.
+
+    Making it required would turn a new feature into a vault-wide lint error.
+    """
+    from scout.vault import _headings_are_ordered
+
+    assert _headings_are_ordered(
+        ("TL;DR", "Technical Specifications", "Provenance", "Cross-References")
+    )
+
+
+def test_works_cited_is_accepted_immediately_before_cross_references() -> None:
+    from scout.vault import _headings_are_ordered
+
+    assert _headings_are_ordered(
+        (
+            "TL;DR",
+            "Technical Specifications",
+            "Provenance",
+            "Works Cited",
+            "Cross-References",
+        )
+    )
+
+
+def test_works_cited_in_the_wrong_place_is_still_an_error() -> None:
+    """Optional is not the same as unordered — the sequence stays a contract."""
+    from scout.vault import _headings_are_ordered
+
+    assert not _headings_are_ordered(
+        (
+            "Works Cited",
+            "TL;DR",
+            "Technical Specifications",
+            "Provenance",
+            "Cross-References",
+        )
+    )
+    assert not _headings_are_ordered(
+        (
+            "TL;DR",
+            "Works Cited",
+            "Technical Specifications",
+            "Provenance",
+            "Cross-References",
+        )
+    )
+
+
+def test_a_duplicated_section_is_still_an_error() -> None:
+    from scout.vault import _headings_are_ordered
+
+    assert not _headings_are_ordered(
+        (
+            "TL;DR",
+            "Technical Specifications",
+            "Provenance",
+            "Works Cited",
+            "Works Cited",
+            "Cross-References",
+        )
+    )

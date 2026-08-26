@@ -11,7 +11,9 @@ from scout import vault
 from scripts import gen_index
 
 
-def _page(wiki: Path, relative: str, title: str, page_type: str = "concept") -> vault.Page:
+def _page(
+    wiki: Path, relative: str, title: str, page_type: str = "concept"
+) -> vault.Page:
     return vault.Page(
         path=wiki / relative,
         frontmatter={

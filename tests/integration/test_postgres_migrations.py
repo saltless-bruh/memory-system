@@ -40,7 +40,9 @@ async def _database_statement(conn: asyncpg.Connection, action: str, name: str) 
 @pytest.fixture
 async def disposable_database() -> AsyncIterator[str]:
     if os.environ.get("SNP_INTEGRATION_PROJECT") != "snp-memory-it":
-        pytest.fail("migration integration tests require SNP_INTEGRATION_PROJECT=snp-memory-it")
+        pytest.fail(
+            "migration integration tests require SNP_INTEGRATION_PROJECT=snp-memory-it"
+        )
     name = f"snp_it_{uuid.uuid4().hex}"
     admin = await _connect()
     await admin.execute(await _database_statement(admin, "CREATE DATABASE", name))
@@ -90,11 +92,17 @@ async def test_fresh_migrations_are_complete_and_idempotent(
 async def test_forward_migration_repairs_database_with_draft_002_recorded(
     disposable_database: str,
 ) -> None:
-    migrations = Path(__file__).resolve().parents[2] / "config" / "postgres" / "migrations"
+    migrations = (
+        Path(__file__).resolve().parents[2] / "config" / "postgres" / "migrations"
+    )
     conn = await _connect(disposable_database)
     try:
-        await conn.execute((migrations / "001_initial_schema.sql").read_text(encoding="utf-8"))
-        await conn.execute((migrations / "002_rls_and_roles.sql").read_text(encoding="utf-8"))
+        await conn.execute(
+            (migrations / "001_initial_schema.sql").read_text(encoding="utf-8")
+        )
+        await conn.execute(
+            (migrations / "002_rls_and_roles.sql").read_text(encoding="utf-8")
+        )
         await conn.execute(
             "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, "
             "applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"

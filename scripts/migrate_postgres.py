@@ -27,7 +27,9 @@ def discover_migrations(directory: Path = MIGRATIONS_DIR) -> list[Path]:
     """Return migrations in stable filename order and reject duplicate versions."""
     files = sorted(directory.glob("[0-9][0-9][0-9]_*.sql"))
     versions = [path.name.split("_", 1)[0] for path in files]
-    duplicates = sorted({version for version in versions if versions.count(version) > 1})
+    duplicates = sorted(
+        {version for version in versions if versions.count(version) > 1}
+    )
     if duplicates:
         raise MigrationError("duplicate migration version(s) detected")
     return files
@@ -118,7 +120,10 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     try:
         conn = await get_connection()
     except (ConfigError, OSError, asyncpg.PostgresError) as exc:
-        print(f"[migrate] connection/configuration failed ({type(exc).__name__})", file=sys.stderr)
+        print(
+            f"[migrate] connection/configuration failed ({type(exc).__name__})",
+            file=sys.stderr,
+        )
         return 2
 
     try:

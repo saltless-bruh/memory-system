@@ -20,6 +20,13 @@ LINT_COMMAND = [sys.executable, "scripts/gen_index.py", "--check"]
 HEAL_COMMAND = [sys.executable, "scout/healer.py", "--ci"]
 GROUNDEDNESS_COMMAND = [sys.executable, "scripts/verify_groundedness.py"]
 
+#: One request that judges nothing and answers only whether the judge route
+#: responds. Spent **before** any mutation, because discovering an outage after
+#: a heal leaves rewritten `sources[]` for a run that was never entitled to
+#: change anything. `GET /health?model=` cannot answer this — see
+#: `verify_groundedness._probe_exit`.
+GROUNDEDNESS_PROBE_COMMAND = [*GROUNDEDNESS_COMMAND, "--probe"]
+
 CommandRunner = Callable[[list[str], str], int]
 BranchGetter = Callable[[], str]
 
@@ -76,18 +83,20 @@ def _post_heal_exit(runner: CommandRunner) -> int:
     return 2
 
 
-def _groundedness_exit(
-    runner: CommandRunner, *, mode: str, enforce: bool
-) -> int:
+def _groundedness_exit(runner: CommandRunner, *, mode: str, enforce: bool) -> int:
     """Judge page bodies against their cited sources (M7).
 
-    Advisory by default. The checker itself is a real gate — it quotes the
-    offending sentence and exits 1 — but the shipped vault does not yet pass it:
-    a full run judges 10 of 13 pages UNSUPPORTED, because pages assert domain
-    knowledge their stub sources never contained. Blocking on that today would
-    only teach people to disable the gate. `--enforce-groundedness` (or
-    `SNP_ENFORCE_GROUNDEDNESS=1`) makes it authoritative once the corpus is
-    real; the report is printed either way, so the debt stays visible.
+    **Enforcing by default since 2026-08-26.** It was advisory because the
+    shipped vault did not pass it — a full run judged 10 of 13 pages UNSUPPORTED,
+    and blocking on that would only have taught people to disable the gate. That
+    reason is gone: measured 2026-08-26, the vault is **5 GROUNDED, 0
+    UNSUPPORTED, 0 NO_CONTEXT**. `--advisory-groundedness` (or
+    `SNP_ADVISORY_GROUNDEDNESS=1`) remains as a deliberate, visible override,
+    because a gate nobody can override gets disabled wholesale instead.
+
+    The override applies to the **verdict** only. An exit 2 — the judge could not
+    run — is never advisory, in either mode: a checker that did not run produced
+    no verdict to be lenient about.
 
     In `pr` mode only changed pages are judged — one model call per changed
     page instead of one per vault page.
@@ -98,14 +107,27 @@ def _groundedness_exit(
     exit_code = runner(command, "groundedness check")
     if exit_code == 0:
         return 0
-    if not enforce:
+    # Advisory applies to the **verdict**, never to the infrastructure. Exit 1 is
+    # a finding — pages the judge read and could not ground — and a run may
+    # legitimately choose not to block on it. Exit 2 is the judge failing to run,
+    # which produces no verdict to be advisory about, and anything else is an
+    # exit nobody planned for. This module promises elsewhere that infrastructure
+    # failure never authorises a mutation; swallowing 2 here let a judge outage
+    # pass the gate silently.
+    if not enforce and exit_code == 1:
         print(
-            "[ci_address_gate] groundedness reported problems "
-            f"(exit {exit_code}); advisory only — pass --enforce-groundedness "
-            "to make this blocking."
+            "[ci_address_gate] groundedness reported unsupported pages "
+            "(exit 1); --advisory-groundedness was given, so this is reported "
+            "and not blocking. Enforcement is the default."
         )
         return 0
-    return exit_code if exit_code in {1, 2} else 2
+    if exit_code == 1:
+        return 1
+    print(
+        f"[ci_address_gate] groundedness could not run (exit {exit_code}); "
+        "this is an infrastructure failure, not a verdict, and is never advisory."
+    )
+    return 2
 
 
 def _lint_exit(runner: CommandRunner, description: str) -> int:
@@ -127,9 +149,7 @@ def _cleanup_scheduled_branch(
     switched = runner(
         ["git", "switch", original_branch], "restore scheduled base branch"
     )
-    deleted = runner(
-        ["git", "branch", "-D", heal_branch], "delete failed heal branch"
-    )
+    deleted = runner(["git", "branch", "-D", heal_branch], "delete failed heal branch")
     return restored_index == switched == deleted == 0
 
 
@@ -144,15 +164,30 @@ def main(
     parser = argparse.ArgumentParser(description="Closed-loop address gate")
     parser.add_argument("--mode", choices=("pr", "scheduled"), required=True)
     parser.add_argument("--remote", default="origin")
-    parser.add_argument("--branch", help="scheduled heal branch (must start with heal/)")
     parser.add_argument(
-        "--enforce-groundedness",
-        action="store_true",
-        default=os.environ.get("SNP_ENFORCE_GROUNDEDNESS", "").strip() == "1",
-        help="fail the gate when a page's body is unsupported by its sources "
-        "(advisory by default; see _groundedness_exit)",
+        "--branch", help="scheduled heal branch (must start with heal/)"
+    )
+    parser.add_argument(
+        "--advisory-groundedness",
+        dest="enforce_groundedness",
+        action="store_false",
+        default=os.environ.get("SNP_ADVISORY_GROUNDEDNESS", "").strip() != "1",
+        help="report unsupported pages without failing the gate. Enforcement is "
+        "the default; this is a deliberate, visible override (see "
+        "_groundedness_exit). An infrastructure failure is never advisory either "
+        "way.",
     )
     args = parser.parse_args(argv)
+
+    # Before anything: can the judge run at all? A gate that heals, commits and
+    # pushes, then discovers its checker was down, has already mutated on the
+    # strength of a check that never happened.
+    if runner(GROUNDEDNESS_PROBE_COMMAND, "groundedness preflight") != 0:
+        print(
+            "[ci_address_gate] the groundedness judge is unavailable; refusing "
+            "to run a gate that could heal without being able to judge the result."
+        )
+        return 2
 
     initial = runner(VERIFY_COMMAND, "initial address verification")
     if initial == 0:
@@ -176,14 +211,19 @@ def main(
     snapshot = _snapshot_wiki(repo_root)
     heal_branch: str | None = None
     if args.mode == "scheduled":
-        heal_branch = scheduled_branch or args.branch or (
-            f"heal/addresses-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+        heal_branch = (
+            scheduled_branch
+            or args.branch
+            or (f"heal/addresses-{datetime.now(UTC):%Y%m%dT%H%M%SZ}")
         )
-        if not heal_branch.startswith("heal/") or any(char.isspace() for char in heal_branch):
+        if not heal_branch.startswith("heal/") or any(
+            char.isspace() for char in heal_branch
+        ):
             return 1
-        if runner(
-            ["git", "switch", "-c", heal_branch], "create scheduled heal branch"
-        ) != 0:
+        if (
+            runner(["git", "switch", "-c", heal_branch], "create scheduled heal branch")
+            != 0
+        ):
             return 2
 
     heal_exit = runner(HEAL_COMMAND, "apply one scoped heal pass")
@@ -191,21 +231,25 @@ def main(
         _restore_wiki(repo_root, snapshot)
         cleanup_ok = True
         if heal_branch is not None:
-            cleanup_ok = _cleanup_scheduled_branch(
-                runner, original_branch, heal_branch
-            )
+            cleanup_ok = _cleanup_scheduled_branch(runner, original_branch, heal_branch)
         if not cleanup_ok or heal_exit == 2 or heal_exit not in {1, 2}:
             return 2
         return 1
 
     post_exit = _post_heal_exit(runner)
+    if post_exit == 0:
+        # The heal rewrote `sources[].hint`, so the prose that was grounded in
+        # the old addresses has not been judged against the new ones. This was
+        # the gap: the only path that changes published frontmatter was the only
+        # path with no groundedness judgement.
+        post_exit = _groundedness_exit(
+            runner, mode=args.mode, enforce=args.enforce_groundedness
+        )
     if post_exit != 0:
         _restore_wiki(repo_root, snapshot)
         cleanup_ok = True
         if heal_branch is not None:
-            cleanup_ok = _cleanup_scheduled_branch(
-                runner, original_branch, heal_branch
-            )
+            cleanup_ok = _cleanup_scheduled_branch(runner, original_branch, heal_branch)
         if not cleanup_ok:
             return 2
         return post_exit
@@ -218,16 +262,23 @@ def main(
         _restore_wiki(repo_root, snapshot)
         _cleanup_scheduled_branch(runner, original_branch, heal_branch)
         return 2
-    if runner(
-        ["git", "commit", "-m", "heal: repair verified RAG addresses"],
-        "commit verified heal",
-    ) != 0:
+    if (
+        runner(
+            ["git", "commit", "-m", "heal: repair verified RAG addresses"],
+            "commit verified heal",
+        )
+        != 0
+    ):
         _restore_wiki(repo_root, snapshot)
         _cleanup_scheduled_branch(runner, original_branch, heal_branch)
         return 2
-    if runner(
-        ["git", "push", "-u", args.remote, heal_branch], "push scheduled heal branch"
-    ) != 0:
+    if (
+        runner(
+            ["git", "push", "-u", args.remote, heal_branch],
+            "push scheduled heal branch",
+        )
+        != 0
+    ):
         _restore_wiki(repo_root, snapshot)
         _cleanup_scheduled_branch(runner, original_branch, heal_branch)
         return 2

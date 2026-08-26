@@ -10,6 +10,7 @@ import asyncio
 import fnmatch
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 import asyncpg
 import yaml
 
+from scout.capabilities import capability_fingerprint
 from scout.chunker import (
     ContextualChunker,
     Embedder,
@@ -24,7 +26,7 @@ from scout.chunker import (
     LiteLLMBatchEmbedder,
 )
 from scout.config import postgres_settings
-from scout.parsers import parse_file
+from scout.parsers import ParsedDocument, parse_file
 from scout.policy import PolicyValidationError, validate_document_acl
 
 
@@ -48,6 +50,15 @@ DEFAULT_ACL_FILENAME = ".acl.yaml"
 #: Schema version this loader understands. A map must declare it explicitly so a
 #: future format change cannot be misread as a grant.
 ACL_SCHEMA_VERSION = 1
+
+
+class CapabilityMismatchError(RuntimeError):
+    """This environment would build a different corpus than the recorded one.
+
+    Not a compatibility problem to negotiate: the corpus and the runtime must
+    agree about what the parser can do, or evidence appears and disappears
+    depending on where ingestion happened to run.
+    """
 
 
 class AclPolicyError(ValueError):
@@ -136,9 +147,7 @@ class DocumentAclMap:
             rules.append(AclRule(pattern=pattern.strip(), departments=tuple(validated)))
 
         root = base_dir if base_dir is not None else path.parent
-        return cls(
-            base_dir=root.resolve(), rules=tuple(rules), source_path=path
-        )
+        return cls(base_dir=root.resolve(), rules=tuple(rules), source_path=path)
 
     def departments_for(self, file_path: Path) -> list[str] | None:
         """Return one file's document ACL, or ``None`` when no rule grants it.
@@ -174,7 +183,9 @@ def _match_segments(pattern: tuple[str, ...], parts: tuple[str, ...]) -> bool:
         return not parts
     head, rest = pattern[0], pattern[1:]
     if head == "**":
-        return any(_match_segments(rest, parts[index:]) for index in range(len(parts) + 1))
+        return any(
+            _match_segments(rest, parts[index:]) for index in range(len(parts) + 1)
+        )
     if not parts:
         return False
     return fnmatch.fnmatchcase(parts[0], head) and _match_segments(rest, parts[1:])
@@ -193,9 +204,16 @@ def _is_control_metadata(path: Path, root: Path) -> bool:
     return any(part.startswith(".") for part in parts)
 
 
-async def get_pg_connection() -> asyncpg.Connection:
-    """Creates a database connection with environment credentials."""
-    settings = postgres_settings("ingest")
+async def get_pg_connection(env: Mapping[str, str] | None = None) -> asyncpg.Connection:
+    """Create an ingest connection, from `env` when supplied.
+
+    `env` exists because the CLI already resolved configuration — including the
+    project `.env` — before this is reached, and reading `os.environ` here threw
+    that away: `snpmemory ingest` failed with `POSTGRES_HOST is missing` unless
+    the operator had exported `.env` by hand. The same defect was fixed for
+    `fetch` in `PgVectorRlsBackend._get_pool`; this is the place it was missed.
+    """
+    settings = postgres_settings("ingest", env=env)
 
     return await asyncpg.connect(
         host=settings.host,
@@ -206,6 +224,55 @@ async def get_pg_connection() -> asyncpg.Connection:
     )
 
 
+class ParseCache:
+    """Parsed documents reused across the retries of one indexing cycle.
+
+    `sync_once` retries a failed index up to three times, and the failure that
+    actually occurs is at the **embed** step — the gateway is down, or the
+    provider rate-limits. Re-parsing every document before each retry costs the
+    whole corpus's parse work to reach the one call that failed, and it scales
+    with the corpus rather than with the failure.
+
+    Entries are keyed by identity, not by path: a file whose `mtime_ns` or size
+    changed is parsed again. That makes a stale reuse impossible rather than
+    unlikely.
+
+    Memory is bounded by one corpus, and the cycle clears it once an index
+    succeeds — a cache that outlived its cycle would hold a corpus-worth of text
+    for the life of the process to save work nobody was going to repeat.
+    """
+
+    __slots__ = ("_entries", "parses")
+
+    def __init__(self) -> None:
+        self._entries: dict[Path, tuple[int, int, ParsedDocument]] = {}
+        #: How many real parses happened. Tests assert on this.
+        self.parses = 0
+
+    def parsed(
+        self, file_path: Path, *, base_dir: Path | None = None
+    ) -> ParsedDocument:
+        try:
+            stat = file_path.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            # Cannot establish identity, so cannot safely reuse. Parse it.
+            self.parses += 1
+            return parse_file(file_path, base_dir=base_dir)
+
+        cached = self._entries.get(file_path)
+        if cached is not None and (cached[0], cached[1]) == key:
+            return cached[2]
+
+        self.parses += 1
+        document = parse_file(file_path, base_dir=base_dir)
+        self._entries[file_path] = (key[0], key[1], document)
+        return document
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
 async def ingest_document(
     file_path: Path,
     allowed_depts: list[str],
@@ -214,14 +281,19 @@ async def ingest_document(
     embedder: Embedder | None = None,
     base_dir: Path | None = None,
     dry_run: bool = False,
+    parse_cache: ParseCache | None = None,
 ) -> dict[str, Any]:
     """Parses, chunks, embeds, and ingests a single document into PostgreSQL."""
     allowed_depts = validate_allowed_depts(allowed_depts)
     chunker = chunker or ContextualChunker()
     embedder = embedder or LiteLLMBatchEmbedder()
 
-    # 1. Parse document
-    parsed_doc = parse_file(file_path, base_dir=base_dir)
+    # 1. Parse document. A retry after a failed embed must not re-parse a corpus
+    # that has not changed — see `ParseCache`.
+    if parse_cache is None:
+        parsed_doc = parse_file(file_path, base_dir=base_dir)
+    else:
+        parsed_doc = parse_cache.parsed(file_path, base_dir=base_dir)
     chunks = chunker.chunk_document(parsed_doc)
 
     if dry_run:
@@ -275,17 +347,21 @@ async def ingest_document(
             # Upsert document record
             row = await conn.fetchrow(
                 """
-                INSERT INTO rag_documents (source_uri, allowed_depts, title, ingested_at)
-                VALUES ($1, $2, $3, now())
+                INSERT INTO rag_documents
+                    (source_uri, allowed_depts, title, ingested_at,
+                     capability_fingerprint)
+                VALUES ($1, $2, $3, now(), $4)
                 ON CONFLICT (source_uri) DO UPDATE
                 SET allowed_depts = EXCLUDED.allowed_depts,
                     title = EXCLUDED.title,
-                    ingested_at = EXCLUDED.ingested_at
+                    ingested_at = EXCLUDED.ingested_at,
+                    capability_fingerprint = EXCLUDED.capability_fingerprint
                 RETURNING doc_id;
                 """,
                 parsed_doc.source_uri,
                 allowed_depts,
                 parsed_doc.title,
+                json.dumps(capability_fingerprint()),
             )
             if not row:
                 raise RuntimeError(f"Failed to upsert document {parsed_doc.source_uri}")
@@ -400,6 +476,117 @@ def _scanned_uri(file_path: Path, base_dir: Path) -> str:
     return str(file_path)
 
 
+async def corpus_fingerprint_mismatch(
+    conn: asyncpg.Connection, dir_path: Path, base_dir: Path
+) -> str:
+    """Describe how this process differs from what the corpus was built with.
+
+    Returns `""` when they agree **or when nothing recorded one** — a corpus
+    indexed before fingerprints existed must not be un-ingestable, or an upgrade
+    bricks a working deployment.
+    """
+    from scout.capabilities import (
+        capability_fingerprint,
+        describe_fingerprint_difference,
+    )
+
+    prefix = _scanned_uri(dir_path, base_dir)
+    rows = await conn.fetch(
+        "SELECT source_uri, capability_fingerprint FROM rag_documents "
+        "WHERE capability_fingerprint IS NOT NULL AND source_uri LIKE $1;",
+        f"{prefix}%",
+    )
+    if not rows:
+        return ""
+
+    current = capability_fingerprint()
+    for row in rows:
+        recorded = row["capability_fingerprint"]
+        if isinstance(recorded, str):
+            recorded = json.loads(recorded)
+        difference = describe_fingerprint_difference(recorded or {}, current)
+        if difference:
+            return f"{row['source_uri']}: {difference}"
+    return ""
+
+
+def _normalise_acknowledgement(text: str) -> str:
+    """Compare on content, not on how a shell mangled the quoting."""
+    return " ".join(text.split()).strip().strip("'\"")
+
+
+def _require_acknowledgement(mismatch: str, acknowledgement: str | None) -> None:
+    """The override must name the difference it is overriding.
+
+    `--confirm` is already required for every write, so requiring it a second
+    time acknowledges nothing: it is a keystroke the caller types without
+    reading. An acknowledgement that must equal the mismatch text can only be
+    produced by having read that specific mismatch — and a *stale* one, copied
+    from an earlier refusal about a different difference, is rejected, which a
+    boolean flag can never do.
+    """
+    if acknowledgement is None or not acknowledgement.strip():
+        raise CapabilityMismatchError(
+            "allow_capability_change was given without an acknowledgement. "
+            "Rebuilding the corpus with different parser capabilities is not a "
+            "flag; name the difference being accepted:\n"
+            f"  --acknowledge-capability-change={mismatch!r}"
+        )
+    if _normalise_acknowledgement(acknowledgement) != _normalise_acknowledgement(
+        mismatch
+    ):
+        raise CapabilityMismatchError(
+            "the acknowledgement does not match the difference this process "
+            "found, so it cannot be an acknowledgement of it — a stale one "
+            "copied from an earlier refusal is the case this rejects.\n"
+            f"  found        {mismatch!r}\n"
+            f"  acknowledged {acknowledgement!r}"
+        )
+
+
+async def record_capability_override(
+    conn: asyncpg.Connection,
+    *,
+    mismatch: str,
+    acknowledgement: str,
+    actor_hint: str | None,
+    dir_path: Path,
+    base_dir: Path,
+) -> None:
+    """Append one audit row before the corpus is rebuilt.
+
+    Written *before* the rebuild on purpose: an audit row that only appears
+    after a successful ingest is missing for exactly the runs that went wrong.
+
+    `actor` is not passed — PostgreSQL fills it from `session_user`, the
+    authenticated identity. `actor_hint` carries caller-supplied context and is
+    recorded as unverified. See `005_ingest_events.sql`.
+    """
+    from scout.capabilities import capability_fingerprint
+
+    source_uri = mismatch.split(":", 1)[0].strip() or _scanned_uri(dir_path, base_dir)
+    recorded = await conn.fetchval(
+        "SELECT capability_fingerprint FROM rag_documents WHERE source_uri = $1;",
+        source_uri,
+    )
+    if isinstance(recorded, str):
+        recorded = json.loads(recorded)
+
+    await conn.execute(
+        """
+        INSERT INTO ingest_events (
+            source_uri, event_type, old_fingerprint, new_fingerprint,
+            acknowledgement, actor_hint
+        ) VALUES ($1, 'capability_override', $2::jsonb, $3::jsonb, $4, $5);
+        """,
+        source_uri,
+        json.dumps(recorded) if recorded else None,
+        json.dumps(capability_fingerprint()),
+        acknowledgement,
+        actor_hint,
+    )
+
+
 async def ingest_directory(
     dir_path: Path,
     allowed_depts: list[str] | None = None,
@@ -407,6 +594,11 @@ async def ingest_directory(
     reconcile: bool = True,
     embedder: Embedder | None = None,
     acl: DocumentAclMap | None = None,
+    parse_cache: ParseCache | None = None,
+    allow_capability_change: bool = False,
+    acknowledge_capability_change: str | None = None,
+    actor_hint: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Recursively ingests a directory under one explicit document ACL source.
 
@@ -456,10 +648,51 @@ async def ingest_directory(
 
     results: list[dict[str, Any]] = []
     chunker = ContextualChunker()
-    embedder = embedder or LiteLLMBatchEmbedder()
+    if embedder is None:
+        # Same reason as the connection above: the caller may have resolved
+        # configuration already, and reading `os.environ` here would discard it.
+        # A `.env` the CLI loaded is not visible to a bare `os.environ` lookup.
+        settings = dict(env or {})
+        embedder = LiteLLMBatchEmbedder(
+            base_url=settings.get("LITELLM_BASE_URL"),
+            api_key=settings.get("LITELLM_MASTER_KEY"),
+            model=settings.get("LITELLM_EMBED_MODEL"),
+        )
 
-    conn = None if dry_run else await get_pg_connection()
+    conn = None if dry_run else await get_pg_connection(env)
     try:
+        if conn is not None:
+            # Computed on both paths. The override has to be checked *against
+            # this specific difference*, so it cannot be evaluated before the
+            # difference is known.
+            mismatch = await corpus_fingerprint_mismatch(
+                conn, dir_path, dir_path.parent
+            )
+            if mismatch and not allow_capability_change:
+                # Strict refusal, not a compatibility matrix. Silent churn is
+                # worse than a blocked command: this process would emit evidence
+                # the runtime cannot reproduce, and the next sync would drop it
+                # without saying so. Nothing is written and nothing is deleted —
+                # reconciliation in particular must not run, or rows are purged
+                # for a corpus this process has just said it cannot rebuild.
+                raise CapabilityMismatchError(
+                    "this environment parses differently from the one that built "
+                    f"the corpus ({mismatch}). Re-ingest through the image that "
+                    "built it, or acknowledge this exact difference to rebuild "
+                    "the corpus with this environment's capabilities:\n"
+                    f"  --acknowledge-capability-change={mismatch!r}"
+                )
+            if mismatch and allow_capability_change:
+                _require_acknowledgement(mismatch, acknowledge_capability_change)
+                await record_capability_override(
+                    conn,
+                    mismatch=mismatch,
+                    acknowledgement=acknowledge_capability_change or "",
+                    actor_hint=actor_hint,
+                    dir_path=dir_path,
+                    base_dir=dir_path.parent,
+                )
+
         async def ingest_batch() -> None:
             for file_path in files:
                 file_depts = (
@@ -484,6 +717,7 @@ async def ingest_directory(
                     embedder=embedder,
                     base_dir=dir_path.parent,
                     dry_run=dry_run,
+                    parse_cache=parse_cache,
                 )
                 results.append(res)
 

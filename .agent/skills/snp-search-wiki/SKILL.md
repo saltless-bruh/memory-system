@@ -1,8 +1,6 @@
 ---
 name: snp-search-wiki
-description: >-
-  Use this skill when you need to answer a technical question about the system, its infrastructure, or security policies.
-  This skill instructs the agent on how to search and read the compiled Wiki knowledge map via the basic-memory MCP.
+description: "Use this skill when you need to answer a technical question about the system, its infrastructure, or security policies. This skill instructs the agent on how to search and read the compiled Wiki knowledge map via the snp-wiki MCP server."
 ---
 
 # snp-search-wiki
@@ -15,9 +13,9 @@ This skill guides you through searching and reading the "compiled map" of the SN
 
 ---
 
-## Tool Calling Specification (`basic-memory` MCP)
+## Tool Calling Specification (`snp-wiki` MCP)
 
-* **Server**: `basic-memory` (Port 8765)
+* **Server**: `snp-wiki` (Port 8765)
 * **Transport**: Streamable HTTP (`http://localhost:8765/mcp`)
 
 ### 1. `search_notes` — Semantic Discovery
@@ -72,7 +70,7 @@ This skill guides you through searching and reading the "compiled map" of the SN
 
 ## 3-Step Decision Protocol (Rule R-5)
 
-1. **Search Notes**: Call `basic-memory.search_notes(query)` to find top relevant candidate pages. Do not load the entire vault index.
+1. **Search Notes**: Call `snp-wiki.search_notes(query)` to find top relevant candidate pages. Do not load the entire vault index.
 2. **Read Body & Evaluate**: Read `## Technical Specifications`.
 3. **Sufficiency Evaluation (Rule R-5.1)**:
    - If the note body answers the question $\rightarrow$ **STOP IMMEDIATELY**.

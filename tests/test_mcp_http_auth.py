@@ -58,10 +58,14 @@ def _jwt_server() -> tuple[Any, HttpRecordingBackend, str, str]:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    public_pem = private.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    public_pem = (
+        private.public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
     backend = HttpRecordingBackend()
     config = load_auth_config(
         {
@@ -115,9 +119,12 @@ async def test_missing_or_malformed_bearer_is_http_401_before_backend() -> None:
             "clientInfo": {"name": "test", "version": "1"},
         },
     }
-    async with app.lifespan(app), httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://scout.test"
-    ) as client:
+    async with (
+        app.lifespan(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://scout.test"
+        ) as client,
+    ):
         missing = await client.post("/mcp", json=request)
         malformed = await client.post(
             "/mcp", json=request, headers={"Authorization": "Basic invalid"}
@@ -133,7 +140,9 @@ async def test_missing_or_malformed_bearer_is_http_401_before_backend() -> None:
     assert backend.calls == []
 
 
-async def test_authorization_header_reaches_current_access_token_and_can_narrow() -> None:
+async def test_authorization_header_reaches_current_access_token_and_can_narrow() -> (
+    None
+):
     server, backend = _server()
     app = server.http_app(stateless_http=True)
     transport = StreamableHttpTransport(

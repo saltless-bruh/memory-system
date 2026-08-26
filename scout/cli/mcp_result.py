@@ -98,7 +98,9 @@ def to_tool_result(result: CommandResult, *, detail: bool = False) -> dict[str, 
     ).to_dict()
 
 
-def run_tool(spec: Any, *args: Any, detail: bool = False, **kwargs: Any) -> dict[str, Any]:
+def run_tool(
+    spec: Any, *args: Any, detail: bool = False, **kwargs: Any
+) -> dict[str, Any]:
     """Invoke a command and map it onto an MCP tool return.
 
     Commands signal refusals and configuration problems by raising `CliError` —

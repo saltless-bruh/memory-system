@@ -198,19 +198,49 @@ def test_the_manifest_and_the_exporter_describe_the_same_servers() -> None:
 
 
 def test_the_manifest_lists_the_local_servers_real_tools() -> None:
-    """`requiredTools` has to name tools the server actually serves."""
+    """`requiredTools` has to name tools the servers actually serve.
+
+    Both in-process servers are covered here. `snp-wiki` runs in a container and
+    is covered by tests/integration/test_wiki_tool_surface_live.py, because
+    reaching it needs Docker and this suite stays hermetic. The split is named
+    in plugin.json's own note so a reader can check the claim rather than
+    trust it -- an earlier version of that note said every server was verified
+    while only `snpmemory` was, and `list_notes` sat in the manifest unserved.
+    """
     import asyncio
     import json
     import sys
 
     sys.path.insert(0, str(REPO_ROOT))
+    from scout.auth import AuthConfig, AuthMode, CallerIdentity
     from scout.mcp.local_server import build_server
+    from scout.mcp_server import build_server as build_scout
 
-    served = {tool.name for tool in asyncio.run(build_server().list_tools())}
     declared = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))[
         "extensions"
-    ]["io.snp.memory"]["requiredTools"]["snpmemory"]
-    assert set(declared) == served
+    ]["io.snp.memory"]["requiredTools"]
+
+    served_local = {tool.name for tool in asyncio.run(build_server().list_tools())}
+    assert set(declared["snpmemory"]) == served_local
+
+    class _NullBackend:
+        async def retrieve(self, *args: object, **kwargs: object) -> list[object]:
+            return []
+
+    scout_config = AuthConfig(
+        mode=AuthMode.DEVELOPMENT,
+        provider=None,
+        development_identity=CallerIdentity(
+            subject="manifest-check",
+            departments=frozenset({"ai_eng"}),
+            auth_mode=AuthMode.DEVELOPMENT,
+        ),
+    )
+    served_scout = {
+        tool.name
+        for tool in asyncio.run(build_scout(_NullBackend(), auth_config=scout_config).list_tools())
+    }
+    assert set(declared["scout"]) == served_scout
 
 
 def test_the_local_server_is_declared_stdio_and_carries_no_url() -> None:

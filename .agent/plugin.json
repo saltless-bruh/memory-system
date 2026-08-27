@@ -28,8 +28,8 @@
         "workflows": "workflows/"
       },
       "requiredTools": {
-        "note": "The tools each server in mcp.json must actually offer. Tested against what the servers really serve, so a config cannot advertise a tool that does not exist.",
-        "snp-wiki": ["search_notes", "read_note", "write_note", "list_notes"],
+        "note": "The tools each server in mcp.json must actually offer. snpmemory and scout are built in-process and introspected by tests/test_agent_package.py::test_the_manifest_lists_the_local_servers_real_tools; snp-wiki is a container and is introspected by tests/integration/test_wiki_tool_surface_live.py. Naming the tests is the point: an earlier version of this note claimed every server was checked while only one was, and `list_notes` sat here for weeks without being served.",
+        "snp-wiki": ["search_notes", "read_note", "write_note"],
         "scout": ["rag_fetch"],
         "snpmemory": ["verify", "plan_articles", "compile_plan", "compile_status"]
       },

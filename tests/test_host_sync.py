@@ -466,3 +466,90 @@ def test_sync_calls_are_serialized(
     assert sorted(results) == [True, True]
     assert maximum_active == 1
     assert still_syncing is True
+
+
+# ── three-state readiness (2026-08-27) ───────────────────────────────────
+# host-sync reported `ready` for eight days while every synchronisation failed,
+# so an eight-day-old wiki replica reached every agent with no signal anywhere.
+# The state machine was not wrong about being *able to serve*; it was wrong to
+# call a service that is not doing its job healthy.
+
+
+def _payload(response: object) -> dict:
+    import json
+
+    return json.loads(bytes(response.body).decode("utf-8"))  # type: ignore[attr-defined]
+
+
+def test_a_published_replica_with_a_failed_sync_is_degraded_not_ready() -> None:
+    import asyncio
+
+    from scripts import host_sync
+
+    host_sync._reset_sync_state_for_tests()
+    host_sync._mark_sync_queued()
+    host_sync._mark_success("a" * 40)
+    host_sync._mark_sync_queued()
+    host_sync._mark_failure("git fetch failed", fallback_commit="a" * 40)
+
+    payload = _payload(asyncio.run(host_sync.readiness()))
+    assert payload["status"] == "degraded"
+    assert payload["last_error"], "degraded must carry something to act on"
+
+
+def test_a_clean_sync_still_reports_ready() -> None:
+    """The control for the test above.
+
+    A readiness handler that always answered "degraded" would satisfy that test
+    and be worthless, so the same handler must still be able to say ready.
+    """
+    import asyncio
+
+    from scripts import host_sync
+
+    host_sync._reset_sync_state_for_tests()
+    host_sync._mark_sync_queued()
+    host_sync._mark_success("b" * 40)
+
+    assert _payload(asyncio.run(host_sync.readiness()))["status"] == "ready"
+
+
+def test_readiness_reports_when_the_replica_was_published() -> None:
+    """Without a timestamp a stale replica is indistinguishable from a fresh one."""
+    import asyncio
+    from datetime import datetime
+
+    from scripts import host_sync
+
+    host_sync._reset_sync_state_for_tests()
+    host_sync._mark_sync_queued()
+    host_sync._mark_success("c" * 40)
+
+    stamp = _payload(asyncio.run(host_sync.readiness()))["published_at"]
+    assert stamp, "readiness must say when the replica was published"
+    datetime.fromisoformat(stamp)
+
+
+def test_a_failed_git_step_is_named_without_leaking_the_url() -> None:
+    """The generic error was a deliberate choice: sync URLs carry credentials.
+
+    Naming the subcommand keeps that protection and still gives an operator
+    something to act on, instead of "synchronization failed".
+    """
+    import tempfile
+    from pathlib import Path
+
+    import pytest
+
+    from scripts import host_sync
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(host_sync.GitStepError) as excinfo:
+            host_sync._run_git(
+                ["fetch", "no-such-remote", "refs/heads/x:refs/heads/x"], cwd=Path(tmp)
+            )
+
+    message = str(excinfo.value)
+    assert "fetch" in message
+    for leak in ("http://", "https://", "@", "token", "password"):
+        assert leak not in message.lower()

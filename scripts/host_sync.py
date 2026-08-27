@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import threading
+from datetime import UTC, datetime
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -54,6 +55,7 @@ _state: dict[str, Any] = {
     "syncing": False,
     "pending_syncs": 0,
     "published_commit": None,
+    "published_at": None,
     "last_error": "Initial synchronization has not completed",
 }
 
@@ -96,6 +98,7 @@ def _mark_success(commit: str) -> None:
             ready=True,
             syncing=_state["pending_syncs"] > 0,
             published_commit=commit,
+            published_at=datetime.now(UTC).isoformat(),
             last_error=None,
         )
 
@@ -172,6 +175,14 @@ def _safe_remove_tree(path: Path, root: Path) -> None:
         shutil.rmtree(path)
 
 
+class GitStepError(RuntimeError):
+    """A Git step failed. Carries the subcommand name, never its output."""
+
+    def __init__(self, step: str) -> None:
+        super().__init__(f"git {step} failed")
+        self.step = step
+
+
 def _git_timeout() -> float:
     raw = os.environ.get("GIT_TIMEOUT_SECONDS", "60")
     try:
@@ -187,15 +198,22 @@ def _run_git(args: Sequence[str], *, cwd: Path) -> str:
     """Run one bounded, non-interactive Git operation without logging credentials."""
     environment = os.environ.copy()
     environment["GIT_TERMINAL_PROMPT"] = "0"
-    result = subprocess.run(
-        ["git", "-c", f"safe.directory={cwd}", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=_git_timeout(),
-        env=environment,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={cwd}", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_git_timeout(),
+            env=environment,
+        )
+    except subprocess.CalledProcessError as exc:
+        # The subcommand alone is safe to surface; the URL and the command
+        # output are not, because a sync URL carries credentials. Naming the
+        # step is what turns "synchronization failed" into something an
+        # operator can act on.
+        raise GitStepError(args[0] if args else "git") from exc
     return result.stdout.strip()
 
 
@@ -443,10 +461,14 @@ def _perform_git_sync(vault_path: str = VAULT_DIR, *, queued: bool = False) -> b
             RuntimeError,
         ) as exc:
             # Do not expose command output or URLs, which can contain credentials.
-            error = f"{type(exc).__name__}: synchronization failed"
+            error = (
+                f"git {exc.step} failed"
+                if isinstance(exc, GitStepError)
+                else f"{type(exc).__name__}: synchronization failed"
+            )
             fallback = _existing_published_commit(vault_path)
             _mark_failure(error, fallback)
-            logger.error("Host-sync failed (%s)", type(exc).__name__)
+            logger.error("Host-sync failed: %s", error)
             return False
         _mark_success(commit)
         logger.info("Published wiki snapshot at commit %s", commit)
@@ -492,11 +514,23 @@ async def liveness() -> dict[str, str]:
 @app.get("/hooks/wiki-update")
 async def readiness() -> JSONResponse:
     state_payload = _read_state()
+    # Three states, not two. A replica that was published once and has failed
+    # every sync since is still serving valid content, so restarting it would
+    # not help -- but calling that "ready" is what let an eight-day-old corpus
+    # reach every agent with no signal. Degraded keeps it in service and makes
+    # the failure visible.
+    if not state_payload["ready"]:
+        health = "not_ready"
+    elif state_payload["last_error"]:
+        health = "degraded"
+    else:
+        health = "ready"
     payload = {
-        "status": "ready" if state_payload["ready"] else "not_ready",
+        "status": health,
         "service": "host-sync",
         "syncing": state_payload["syncing"],
         "published_commit": state_payload["published_commit"],
+        "published_at": state_payload["published_at"],
         "last_error": state_payload["last_error"],
     }
     code = (

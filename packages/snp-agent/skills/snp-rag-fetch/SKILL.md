@@ -21,11 +21,17 @@ Use this skill ONLY when the wiki page (accessed via `snp-search-wiki`) does not
 ### Input Parameters (JSON Schema)
 ```json
 {
-  "path": "raw/reports/vllm_high_throughput_serving.pdf",  // REQUIRED: Path under raw/ on disk
-  "hint": "PagedAttention KV-Cache Virtual Block Allocation", // REQUIRED: Minted semantic phrase
-  "department": "ai_eng"                                  // OPTIONAL: Narrow clearance (must be subset of caller token)
+  "path": "raw/papers/computers-12-00091.pdf",
+  "hint": "Convolutional Neural Networks",
+  "loc": "p.12",
+  "department": "ai_eng"
 }
 ```
+
+* `path` — **required.** The file under `raw/`, copied from the page's `sources[]`.
+* `hint` — **required.** The minted semantic phrase, copied verbatim. Never compose one; an unminted hint addresses nothing (Rule R-6.3).
+* `loc` — optional. The locator from the same `sources[]` entry, which narrows retrieval to that part of the file.
+* `department` — optional. Narrows the caller's verified clearance; it can never widen it.
 
 ### Expected Successful Response
 ```json
@@ -33,15 +39,15 @@ Use this skill ONLY when the wiki page (accessed via `snp-search-wiki`) does not
   "status": "ok",
   "context": [
     {
-      "text": "PagedAttention translates virtual KV cache blocks into non-contiguous physical GPU pages, eliminating external memory fragmentation...",
-      "file_path": "raw/reports/vllm_high_throughput_serving.pdf",
-      "loc": "p.2"
+      "text": "CNN is the most prominent and widely used algorithm in the field of DL. The main advantage of CNN over its predecessors is that it automatically picks out important parts without any help from a person...",
+      "file_path": "raw/papers/computers-12-00091.pdf",
+      "loc": "p.12"
     }
   ],
   "citations": [
     {
-      "file_path": "raw/reports/vllm_high_throughput_serving.pdf",
-      "loc": "p.2",
+      "file_path": "raw/papers/computers-12-00091.pdf",
+      "loc": "p.12",
       "score": 0.0328
     }
   ]
@@ -86,9 +92,9 @@ Use this skill ONLY when the wiki page (accessed via `snp-search-wiki`) does not
    Always extract `path`, `loc`, and `hint` from the note frontmatter:
    ```yaml
    sources:
-     - path: raw/reports/vllm_high_throughput_serving.pdf
-       loc: "p.2"
-       hint: "PagedAttention KV-Cache Virtual Block Allocation"
+     - path: raw/papers/computers-12-00091.pdf
+       loc: "p.12"
+       hint: "Convolutional Neural Networks"
    ```
 
 2. **Invoke Scout `rag_fetch`**:

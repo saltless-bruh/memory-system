@@ -16,18 +16,18 @@ Never hand-write `sources[].hint`. Always mint it against PostgreSQL pgvector:
 
 ```bash
 uv run python scripts/mint.py \
-  --path raw/reports/vllm_high_throughput_serving.pdf \
-  --hint "PagedAttention KV-Cache Virtual Block Allocation" \
+  --path raw/papers/computers-12-00091.pdf \
+  --hint "Convolutional Neural Networks" \
   --department ai_eng \
-  --loc "p.2"
+  --loc "p.12"
 ```
 
 ### Expected Output:
 ```yaml
 sources:
-  - path: raw/reports/vllm_high_throughput_serving.pdf
-    loc: "p.2"
-    hint: "PagedAttention KV-Cache Virtual Block Allocation"
+  - path: raw/papers/computers-12-00091.pdf
+    loc: "p.12"
+    hint: "Convolutional Neural Networks"
 ```
 
 ---
@@ -39,14 +39,14 @@ Every page in `wiki/` (`concepts/`, `techniques/`, `entities/`, `playbooks/`) mu
 ```markdown
 ---
 type: concept              # technique | entity | playbook | concept
-title: PagedAttention Engine
-summary: Allocates non-contiguous physical GPU VRAM blocks for KV-caches to eliminate memory fragmentation.
-entities: [paged-attention, vllm, kv-cache]
+title: Convolutional Neural Networks
+summary: Deep learning algorithms that automatically extract features using shared weights and local connections.
+entities: [convolutional-neural-networks, deep-learning, feature-extraction]
 department: ai_eng         # Scope hook (redteam | blueteam | ai_eng | infra)
 sources:                   # ADDRESS out to RAG Data Vault
-  - path: raw/reports/vllm_high_throughput_serving.pdf
-    loc: "p.2"
-    hint: "PagedAttention KV-Cache Virtual Block Allocation"
+  - path: raw/papers/computers-12-00091.pdf
+    loc: "p.12"
+    hint: "Convolutional Neural Networks"
 last_compiled: 2026-08-19
 ---
 
@@ -69,11 +69,11 @@ Relational links using [[wikilink-slug]] syntax only.
 
 ```bash
 uv run python scripts/compile_note.py \
-  --path raw/reports/vllm_high_throughput_serving.pdf \
-  --title "PagedAttention Engine" \
+  --path raw/papers/computers-12-00091.pdf \
+  --title "Convolutional Neural Networks" \
   --category concepts \
   --dept ai_eng \
-  --loc "p.2"
+  --loc "p.12"
 ```
 
 ---
@@ -88,5 +88,5 @@ uv run python scripts/gen_index.py --check
 uv run python scripts/verify_addresses.py
 
 # 3. Create branch and propose PR (NEVER push directly to main)
-uv run python scripts/propose_page.py --page wiki/concepts/paged-attention-engine.md
+uv run python scripts/propose_page.py --page wiki/concepts/convolutional-neural-networks.md
 ```

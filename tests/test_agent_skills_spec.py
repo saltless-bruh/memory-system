@@ -141,11 +141,23 @@ def test_only_specification_keys_are_declared(skill: Path) -> None:
 
 
 def test_the_authoritative_and_mirrored_skill_sets_are_identical() -> None:
-    """`.claude/` mirrors `.agent/`; a skill fixed in one must be fixed in both."""
+    """`.claude/` mirrors `.agent/`; a skill fixed in one must be fixed in both.
+
+    Excepting the `superpowers-*` layer, which lives in `.agent/` only. The
+    exclusion is imported rather than restated so that this test and
+    `test_agent_package_sync` cannot disagree about what is carved out.
+    """
+    from test_agent_package_sync import CLAUDE_EXCLUDED_PREFIXES
+
     agent = {
         p.parent.name for p in (REPO_ROOT / ".agent" / "skills").glob("*/SKILL.md")
     }
     claude = {
         p.parent.name for p in (REPO_ROOT / ".claude" / "skills").glob("*/SKILL.md")
     }
-    assert agent == claude
+    excluded = {name for name in agent if name.startswith(CLAUDE_EXCLUDED_PREFIXES)}
+    assert excluded, "the carve-out names nothing; it has become vacuous"
+    assert not (claude & excluded), (
+        f"excluded skills are still present under .claude/: {sorted(claude & excluded)}"
+    )
+    assert agent - excluded == claude

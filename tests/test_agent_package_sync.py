@@ -19,6 +19,36 @@ CLAUDE_DIR = REPO_ROOT / ".claude"
 # portable bundle, not client config.
 MIRRORED_CONTRACT_DIRS = ("instructions", "rules", "skills", "workflows")
 
+
+def _claude_exclusions_from_plugin() -> tuple[
+    tuple[str, ...], dict[str, tuple[str, ...]]
+]:
+    """Read the deliberate Claude-only carve-out from authoritative metadata."""
+    data = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))
+    repo_local = data["extensions"]["io.snp.memory"]["repoLocal"]
+    prefixes = tuple(repo_local["prefixes"])
+    rules = tuple(repo_local["rules"])
+    return prefixes, {"rules": rules}
+
+
+# The one carve-out from that mirror. The `superpowers-*` layer is the
+# development discipline of the *other* agent clients (Antigravity reads
+# `.agent/`); Claude Code runs the `unlazy` gate discipline instead. Carrying
+# both put two conflicting completion protocols — plan-gate plus gate-ledger —
+# into a single Claude session, so the layer stays in `.agent/` and is absent
+# from `.claude/`. This is narrower than `plugin.json`'s `repoLocal`, which
+# means "not distributed": the repo-local *instructions* are still mirrored
+# into `.claude/`, because Claude Code is meant to read those.
+CLAUDE_EXCLUDED_PREFIXES, CLAUDE_EXCLUDED_FILES = _claude_exclusions_from_plugin()
+
+
+def _is_claude_excluded(subdir: str, rel: Path) -> bool:
+    """True when `subdir/rel` deliberately does not exist under `.claude/`."""
+    if any(part.startswith(CLAUDE_EXCLUDED_PREFIXES) for part in rel.parts):
+        return True
+    return rel.name in CLAUDE_EXCLUDED_FILES.get(subdir, ())
+
+
 # Root-level files whose divergence README.md and docs/ARCHITECTURE_STATUS.md
 # explicitly promise cannot happen.
 # `package.json` is npm metadata and is shared. `plugin.json` and `mcp.json`
@@ -192,11 +222,15 @@ def test_agent_snp_components_mirrored_in_package() -> None:
 
 
 def test_claude_mirrors_agent_contract() -> None:
-    """`.claude/` must be a byte-for-byte mirror of the `.agent/` contract.
+    """`.claude/` must mirror the `.agent/` contract byte-for-byte.
 
     Claude Code reads `.claude/`; every other agent client reads `.agent/`. If
     they diverge, a Claude agent silently operates under a different contract.
     `.agent/` is authoritative — resync `.claude/` from it, never the reverse.
+
+    The sole exception is the `superpowers-*` layer, which is deliberately
+    absent from `.claude/`; see `CLAUDE_EXCLUDED_PREFIXES`. That carve-out is
+    itself verified below, so it cannot quietly widen into real drift.
     """
     assert AGENT_DIR.is_dir(), f"Agent dir missing: {AGENT_DIR}"
     assert CLAUDE_DIR.is_dir(), (
@@ -205,23 +239,34 @@ def test_claude_mirrors_agent_contract() -> None:
 
     problems: list[str] = []
     total_mirrored = 0
+    total_excluded = 0
     for subdir in MIRRORED_CONTRACT_DIRS:
         agent_sub = AGENT_DIR / subdir
         claude_sub = CLAUDE_DIR / subdir
         assert agent_sub.is_dir(), f"Missing .agent/{subdir}/"
         assert claude_sub.is_dir(), f"Missing .claude/{subdir}/"
 
-        agent_files = _relative_files(agent_sub)
+        all_agent_files = _relative_files(agent_sub)
+        excluded = {rel for rel in all_agent_files if _is_claude_excluded(subdir, rel)}
+        total_excluded += len(excluded)
+
+        agent_files = all_agent_files - excluded
         claude_files = _relative_files(claude_sub)
         total_mirrored += len(agent_files)
 
+        # The carve-out is an absence, not a licence: anything excluded must be
+        # genuinely gone from `.claude/`, or a stale copy keeps loading.
+        problems += [
+            f".claude/{subdir}/{rel} is excluded from the Claude tree but still present"
+            for rel in sorted(excluded & claude_files)
+        ]
         problems += [
             f".agent/{subdir}/{rel} is not mirrored in .claude/"
             for rel in sorted(agent_files - claude_files)
         ]
         problems += [
             f".claude/{subdir}/{rel} has no .agent/ counterpart"
-            for rel in sorted(claude_files - agent_files)
+            for rel in sorted(claude_files - agent_files - excluded)
         ]
         problems += [
             f"{subdir}/{rel} differs between .agent/ and .claude/"
@@ -232,12 +277,20 @@ def test_claude_mirrors_agent_contract() -> None:
     assert total_mirrored >= 20, (
         f"Contract mirror looks truncated: only {total_mirrored} file(s)"
     )
+    # Guard the other side too: if the excluded layer vanishes from `.agent/`,
+    # that is deletion of Antigravity's discipline, not a Claude scope decision.
+    assert total_excluded >= 21, (
+        f"the superpowers layer looks truncated in .agent/: {total_excluded} file(s)"
+    )
     assert not problems, (
         "`.claude/` has drifted from the authoritative `.agent/` contract:\n  "
         + "\n  ".join(problems)
         + "\nResync with: for d in "
         + " ".join(MIRRORED_CONTRACT_DIRS)
-        + '; do rsync -a --delete ".agent/$d/" ".claude/$d/"; done'
+        + "; do rsync -a --delete --exclude '"
+        + "' --exclude '".join(f"{pre}*" for pre in CLAUDE_EXCLUDED_PREFIXES)
+        + '\' ".agent/$d/" ".claude/$d/"; done'
+        + "  (then remove any file named in CLAUDE_EXCLUDED_FILES)"
     )
 
 
@@ -348,6 +401,8 @@ def test_the_repo_local_layer_is_declared_and_genuinely_absent() -> None:
     repo_local = data["extensions"]["io.snp.memory"]["repoLocal"]
     prefixes = tuple(repo_local["prefixes"])
     assert prefixes, "the exclusion must name what it excludes"
+    assert prefixes == CLAUDE_EXCLUDED_PREFIXES
+    assert {"rules": tuple(repo_local["rules"])} == CLAUDE_EXCLUDED_FILES
 
     # Nothing carrying a repo-local prefix may appear in the distribution.
     leaked = [

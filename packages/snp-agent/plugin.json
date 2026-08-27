@@ -61,7 +61,7 @@
         "rules": ["snp-memory.md"]
       },
       "repoLocal": {
-        "note": "Deliberately NOT distributed. The superpowers layer is this repository's own development discipline, not part of the memory system's operating contract. Shipping it would tell a consumer's agent to write brainstorms and plans into their `artifacts/superpowers/`, for work that has nothing to do with the memory system. It lives in `.agent/` and `.claude/` and stays there.",
+        "note": "Deliberately NOT distributed. The superpowers layer is this repository's own development discipline, not part of the memory system's operating contract. Shipping it would tell a consumer's agent to write brainstorms and plans into their `artifacts/superpowers/`, for work that has nothing to do with the memory system. It lives in `.agent/` and stays there: `.claude/` deliberately omits it, because Claude Code runs the `unlazy` gate discipline and carrying both put two conflicting completion protocols in one session. tests/test_agent_package_sync.py enforces that absence in both directions.",
         "prefixes": ["superpowers-"],
         "rules": ["superpowers.md"],
         "instructions": [

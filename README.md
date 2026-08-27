@@ -238,7 +238,11 @@ rolls the wiki back. Scheduled mode starts from a protected base, creates a
   write brainstorms and plans into *their* `artifacts/superpowers/` for work
   unrelated to the memory system. `plugin.json` declares both what ships and
   what does not, and a test holds the package to that declaration in both
-  directions. `plugin.json` / `mcp.json` live only in the package — `.agent/` is
+  directions. That layer is also absent from `.claude/`: Claude Code runs the
+  `unlazy` gate discipline instead, and loading both put two conflicting
+  completion protocols into one session. It remains in `.agent/`, which is what
+  every other agent client reads, and the mirror test enforces the absence in
+  both directions so it cannot widen into real drift. `plugin.json` / `mcp.json` live only in the package — `.agent/` is
   a working contract, not a plugin — while `package.json` is shared.
 
 Documents explicitly marked historical or superseded preserve design context;

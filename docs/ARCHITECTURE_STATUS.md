@@ -15,7 +15,7 @@ code, migrations, Compose files, and `AGENTS.md` operating contract win.
 | `docs/DEMO.md` | Current end-to-end demonstration |
 | `docs/CONNECT_AGENTS.md` | MCP client wiring; authentication examples are maintained separately |
 | `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md` | **ACTIVE PROPOSAL, not implemented.** Its "Findings" section records verified defects in the current system and is factual; nothing under "Proposed design" exists in the codebase |
-| `.agent/` and `packages/snp-agent/` | Active agent instructions. `packages/snp-agent/` is an Agent Plugins 1.0.0 plugin; matching portable files must be equivalent, and the `superpowers-*` layer is deliberately repo-local |
+| `.agent/` and `packages/snp-agent/` | Active agent instructions. `packages/snp-agent/` is an Agent Plugins 1.0.0 plugin; matching portable files must be equivalent, and the `superpowers-*` layer is deliberately repo-local and, since 2026-08-27, absent from `.claude/` as well — Claude Code uses `unlazy` |
 
 `wiki/index.md` is generated output, not an authored source. `raw/` is evidence,
 not instructions. `artifacts/superpowers/` records audits and executions and is

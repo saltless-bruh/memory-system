@@ -46,9 +46,19 @@ htmlcov/
 # mirror of `.agent/` (enforced by tests/test_agent_package_sync.py). Do not
 # ignore it: an untracked mirror silently drifts from the authoritative
 # `.agent/` contract and the drift never reaches code review.
+# One deliberate exception: the `superpowers-*` layer lives in `.agent/` only.
+# It is not ignored here, it is absent — the same test enforces that absence.
 # Only Claude Code's per-machine state below is ignored.
 .claude/settings.local.json
 .claude/*.local.json
+
+# ── unlazy — per-machine gate state ──────────────────────────────────
+# Written by the unlazy skill's checker and its optional Stop hook. `.unlazy/`
+# holds scope pipelines and lease files for one machine's sessions and the hook
+# state is session-keyed, so neither is portable or reviewable. Approval records
+# live outside the repo under `~/.unlazy/` by design and never appear here.
+.unlazy/
+.unlazy-hook-state.json
 
 # ── Editor / tooling / OS ────────────────────────────────────────────
 .vscode/

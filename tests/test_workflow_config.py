@@ -17,6 +17,19 @@ STAGING_COMPOSE = REPO_ROOT / "docker-compose.staging.yml"
 STAGING_GIT_CONFIG = REPO_ROOT / "config" / "host-sync.staging.gitconfig"
 
 
+class _ComposeOverrideLoader(yaml.SafeLoader):
+    """Parse Compose's sequence replacement tag for structural assertions."""
+
+
+def _construct_override(
+    loader: _ComposeOverrideLoader, node: yaml.SequenceNode
+) -> list[object]:
+    return loader.construct_sequence(node)
+
+
+_ComposeOverrideLoader.add_constructor("!override", _construct_override)
+
+
 def _security_workflow() -> str:
     return SECURITY_WORKFLOW.read_text(encoding="utf-8")
 
@@ -180,7 +193,12 @@ def test_integration_host_sync_reads_local_seed_but_publishes_to_replica() -> No
 def test_staging_compose_isolates_ports_and_uses_a_disposable_read_only_remote() -> (
     None
 ):
-    compose = yaml.safe_load(STAGING_COMPOSE.read_text(encoding="utf-8"))
+    staging_text = STAGING_COMPOSE.read_text(encoding="utf-8")
+    # Port entries are a unique Compose resource, but changing only their
+    # published host port makes them additive.  The tag prevents the base
+    # live-stack ports from surviving the staging merge.
+    assert staging_text.count("ports: !override") == 5
+    compose = yaml.load(staging_text, Loader=_ComposeOverrideLoader)
     services = compose["services"]
 
     assert services["postgres"]["ports"] == [

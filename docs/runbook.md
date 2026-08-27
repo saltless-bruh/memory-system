@@ -232,10 +232,12 @@ export SNP_RELEASE_DIR="$(mktemp -d /tmp/snp-v021-release.XXXXXX)"
 chmod 700 "$SNP_RELEASE_DIR"
 
 # A disposable, read-only remote whose only branch is the exact tagged source.
+# Fetch the peeled commit into the bare remote rather than pushing anywhere.
 export SNP_STAGING_SOURCE_REPO="$(mktemp -d /tmp/snp-v021-source.XXXXXX)"
 git init --bare "$SNP_STAGING_SOURCE_REPO"
-git push "$SNP_STAGING_SOURCE_REPO" \
-  "${SNP_RELEASE_TAG}:refs/heads/${SNP_STAGING_GIT_BRANCH}"
+git -c protocol.file.allow=always --git-dir="$SNP_STAGING_SOURCE_REPO" \
+  fetch --no-tags "$PWD" \
+  "${SNP_RELEASE_SHA}:refs/heads/${SNP_STAGING_GIT_BRANCH}"
 
 # Unique local image names prevent a staging build from overwriting the live
 # image tags. All three labels carry the same immutable candidate revision.
@@ -255,7 +257,9 @@ that even a verified base backup still needs a test restore
 ([pg_verifybackup](https://www.postgresql.org/docs/19/app-pgverifybackup.html)).
 
 ```bash
-export BACKUP_ID=v0.2.1-prestage-$(date -u +%Y%m%dT%H%M%SZ)
+# Backup IDs are deliberately lowercase so the operator confirmation is
+# shell-friendly and satisfies the helper's strict identifier contract.
+export BACKUP_ID=v0.2.1-prestage-$(date -u '+%Y%m%dt%H%M%S')z
 uv run python scripts/release_backup.py create \
   --source-project snp-memory \
   --allow-live-source \

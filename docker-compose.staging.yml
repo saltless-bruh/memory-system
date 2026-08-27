@@ -7,15 +7,18 @@
 
 services:
   postgres:
-    ports:
+    # Compose normally merges port lists additively.  Replacing the base list
+    # is essential: retaining its default 5432 publication would collide with
+    # the live stack and defeat this overlay's isolation guarantee.
+    ports: !override
       - "127.0.0.1:${SNP_STAGING_POSTGRES_PORT:-15432}:5432"
 
   litellm:
-    ports:
+    ports: !override
       - "127.0.0.1:${SNP_STAGING_LITELLM_PORT:-14000}:4000"
 
   scout:
-    ports:
+    ports: !override
       - "127.0.0.1:${SNP_STAGING_SCOUT_PORT:-18080}:8080"
 
   host-sync:
@@ -26,9 +29,9 @@ services:
     volumes:
       - ${SNP_STAGING_SOURCE_REPO:?set an absolute staging bare-repository path}:/staging-source:ro
       - ./config/host-sync.staging.gitconfig:/etc/snp/staging.gitconfig:ro
-    ports:
+    ports: !override
       - "127.0.0.1:${SNP_STAGING_HOST_SYNC_PORT:-19000}:9000"
 
   basic-memory:
-    ports:
+    ports: !override
       - "127.0.0.1:${SNP_STAGING_BASIC_MEMORY_PORT:-18765}:8765"

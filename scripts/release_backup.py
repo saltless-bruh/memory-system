@@ -5,7 +5,9 @@ The archive deliberately lives outside the repository: a database dump can
 contain source-derived data and must not become an accidental Git artifact.
 `create` reads from an explicitly approved source project. `restore` rejects
 the default live project, requires the exact backup ID, and records the result
-of the staging restore.
+of the staging restore.  Ownership is never imported, but ACLs are preserved:
+the staged migration service creates the two fixed RLS roles before a restore
+so policies and grants can be replayed safely into a fresh cluster.
 """
 
 from __future__ import annotations
@@ -109,7 +111,6 @@ def backup_command(
         "pg_dump",
         "--format=custom",
         "--no-owner",
-        "--no-privileges",
         "--dbname",
         _validate_database(database),
         allow_live_project=allow_live_source,
@@ -141,6 +142,32 @@ def archive_check_command(source_project: str, *, allow_live_source: bool) -> li
     )
 
 
+def bootstrap_roles_command(
+    target_project: str, *, compose_files: tuple[str, ...]
+) -> list[str]:
+    """Run the staged migration service once to create the fixed cluster roles.
+
+    Migrations create the database schema too, but `restore_backup` immediately
+    drops that disposable database. PostgreSQL roles are cluster-scoped, so the
+    two role identities and their secret-backed login passwords remain for the
+    incoming archive's policies and grants.
+    """
+    if not compose_files:
+        raise BackupError("restore requires explicit staging compose files")
+    try:
+        project = validate_compose_project(target_project)
+        return compose_command(
+            project,
+            "run",
+            "--rm",
+            "--no-deps",
+            "postgres-migrate",
+            compose_files=compose_files,
+        )
+    except ManifestError as exc:
+        raise BackupError(str(exc)) from exc
+
+
 def restore_commands(target_project: str, database: str) -> list[list[str]]:
     """Return staging-only drop, create, and transactional restore commands."""
     try:
@@ -159,7 +186,6 @@ def restore_commands(target_project: str, database: str) -> list[list[str]]:
             "--exit-on-error",
             "--single-transaction",
             "--no-owner",
-            "--no-privileges",
             "--dbname",
             checked_database,
         ),
@@ -280,6 +306,7 @@ def restore_backup(
     record_path: Path,
     confirmed_backup_id: str,
     result: Path,
+    compose_files: tuple[str, ...],
 ) -> Path:
     """Restore a validated archive transactionally into an explicit staging project."""
     result_path = _validate_result_destination(result)
@@ -288,6 +315,7 @@ def restore_backup(
         record_path=record_path,
         confirmed_backup_id=confirmed_backup_id,
     )
+    _run(bootstrap_roles_command(target_project, compose_files=compose_files))
     commands = restore_commands(target_project, record["database"])
     _run(commands[0])
     _run(commands[1])
@@ -318,6 +346,7 @@ def restore_backup(
         "target_project": project,
         "restored_at": datetime.now(UTC).isoformat(),
         "migration_ledger": ledger,
+        "role_bootstrap": "postgres-migrate",
     }
     result_path.write_text(
         json.dumps(restore_result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -342,6 +371,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     restore.add_argument("--record", type=Path, required=True)
     restore.add_argument("--confirm-backup-id", required=True)
     restore.add_argument("--result", type=Path, required=True)
+    restore.add_argument(
+        "--compose-file",
+        action="append",
+        required=True,
+        help="ordered staging Compose file; repeat for overlays",
+    )
     return parser.parse_args(argv)
 
 
@@ -366,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
                     record_path=args.record,
                     confirmed_backup_id=args.confirm_backup_id,
                     result=args.result,
+                    compose_files=tuple(args.compose_file),
                 )
             )
         return 0

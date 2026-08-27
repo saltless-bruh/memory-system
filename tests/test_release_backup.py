@@ -11,6 +11,7 @@ import pytest
 from scripts.release_backup import (
     BackupError,
     backup_command,
+    bootstrap_roles_command,
     create_backup,
     restore_backup,
     restore_commands,
@@ -33,7 +34,6 @@ def test_backup_uses_custom_archive_from_the_explicit_source_project() -> None:
         "pg_dump",
         "--format=custom",
         "--no-owner",
-        "--no-privileges",
         "--dbname",
         "snp_rag",
     ]
@@ -42,17 +42,37 @@ def test_backup_uses_custom_archive_from_the_explicit_source_project() -> None:
         backup_command("snp-memory", "snp_rag", allow_live_source=False)
 
 
-def test_restore_is_staging_only_and_drops_before_recreating_the_database() -> None:
+def test_restore_bootstraps_roles_then_recreates_the_staging_database() -> None:
+    assert bootstrap_roles_command(
+        "snp-v021-staging",
+        compose_files=("docker-compose.yml", "docker-compose.staging.yml"),
+    ) == [
+        "docker",
+        "compose",
+        "--project-name",
+        "snp-v021-staging",
+        "--file",
+        "docker-compose.yml",
+        "--file",
+        "docker-compose.staging.yml",
+        "run",
+        "--rm",
+        "--no-deps",
+        "postgres-migrate",
+    ]
+
+    with pytest.raises(BackupError, match="explicit staging compose files"):
+        bootstrap_roles_command("snp-v021-staging", compose_files=())
+
     commands = restore_commands("snp-v021-staging", "snp_rag")
 
     assert commands[0][-3:] == ["dropdb", "--if-exists", "snp_rag"]
     assert commands[1][-2:] == ["createdb", "snp_rag"]
-    assert commands[2][-7:] == [
+    assert commands[2][-6:] == [
         "pg_restore",
         "--exit-on-error",
         "--single-transaction",
         "--no-owner",
-        "--no-privileges",
         "--dbname",
         "snp_rag",
     ]
@@ -164,6 +184,7 @@ def test_restore_backup_records_the_staging_migration_ledger(
         record_path=record_path,
         confirmed_backup_id="v0.2.1-prestage",
         result=tmp_path / "candidate.restore.json",
+        compose_files=("docker-compose.yml", "docker-compose.staging.yml"),
     )
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -172,5 +193,7 @@ def test_restore_backup_records_the_staging_migration_ledger(
         "001_initial_schema.sql",
         "005_ingest_events.sql",
     ]
-    assert calls[0][-3:] == ["dropdb", "--if-exists", "snp_rag"]
-    assert "pg_restore" in calls[2]
+    assert result["role_bootstrap"] == "postgres-migrate"
+    assert calls[0][-4:] == ["run", "--rm", "--no-deps", "postgres-migrate"]
+    assert calls[1][-3:] == ["dropdb", "--if-exists", "snp_rag"]
+    assert "pg_restore" in calls[3]

@@ -250,10 +250,12 @@ export SNP_GIT_REVISION="$SNP_RELEASE_SHA"
 Create a portable custom-format archive from the explicitly acknowledged live
 source. The helper streams `pg_dump`, runs `pg_restore --list` against the
 result, records a SHA-256 checksum, and refuses both repository-local output
-and a default-live source unless `--allow-live-source` is spelled out. A logical
-archive is appropriate for this one-database staging proof; this stack does not
-claim point-in-time recovery because it has no WAL archive. PostgreSQL notes
-that even a verified base backup still needs a test restore
+and a default-live source unless `--allow-live-source` is spelled out. It omits
+object ownership but retains grants and RLS policy ACLs; the restore helper
+first runs the staged migration service solely to create its two cluster-scoped
+roles and passwords. A logical archive is appropriate for this one-database
+staging proof; this stack does not claim point-in-time recovery because it has
+no WAL archive. PostgreSQL notes that even a verified base backup still needs a test restore
 ([pg_verifybackup](https://www.postgresql.org/docs/19/app-pgverifybackup.html)).
 
 ```bash
@@ -269,9 +271,10 @@ uv run python scripts/release_backup.py create \
 
 Build the exact candidate in the isolated project, start PostgreSQL **only**,
 and restore the archive into that isolated database. The restore helper rejects
-the live default project, requires the exact backup-ID confirmation, drops and
-recreates only the named staging database, restores transactionally, and writes
-a result record. Do not start `sync-job` yet.
+the live default project, requires the exact backup-ID confirmation, invokes
+the staged migration service to bootstrap only the cluster-scoped roles, then
+drops and recreates only the named staging database, restores transactionally,
+and writes a result record. Do not start `sync-job` yet.
 
 ```bash
 docker compose --project-name "$SNP_STAGE_PROJECT" \
@@ -285,10 +288,13 @@ uv run python scripts/release_backup.py restore \
   --archive "$SNP_RELEASE_DIR/${BACKUP_ID}.dump" \
   --record "$SNP_RELEASE_DIR/${BACKUP_ID}.dump.json" \
   --confirm-backup-id "$BACKUP_ID" \
-  --result "$SNP_RELEASE_DIR/${BACKUP_ID}.restore.json"
+  --result "$SNP_RELEASE_DIR/${BACKUP_ID}.restore.json" \
+  --compose-file docker-compose.yml \
+  --compose-file docker-compose.staging.yml
 
-# Provision/migrate the restored staging database and start readers, not the
-# automatic writer. Compose dependencies wait for their required predecessors.
+# The bootstrap service completed before restore; the restored migration ledger
+# is now the source-of-truth. Start readers, not the automatic writer. Compose
+# dependencies observe the successful one-shot service.
 docker compose --project-name "$SNP_STAGE_PROJECT" \
   -f docker-compose.yml -f docker-compose.staging.yml \
   up -d --wait postgres-migrate litellm host-sync basic-memory scout

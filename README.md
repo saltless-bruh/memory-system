@@ -170,15 +170,22 @@ export POSTGRES_INGEST_USER=rag_ingest_role
 export POSTGRES_INGEST_PASSWORD_FILE="$PWD/.secrets/postgres_ingest_password"
 export POSTGRES_MIGRATION_USER=postgres
 export POSTGRES_MIGRATION_PASSWORD_FILE="$PWD/.secrets/postgres_admin_password"
-export LITELLM_BASE_URL=http://127.0.0.1:4000/v1
+export LITELLM_BASE_URL=http://127.0.0.1:54000/v1
 # Export LITELLM_MASTER_KEY from your secret store; do not paste it into docs.
-export SCOUT_INTEGRATION_URL=http://127.0.0.1:8080/mcp
+export SCOUT_INTEGRATION_URL=http://127.0.0.1:58080/mcp
 export SCOUT_INTEGRATION_INFRA_TOKEN_FILE="$PWD/.secrets/scout_test_token"
 uv run pytest -m integration --force-enable-socket -q
 ```
 
-The integration override publishes PostgreSQL on loopback port `55432` by
-default. Selected live tests fail with the names of missing prerequisites;
+The integration override publishes every service on its own loopback port —
+PostgreSQL `55432`, LiteLLM `54000`, Scout `58080`, host-sync `59000`,
+basic-memory `58765` — using Compose's `!override` tag. That tag is load
+bearing: Compose merges port lists additively, so without it the integration
+project also inherits the live stack's `4000/8080/9000/8765` and the two race
+for them. The failure is worse than a collision — whichever project binds first
+decides whether `pytest -m integration` exercises the disposable stack or the
+live one. Earlier revisions of this section pointed the exports at `4000` and
+`8080`, which were the live ports. Selected live tests fail with the names of missing prerequisites;
 they never skip or fall back to repository credentials.
 
 > **Run those exports in a throwaway shell.** The offline suite is not hermetic

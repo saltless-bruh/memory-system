@@ -1,0 +1,23 @@
+[
+  {"lang":"en","query":"headless browser library for controlling Chrome programmatically","expect":"Entities/Puppeteer.md"},
+  {"lang":"en","query":"self-hosted control server for a Tailscale style mesh VPN","expect":"Entities/Headscale.md"},
+  {"lang":"en","query":"running optical character recognition on your own hardware","expect":"Concepts/Self-Hosted OCR.md"},
+  {"lang":"en","query":"writing a specification before letting an AI agent write the code","expect":"Concepts/Spec-Driven Development for AI Coding Agents.md"},
+  {"lang":"en","query":"comparing file managers that run inside the terminal","expect":"comparisons/Terminal File Manager Comparison.md"},
+  {"lang":"en","query":"comparing self hosted platform as a service options","expect":"comparisons/Self-Hosted PaaS Comparison.md"},
+  {"lang":"en","query":"hardening and securing a Linux server","expect":"Entities/How To Secure A Linux Server.md"},
+  {"lang":"en","query":"reducing the number of tokens an agent spends on input and output","expect":"concepts/Agent I/O Token Optimization.md"},
+  {"lang":"en","query":"fine tuning a Gemma model with Unsloth on a laptop","expect":"queries/Fine-tuning Gemma 4 with Unsloth on Laptop.md"},
+  {"lang":"en","query":"an OCR server that runs on iOS devices","expect":"Entities/iOS-OCR-Server.md"},
+
+  {"lang":"vi","query":"thư viện điều khiển trình duyệt Chrome tự động","expect":"Entities/Puppeteer.md"},
+  {"lang":"vi","query":"máy chủ điều khiển mạng riêng ảo tự host kiểu Tailscale","expect":"Entities/Headscale.md"},
+  {"lang":"vi","query":"nhận dạng ký tự quang học chạy trên máy chủ riêng","expect":"Concepts/Self-Hosted OCR.md"},
+  {"lang":"vi","query":"viết đặc tả trước khi để AI viết code","expect":"Concepts/Spec-Driven Development for AI Coding Agents.md"},
+  {"lang":"vi","query":"so sánh các trình quản lý tệp chạy trong terminal","expect":"comparisons/Terminal File Manager Comparison.md"},
+  {"lang":"vi","query":"so sánh các nền tảng PaaS tự host","expect":"comparisons/Self-Hosted PaaS Comparison.md"},
+  {"lang":"vi","query":"cách bảo mật và tăng cường an ninh cho máy chủ Linux","expect":"Entities/How To Secure A Linux Server.md"},
+  {"lang":"vi","query":"giảm số lượng token mà agent tiêu tốn khi vào và ra","expect":"concepts/Agent I/O Token Optimization.md"},
+  {"lang":"vi","query":"tinh chỉnh mô hình Gemma bằng Unsloth trên laptop","expect":"queries/Fine-tuning Gemma 4 with Unsloth on Laptop.md"},
+  {"lang":"vi","query":"máy chủ nhận dạng ký tự cho thiết bị iOS","expect":"Entities/iOS-OCR-Server.md"}
+]

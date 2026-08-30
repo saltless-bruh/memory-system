@@ -8,7 +8,8 @@
 
 ## Why this exists
 
-Today the system exposes **one MCP tool** (`rag_fetch`) and **21 CLI entry points**
+Today the system exposes **two MCP retrieval tools** (`wiki_search`, `wiki_read`)
+and **21 CLI entry points**
 reachable only as `python scripts/<name>.py` from inside a checkout. Two
 consequences:
 
@@ -192,16 +193,16 @@ when it cannot meet them.
 **Remote** — needs only a server URL and token; works anywhere the package is
 installed.
 
-*(None yet. `search`, `read` and `fetch` were specified here and are implemented
-as **Local** instead — see the note below. The remote route to the vault remains
-the `snp-wiki` MCP server's `search_notes` / `read_note`.)*
+*The authenticated Scout MCP server remotely exposes `wiki_search` and
+`wiki_read`. The commands below remain local operator entry points over the same
+engine and canonical envelope.*
 
 **Local** — needs a repository checkout.
 
 | Command | Purpose | Notable codes |
 |---|---|---|
-| `snpmemory search <query> [--limit]` | rank vault pages against a query. **Diagnostic, not parity**: a different engine from `snp-wiki` (LiteLLM/Gemini here, in-process FastEmbed 384 there), so orderings differ. `score` is an RRF weight, never a similarity | |
-| `snpmemory read <page>` | read a compiled page by title, slug, or path | `3` ambiguous title |
+| `snpmemory search <query> --dept <dept> [--limit] [--seen]` | rank distinct vault pages through the same pgvector engine the agent uses. `score` is an RRF weight, never a similarity | `3` invalid department |
+| `snpmemory read <page> --dept <dept> [--mode full\|tldr\|outline] [--section]` | read the current file as the same canonical envelope the agent receives | `3` ambiguous title / section |
 | `snpmemory fetch --path --hint [--loc] --dept [--k]` | verbatim evidence | `1` no source · `3` unknown department |
 
 | Command | Purpose | Notable codes |
@@ -237,20 +238,18 @@ convenience over a tool people already know — not a replacement for it.
 
 They were specified as Remote. Implemented, all three answer from the checkout:
 
-* `read` parses the page file. A compiled page **is** a file in `wiki/`, and
-  reading it should not require the stack to be up or a token to exist.
-* `search` runs `scout.diy_engine.ScoutDiyEngine` over the same vault. It needs
-  the embedding route, but not a wiki server, so it works in CI from a clone.
+* `read` uses `ScoutDiyEngine.wiki_read`, which parses the current page file. A
+  page **is** a file in `wiki/`; the index is never used to reconstruct it.
+* `search` uses `ScoutDiyEngine.wiki_search` over the shared PostgreSQL index,
+  so the CLI and authenticated Scout surface have identical ordering.
 * `fetch` calls `scout.core.rag_fetch` — the same function the Scout MCP server
-  calls — against the RLS backend, so there is one retrieval path with one
-  post-filter and one no-source contract, not a second implementation behind an
-  HTTP hop.
+  used before V3 — against the RLS backend. It remains an operator diagnostic
+  and is hidden from both agent tool surfaces.
 
-The tradeoff this accepts: none of the three is usable from a machine with no
-checkout. That audience is served by the MCP servers, which is what they are
-for. `R-4.1` is unaffected — `rag_fetch` on the Scout server remains the only
-*agent-facing* door into RAG, and `scout/cli/mcp_policy.py` keeps `fetch` off
-the local tool surface for exactly that reason.
+The tradeoff this accepts: none of the three CLI commands is usable from a
+machine with no checkout. That audience uses the authenticated Scout server.
+`scout/cli/mcp_policy.py` exposes local `search`/`read` under the same
+`wiki_search`/`wiki_read` names and keeps direct `fetch` hidden.
 
 ## 7. Architecture
 

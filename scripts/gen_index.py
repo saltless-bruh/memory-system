@@ -134,6 +134,75 @@ def render_index(pages: list[vault.Page]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+SUMMARY_COVERAGE_FLOOR = 0.5
+
+
+def _described_entries(text: str) -> int:
+    """Count catalogue lines that actually carry a description."""
+    total = 0
+    for line in text.splitlines():
+        if not line.startswith("- ["):
+            continue
+        _, separator, description = line.partition(" — ")
+        if separator and description.strip():
+            total += 1
+    return total
+
+
+def write_mode_allowed(wiki_dir: Path | None = None) -> tuple[bool, str]:
+    """Decide whether write mode may regenerate the index for this vault.
+
+    ``render_index`` composes every catalogue line from frontmatter ``summary:``.
+    A vault that does not carry that field renders as titles with empty
+    descriptions, and ``_atomic_write_index`` replaces the file in one step, so
+    a hand-authored catalogue is gone before anyone reads the output.
+
+    That is not hypothetical. The reference vault this system is being pointed
+    at carries ``summary:`` on **0 of 433** pages while its ``index.md`` holds
+    302 hand-written descriptions. Running write mode there would trade all 302
+    for blanks, and the generator would report success while doing it.
+
+    Two independent refusals, because they fail on different vaults:
+
+    1. **Coverage.** Below ``SUMMARY_COVERAGE_FLOOR`` the render is mostly
+       blank regardless of what exists on disk. Catches a first run.
+    2. **Regression.** If regenerating would describe fewer entries than the
+       current index already does, refuse whatever the coverage is. This is the
+       one that measures the actual harm rather than a proxy for it.
+
+    Returns ``(allowed, reason)``; ``reason`` is empty only when allowed.
+    """
+    target = WIKI_DIR if wiki_dir is None else wiki_dir
+    try:
+        pages = vault.load_pages(target)
+    except ValueError as exc:
+        return False, f"vault could not be loaded: {exc}"
+    if not pages:
+        return False, "vault contains no pages"
+
+    described = sum(
+        1 for page in pages if str(page.frontmatter.get("summary", "") or "").strip()
+    )
+    coverage = described / len(pages)
+    if coverage < SUMMARY_COVERAGE_FLOOR:
+        return False, (
+            f"only {described}/{len(pages)} pages ({coverage:.0%}) carry a "
+            f"`summary:`; regenerating would emit mostly blank descriptions"
+        )
+
+    index_path = target / INDEX_PATH.name
+    if index_path.exists():
+        existing = _described_entries(index_path.read_text(encoding="utf-8"))
+        if described < existing:
+            return False, (
+                f"regenerating would describe {described} entries where "
+                f"{index_path.name} already describes {existing}; "
+                f"{existing - described} authored description(s) would be lost"
+            )
+
+    return True, ""
+
+
 def _atomic_write_index(content: str) -> None:
     """Durably replace the generated index without exposing partial bytes."""
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -222,6 +291,14 @@ def main() -> int:
             f"\n{len(lint.errors)} lint error(s) — index NOT regenerated. "
             f"Fix errors first."
         )
+        return 1
+
+    # Refuse to trade an authored catalogue for generated blanks. See
+    # write_mode_allowed(); --check and --stdout are unaffected because neither
+    # replaces the file.
+    allowed, reason = write_mode_allowed(WIKI_DIR)
+    if not allowed:
+        print(f"\nINDEX GUARD: write mode refused — {reason}")
         return 1
 
     if index_current:

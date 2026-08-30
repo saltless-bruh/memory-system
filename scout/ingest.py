@@ -10,7 +10,7 @@ import asyncio
 import fnmatch
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -282,6 +282,7 @@ async def ingest_document(
     base_dir: Path | None = None,
     dry_run: bool = False,
     parse_cache: ParseCache | None = None,
+    document_transform: Callable[[ParsedDocument], ParsedDocument] | None = None,
 ) -> dict[str, Any]:
     """Parses, chunks, embeds, and ingests a single document into PostgreSQL."""
     allowed_depts = validate_allowed_depts(allowed_depts)
@@ -294,6 +295,8 @@ async def ingest_document(
         parsed_doc = parse_file(file_path, base_dir=base_dir)
     else:
         parsed_doc = parse_cache.parsed(file_path, base_dir=base_dir)
+    if document_transform is not None:
+        parsed_doc = document_transform(parsed_doc)
     chunks = chunker.chunk_document(parsed_doc)
 
     if dry_run:
@@ -335,6 +338,13 @@ async def ingest_document(
         if len(emb) != 1024:
             raise EmbeddingError("embedding dimension mismatch during ingestion")
         c.embedding = emb
+        model = getattr(embedder, "model", None)
+        c.metadata["model"] = (
+            model
+            if isinstance(model, str) and model.strip()
+            else type(embedder).__name__
+        )
+        c.metadata["dim"] = len(emb)
 
     # 3. Transactional Upsert into PostgreSQL
     close_conn = False
@@ -378,7 +388,10 @@ async def ingest_document(
                     if c.embedding
                     else None
                 )
-                meta_json = json.dumps({"loc": c.loc, **c.metadata})
+                # PyYAML decodes ISO frontmatter dates to ``datetime.date``.
+                # Preserve those values canonically instead of making every
+                # wiki page with ``updated: YYYY-MM-DD`` fail at the SQL seam.
+                meta_json = json.dumps({"loc": c.loc, **c.metadata}, default=str)
 
                 await conn.execute(
                     """

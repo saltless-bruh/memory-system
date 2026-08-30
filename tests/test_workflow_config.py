@@ -134,14 +134,21 @@ def test_scheduled_workflow_opens_pr_only_after_tested_gate() -> None:
     assert "if: env.HEAL_CREATED == 'true'" in content
 
 
-def test_basic_memory_has_no_model_gateway_secret_or_host_network() -> None:
-    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    service = compose["services"]["basic-memory"]
+def test_vault_replica_is_mounted_read_only_by_its_consumer() -> None:
+    """The vault reaches the query path read-only, and only read-only.
 
-    assert "network_mode" not in service
-    assert service["ports"] == ["127.0.0.1:${BASIC_MEMORY_PORT:-8765}:8765"]
-    assert "environment" not in service
-    assert service["volumes"][0] == "vault-replica:/vault-replica:ro"
+    basic-memory used to hold this mount; V3 removed that service and handed
+    the mount to scout, because wiki_read serves page bodies from the vault
+    rather than from the index. Read-only is the invariant that matters: no
+    write path may terminate in the vault from downstream (INV-1).
+    """
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert "basic-memory" not in compose["services"]
+
+    scout = compose["services"]["scout"]
+    assert "network_mode" not in scout
+    replica_mounts = [v for v in scout["volumes"] if "vault-replica" in v]
+    assert replica_mounts == ["vault-replica:/vault-replica:ro"]
 
 
 def test_every_locally_built_image_has_an_explicit_candidate_identity_contract() -> (
@@ -153,12 +160,9 @@ def test_every_locally_built_image_has_an_explicit_candidate_identity_contract()
     assert services["scout"]["image"] == "${SNP_SCOUT_IMAGE:-snp-scout}"
     assert services["sync-job"]["image"] == "${SNP_SCOUT_IMAGE:-snp-scout}"
     assert services["postgres-migrate"]["image"] == "${SNP_SCOUT_IMAGE:-snp-scout}"
-    assert services["basic-memory"]["image"] == (
-        "${SNP_BASIC_MEMORY_IMAGE:-snp-basic-memory}"
-    )
     assert services["host-sync"]["image"] == "${SNP_HOST_SYNC_IMAGE:-snp-host-sync}"
 
-    for name in ("scout", "basic-memory", "host-sync"):
+    for name in ("scout", "host-sync"):
         assert services[name]["build"]["args"]["SNP_GIT_REVISION"] == (
             "${SNP_GIT_REVISION:-unknown}"
         )
@@ -166,7 +170,8 @@ def test_every_locally_built_image_has_an_explicit_candidate_identity_contract()
 
 def test_agent_facing_services_have_bounded_readiness_checks() -> None:
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    for service_name in ("scout", "basic-memory"):
+    # scout is the only agent-facing service since V3 removed basic-memory.
+    for service_name in ("scout",):
         healthcheck = compose["services"][service_name]["healthcheck"]
         assert healthcheck["timeout"] == "3s"
         assert healthcheck["retries"] >= 6
@@ -174,7 +179,13 @@ def test_agent_facing_services_have_bounded_readiness_checks() -> None:
 
 
 def test_integration_host_sync_reads_local_seed_but_publishes_to_replica() -> None:
-    compose = yaml.safe_load(INTEGRATION_COMPOSE.read_text(encoding="utf-8"))
+    # PRE-EXISTING FIX: safe_load cannot construct Compose's `!override` tag,
+    # which 373e593 introduced into this overlay without updating the loader
+    # here. Red since that commit and unnoticed because the Gitea runner has
+    # never started on this host. _ComposeOverrideLoader already exists above.
+    compose = yaml.load(
+        INTEGRATION_COMPOSE.read_text(encoding="utf-8"), Loader=_ComposeOverrideLoader
+    )
     service = compose["services"]["host-sync"]
 
     assert service["environment"]["GIT_SYNC_URL"] == "file:///source-repo"
@@ -197,7 +208,7 @@ def test_staging_compose_isolates_ports_and_uses_a_disposable_read_only_remote()
     # Port entries are a unique Compose resource, but changing only their
     # published host port makes them additive.  The tag prevents the base
     # live-stack ports from surviving the staging merge.
-    assert staging_text.count("ports: !override") == 5
+    assert staging_text.count("ports: !override") == 4
     compose = yaml.load(staging_text, Loader=_ComposeOverrideLoader)
     services = compose["services"]
 
@@ -213,9 +224,8 @@ def test_staging_compose_isolates_ports_and_uses_a_disposable_read_only_remote()
     assert services["host-sync"]["ports"] == [
         "127.0.0.1:${SNP_STAGING_HOST_SYNC_PORT:-19000}:9000"
     ]
-    assert services["basic-memory"]["ports"] == [
-        "127.0.0.1:${SNP_STAGING_BASIC_MEMORY_PORT:-18765}:8765"
-    ]
+    # basic-memory carried a fifth port override until V3 removed the service.
+    assert "basic-memory" not in services
 
     host_sync = services["host-sync"]
     assert host_sync["environment"] == {

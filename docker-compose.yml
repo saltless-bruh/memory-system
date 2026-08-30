@@ -8,10 +8,9 @@
 #   scout            authenticated RAG bridge and sole query path to PostgreSQL
 #   sync-job         raw/ ingestion through the dedicated ingest role
 #   host-sync        isolated Git-to-replica publisher
-#   basic-memory     read-only wiki navigation/search MCP
 #
 # R-9.2: the wiki vault is plain Git content. host-sync publishes immutable
-# snapshots into a named volume; basic-memory mounts that replica read-only.
+# snapshots into a named volume; scout mounts that replica read-only.
 #
 # Bring-up prerequisite: Ensure you have populated `.env` with your 
 # Cloud API keys (OPENAI_API_KEY, etc.) and model settings. 
@@ -53,9 +52,11 @@ services:
   # ── LiteLLM — the single model chokepoint (R-8.1) ─────────────────
   # Every model call made BY THE SYSTEM goes through here and lands on a
   # Cloud API provider (OpenAI, Anthropic, Gemini). 
-  # Exceptions:
-  #   1. basic-memory's FastEmbed runs in-process, not through LiteLLM
-  #   2. The member's own coding-agent model is OUTSIDE this boundary
+  # Exception:
+  #   1. The member's own coding-agent model is OUTSIDE this boundary
+  # V3 removed the second exception: basic-memory's in-process FastEmbed was a
+  # second vector space (384-dim against a 1024-dim index), so identical queries
+  # returned different orderings. One engine now, and it routes through here.
   litellm:
     image: ghcr.io/berriai/litellm:main-stable@sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af
     restart: unless-stopped
@@ -167,6 +168,12 @@ services:
       SCOUT_PORT: "8080"
     ports:
       - "127.0.0.1:${SCOUT_PORT:-8080}:8080"
+    volumes:
+      # V3: wiki_read serves page bodies from the vault, never from the index.
+      # Chunk text is stripped at split (chunker.py:184), so a page cannot be
+      # reassembled byte-exact from its chunks. Read-only by construction --
+      # nothing writes back up the chain (INV-1).
+      - vault-replica:/vault-replica:ro
     secrets:
       - postgres_query_password
       - scout_static_tokens_json
@@ -174,6 +181,8 @@ services:
       postgres-migrate:
         condition: service_completed_successfully
       litellm:
+        condition: service_healthy
+      host-sync:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 2).close()"]
@@ -225,31 +234,6 @@ services:
       retries: 6
       start_period: 30s
       start_interval: 2s
-
-  # ── basic-memory — LLM-Wiki engine, search/read MCP ────────────────
-  # The single AGPL piece (runbook §4). Config baked from the validated
-  # setup. Wiki search embeddings run in-process through FastEmbed.
-  basic-memory:
-    build:
-      context: ./basic-memory
-      args:
-        SNP_GIT_REVISION: ${SNP_GIT_REVISION:-unknown}
-    image: ${SNP_BASIC_MEMORY_IMAGE:-snp-basic-memory}
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:${BASIC_MEMORY_PORT:-8765}:8765"
-    volumes:
-      - vault-replica:/vault-replica:ro
-      - bm-data:/root/.basic-memory  # SQLite DB + vector store persist here
-    depends_on:
-      host-sync:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8765), 2).close()"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
-      start_period: 30s
 
   # ── host-sync — Zero-Credential Git Puller (Phase 1) ─────────────
   host-sync:
@@ -346,14 +330,13 @@ services:
 # R-9.3: if the company already runs GitLab, delete the `git` service and
 # point WIKI_REMOTE at the existing GitLab repo — nothing else changes.
 # The wiki vault is not a service (R-9.2); host-sync publishes it into the
-# isolated read-only replica consumed by basic-memory.
+# isolated read-only replica consumed by scout.
 # ─────────────────────────────────────────────────────────────────────
 
 volumes:
   gitea-data:
   rag-storage:
   rag-hf-cache:
-  bm-data:
   pgdata:
   runner-data:
   vault-replica:

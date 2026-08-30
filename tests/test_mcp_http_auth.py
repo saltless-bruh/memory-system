@@ -152,8 +152,8 @@ async def test_authorization_header_reaches_current_access_token_and_can_narrow(
     )
     async with app.lifespan(app), Client(transport) as client:
         result = await client.call_tool(
-            "rag_fetch",
-            {"path": "raw/a.md", "hint": "text", "department": "infra"},
+            "wiki_search",
+            {"query": "text", "department": "infra"},
         )
     assert not result.is_error
     assert backend.calls == [Scope(departments=frozenset({"infra"}))]
@@ -170,8 +170,8 @@ async def test_forbidden_department_is_tool_error_and_never_calls_backend() -> N
     async with app.lifespan(app), Client(transport) as client:
         with pytest.raises(ToolError, match="authenticated scope"):
             await client.call_tool(
-                "rag_fetch",
-                {"path": "raw/a.md", "hint": "text", "department": "redteam"},
+                "wiki_search",
+                {"query": "text", "department": "redteam"},
             )
     assert backend.calls == []
 
@@ -212,8 +212,8 @@ async def test_valid_jwt_reaches_current_access_token_and_narrows() -> None:
     )
     async with app.lifespan(app), Client(transport) as client:
         result = await client.call_tool(
-            "rag_fetch",
-            {"path": "raw/a.md", "hint": "text", "department": "ai_eng"},
+            "wiki_search",
+            {"query": "text", "department": "ai_eng"},
         )
     assert not result.is_error
     assert backend.calls == [Scope(departments=frozenset({"ai_eng"}))]

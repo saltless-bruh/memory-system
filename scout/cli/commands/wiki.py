@@ -1,48 +1,31 @@
-"""The wiki family: `read` and `search`.
+"""The V3 wiki family: canonical ``read`` and shared-index ``search``.
 
-Both answer from the checkout rather than from a running server. That is the
-point: a compiled page is a file in `wiki/`, and reading it should not require
-the stack to be up, a token to be present, or a network to exist. CI and an
-agent working from a clone get the same answer.
-
-The `snp-wiki` MCP server (`search_notes` / `read_note`) remains the agent-facing
-route and these commands do not compete with it — see `scout/cli/mcp_policy.py`
-for why neither becomes an MCP tool.
-
-**`search` is a diagnostic, not a preview of what an agent sees.** The two rank
-with different engines: this command embeds through LiteLLM (Gemini) and fuses
-with RRF over the checkout, while `snp-wiki` embeds in-process with FastEmbed
-`bge-small-en-v1.5` @384. Identical queries will return **different orderings**,
-so a page that ranks first here may not rank first for an agent, and vice versa.
-"Does not compete" is a scope statement; this is the operational consequence, and
-it is the part that misleads if it is left unsaid.
-
-Every heavy import happens inside a function. Importing this module must not
-read an environment, open a database, or resolve a credential.
+Both commands use :class:`scout.diy_engine.ScoutDiyEngine`, so the CLI, local
+MCP server, and authenticated Scout server share ranking and read envelopes.
+Search uses PostgreSQL/pgvector; read always parses the current vault file.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+import inspect
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any
 
 from cyclopts import Parameter
 
 from scout.cli.config import Config
-from scout.cli.errors import input_error
+from scout.cli.errors import CliError, infrastructure_error, input_error
 from scout.cli.result import CommandResult
+
+if TYPE_CHECKING:
+    from scout.diy_engine import ScoutDiyEngine
 
 #: Injected by the dispatcher; never a user-facing flag.
 Injected = Annotated[Any, Parameter(parse=False)]
 
 
 def _resolve(pages: list[Any], identifier: str) -> Any:
-    """Find one page by path, slug, or title.
-
-    Resolution is ordered most-specific first, and an ambiguous title is a
-    caller error rather than a silent pick: two pages can legitimately share a
-    title across categories, and choosing one for the caller is how the wrong
-    page gets cited.
-    """
+    """Find one page by path, slug, or title without choosing ambiguously."""
     wanted = identifier.strip()
     if not wanted:
         raise input_error("no page given", hint="pass a title, slug, or path")
@@ -66,95 +49,176 @@ def _resolve(pages: list[Any], identifier: str) -> Any:
             hint="pass the path instead",
             candidates=[page.rel for page in candidates],
         )
-
     raise input_error(
         f"no page matches {wanted!r}",
         hint="run `snpmemory search` to find one, or pass its path under wiki/",
     )
 
 
-def read(page: str, *, config: Injected = None) -> CommandResult:
-    """Read a compiled page by its title, slug, or path."""
-    from scout import vault
+def _wiki_dir(cfg: Config) -> Path:
+    """Resolve the served vault beneath the checkout pinned by the dispatcher."""
+    root = cfg.require_repo().resolve()
+    configured = cfg.get("WIKI_DIR") or "wiki"
+    supplied = Path(configured)
+    candidate = (supplied if supplied.is_absolute() else root / supplied).resolve()
+    if not candidate.is_relative_to(root):
+        raise input_error(
+            "WIKI_DIR escapes the repository checkout",
+            hint="set WIKI_DIR to a directory beneath the active --root",
+        )
+    return candidate
+
+
+def _build_search_engine(cfg: Config, wiki_dir: Path) -> ScoutDiyEngine:
+    """Build the exact pgvector engine used by the served Scout surface."""
+    from scout.backends.pgvector import PgVectorRlsBackend
+    from scout.chunker import LiteLLMBatchEmbedder
+    from scout.config import postgres_settings
+    from scout.diy_engine import ScoutDiyEngine
+
+    settings = postgres_settings("query", env=cfg.values)
+    embedder = LiteLLMBatchEmbedder(
+        base_url=cfg.get("LITELLM_BASE_URL"),
+        # Missing/unreachable embeddings are intentionally handled by the
+        # backend's sparse degradation arm; they are not configuration failure.
+        api_key=cfg.get("LITELLM_MASTER_KEY"),
+        model=cfg.get("LITELLM_EMBED_MODEL"),
+    )
+    backend = PgVectorRlsBackend(
+        host=settings.host,
+        port=settings.port,
+        database=settings.database,
+        user=settings.user,
+        password=settings.password,
+        embedder=embedder,
+    )
+    return ScoutDiyEngine.from_vault(
+        embedder,
+        wiki_dir=wiki_dir,
+        rag_backend=backend,
+    )
+
+
+class _ReadOnlyEmbedder:
+    """Uncallable structural adapter for an engine used only for disk reads."""
+
+    async def aembed_texts(self, texts: list[str]) -> list[list[float]]:
+        del texts
+        raise RuntimeError("a read-only wiki engine cannot embed")
+
+
+async def _close_backend(engine: ScoutDiyEngine) -> None:
+    backend = getattr(engine, "rag_backend", None)
+    close = getattr(backend, "close", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+
+def read(
+    page: str,
+    *,
+    dept: str,
+    mode: str = "full",
+    section: str | None = None,
+    config: Injected = None,
+) -> CommandResult:
+    """Read a canonical page envelope by title, slug, or path."""
+    import asyncio
+
+    from scout.cli.commands.rag import _scope_for
+    from scout.diy_engine import ScoutDiyEngine
 
     cfg: Config = config
-    cfg.require_repo()
-    pages = vault.load_pages(vault.WIKI_DIR)
-    found = _resolve(pages, page)
+    wiki_dir = _wiki_dir(cfg)
+    scope = _scope_for(dept)
+    engine = ScoutDiyEngine.from_vault(_ReadOnlyEmbedder(), wiki_dir=wiki_dir)
+
+    try:
+        found = asyncio.run(
+            engine.wiki_read(page, mode=mode, section=section, scope=scope)
+        )
+    except CliError:
+        raise
+    except (KeyError, ValueError) as exc:
+        raise input_error(str(exc), hint="pass a valid page, mode, and section") from exc
+    except Exception as exc:  # noqa: BLE001 - disk/parser failures are infrastructure
+        raise infrastructure_error(
+            "the wiki page could not be read",
+            hint="check the checkout and wiki path, then retry",
+            retryable=False,
+            cause=type(exc).__name__,
+        ) from exc
+
+    if found.mode == "tldr":
+        summary = found.tldr
+    elif found.mode == "outline":
+        summary = "\n".join(
+            str(item.get("heading", "")) for item in found.outline
+        )
+    elif found.mode == "section":
+        summary = "\n\n".join(found.sections.values())
+    else:
+        summary = found.body
     return CommandResult(
-        data={
-            "path": found.rel,
-            "title": found.title,
-            "slug": found.slug,
-            "department": found.department,
-            "summary": found.summary,
-            "entities": found.entities,
-            "sources": found.sources,
-            "last_compiled": found.last_compiled,
-            "wikilinks": found.wikilinks,
-            "body": found.body,
-        },
-        # In text mode only `summary` reaches stdout, and what a person running
-        # `snpmemory read` wants on stdout is the page. The identifying header
-        # goes to stderr with the other diagnostics, so `snpmemory read x > page.md`
-        # writes the page and nothing else.
-        summary=found.body,
-        messages=(f"{found.title} — {found.rel}",),
+        data=found.canonical(),
+        summary=summary,
+        messages=(f"{found.title} — {found.path}",),
     )
 
 
 def search(
     query: str,
     *,
+    dept: str,
     limit: int = 5,
+    seen: list[str] | None = None,
     config: Injected = None,
 ) -> CommandResult:
-    """Rank vault pages against a free-text query.
-
-    Runs the same engine the wiki server can be swapped onto
-    (`scout.diy_engine.ScoutDiyEngine`), reading `wiki/` directly. Embeddings
-    come from the LiteLLM route, so the gateway must be reachable — that is an
-    infrastructure prerequisite, not a finding, and it exits 2.
-
-    The reported `score` is a **Reciprocal Rank Fusion weight**, not a
-    similarity. It combines a cosine rank with a BM25 rank and is capped near
-    0.033; reading it as a relevance percentage is wrong, and no threshold on it
-    means anything (`docs/ARCHITECTURE_STATUS.md`).
-    """
+    """Rank distinct vault pages through the shared pgvector index."""
     import asyncio
 
-    from scout import vault
-    from scout.cli.errors import infrastructure_error
-    from scout.diy_engine import LiteLLMEmbedder, ScoutDiyEngine
+    from scout.cli.commands.rag import _scope_for
 
     cfg: Config = config
-    cfg.require_repo()
+    wiki_dir = _wiki_dir(cfg)
     if limit <= 0:
         raise input_error("--limit must be positive", hint="try --limit 5")
+    scope = _scope_for(dept)
 
-    # The gateway address and key are taken from the resolved config, not read
-    # from the ambient environment: `Config` exists so a command receives exactly
-    # the keys its prerequisite allows, and so nothing has to be exported into
-    # `os.environ` for a command to work.
-    key = cfg.require("LITELLM_MASTER_KEY")
-    base_url = cfg.get("LITELLM_BASE_URL") or "http://localhost:4000"
-    # The embedder posts to `/v1/embeddings` relative to `base_url`, while the
-    # configured value is the OpenAI-compatible root and already ends in `/v1`.
-    # Passing it through unchanged asks the gateway for `/v1/v1/embeddings`.
-    base_url = base_url.rstrip("/").removesuffix("/v1")
+    try:
+        engine = _build_search_engine(cfg, wiki_dir)
+    except CliError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one envelope for any wiring fault
+        raise infrastructure_error(
+            "the wiki search backend could not be configured",
+            hint="check POSTGRES_* and LITELLM_* settings, then retry",
+            retryable=True,
+            cause=type(exc).__name__,
+        ) from exc
 
     async def run() -> list[Any]:
-        async with LiteLLMEmbedder(base_url=base_url, api_key=key) as embedder:
-            engine = ScoutDiyEngine.from_vault(embedder, wiki_dir=vault.WIKI_DIR)
-            with engine:
-                return await engine.wiki_search(query, k=limit)
+        try:
+            return await engine.wiki_search(
+                query,
+                k=limit,
+                seen=seen or (),
+                scope=scope,
+            )
+        finally:
+            await _close_backend(engine)
 
     try:
         hits = asyncio.run(run())
-    except Exception as exc:  # noqa: BLE001 - one envelope for any transport fault
+    except Exception as exc:  # noqa: BLE001 - database/provider faults are one class
         raise infrastructure_error(
-            f"the embedding route at {base_url} could not be reached",
-            hint="bring the stack up (`docker compose up -d litellm`) and retry",
+            "the wiki search backend could not be reached",
+            hint=(
+                "search requires postgres; a failed embedding route degrades "
+                "automatically to sparse retrieval"
+            ),
             retryable=True,
             cause=type(exc).__name__,
         ) from exc
@@ -163,15 +227,7 @@ def search(
         data={
             "query": query,
             "count": len(hits),
-            "hits": [
-                {
-                    "page_id": hit.page_id,
-                    "path": hit.path,
-                    "score": hit.score,
-                    "summary": hit.summary,
-                }
-                for hit in hits
-            ],
+            "hits": [hit.canonical() for hit in hits],
         },
         summary=(
             "\n".join(f"{hit.page_id}  {hit.path}" for hit in hits)

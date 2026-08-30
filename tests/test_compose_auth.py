@@ -22,9 +22,18 @@ def test_scout_static_auth_secret_is_wired_in_primary_compose() -> None:
     )
 
 
-def test_basic_memory_comment_does_not_claim_gateway_embeddings() -> None:
-    content = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    basic_comment = content.split("basic-memory:", 1)[0].rsplit("# ── basic-memory", 1)[
-        1
-    ]
-    assert "Embeddings hit the LiteLLM proxy" not in basic_comment
+def test_no_service_embeds_outside_the_litellm_gateway() -> None:
+    """One embedding engine, structurally.
+
+    Was a string check on the basic-memory comment block. That service embedded
+    in-process with FastEmbed at 384 dimensions against a 1024-dimension index,
+    so identical queries returned different orderings -- two vector spaces, no
+    error raised. V3 removed it. Asserting on the service list instead of on
+    comment prose means the guard survives a rewording.
+    """
+    import yaml
+
+    compose = yaml.safe_load(
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    )
+    assert "basic-memory" not in compose["services"]

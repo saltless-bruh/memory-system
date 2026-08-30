@@ -2,8 +2,8 @@
 
 Why local and stdio, when `scout` is already an MCP server: `scout` runs in a
 container with no read-write repository mount, and `docs/ARCHITECTURE_STATUS.md`
-lists such a mount among its prohibited claims. Seven of the eight declared
-commands need a checkout on disk. Serving them from `scout` would restore the
+lists such a mount among its prohibited claims. Most operator commands need a
+checkout on disk. Serving them from `scout` would restore the
 topology v2 hardening removed and would make a retrieval token a page-writing
 token.
 
@@ -14,7 +14,8 @@ expose. It must not be served over HTTP without an OAuth 2.1 design with
 audience validation; a server that accepts a token it was not issued is the
 confused-deputy failure the MCP guidance exists to prevent.
 
-`scout/mcp_server.py` is untouched: `rag_fetch` remains the only door into RAG.
+The authenticated Scout server exposes the same read-only ``wiki_search`` and
+``wiki_read`` contract. Direct address fetch remains an operator-only command.
 
 **Why `compile_plan` is not an MCP task.** It looks like the obvious candidate —
 a batch that runs for minutes, handed back as a handle — and `fastmcp` 3.3.1 does
@@ -43,7 +44,7 @@ rests on.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -122,6 +123,68 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
         return run_tool(spec, detail=detail)
 
     standalone = _standalone_tools()
+
+    search_spec = standalone.get("wiki_search") or by_name["search"]
+
+    @server.tool(
+        name="wiki_search",
+        description=(
+            _describe(search_spec)
+            + " Returns distinct pages with bounded snippets; pass prior content "
+            "hashes in seen to receive stubs instead of repeated context."
+        ),
+        annotations=annotations_for(search_spec, title="Search wiki pages"),
+    )
+    def wiki_search(
+        query: Annotated[str, "Natural-language query."],
+        department: Annotated[str, "redteam | blueteam | ai_eng | infra"],
+        k: Annotated[int, "Maximum distinct pages to return."] = 5,
+        seen: Annotated[
+            list[str] | None, "Content hashes already present in context."
+        ] = None,
+    ) -> list[dict[str, object]]:
+        payload = run_tool(
+            search_spec,
+            query,
+            dept=department,
+            limit=k,
+            seen=seen,
+            detail=True,
+        )
+        return cast(list[dict[str, object]], payload["hits"])
+
+    read_spec = standalone.get("wiki_read") or by_name["read"]
+
+    @server.tool(
+        name="wiki_read",
+        description=(
+            _describe(read_spec)
+            + " Read tldr or outline first when context is tight, then request one "
+            "section or the full canonical envelope."
+        ),
+        annotations=annotations_for(read_spec, title="Read wiki page"),
+    )
+    def wiki_read(
+        path: Annotated[str, "Page title, slug, or vault-relative path."],
+        department: Annotated[str, "redteam | blueteam | ai_eng | infra"],
+        mode: Annotated[
+            Literal["full", "tldr", "outline"], "Read granularity"
+        ] = "full",
+        section: Annotated[str | None, "One section heading to return."] = None,
+    ) -> dict[str, Any]:
+        payload = run_tool(
+            read_spec,
+            path,
+            dept=department,
+            mode=mode,
+            section=section,
+            detail=True,
+        )
+        return {
+            key: value
+            for key, value in payload.items()
+            if key not in {"ok", "exit_code", "summary"}
+        }
 
     plan_spec = standalone.get("plan_articles") or by_name["plan-articles"]
 

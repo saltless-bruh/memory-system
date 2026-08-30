@@ -1,685 +1,563 @@
-"""Tests for scout.diy_engine — the Scout-DIY wiki engine fallback (T-2.4)."""
+"""Contract tests for the V3 scoped wiki engine.
+
+These replace the former cosine/SQLite/cache tests with guardrails for the
+retrieval inversion: one shared pgvector backend for finding pages and direct
+disk reads for canonical page content.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
-import httpx
 import pytest
 
-from scout.chunker import EmbeddingError
+from scout.chunker import LiteLLMBatchEmbedder
 from scout.diy_engine import (
+    Embedder,
     LiteLLMEmbedder,
     PageLike,
     ScoutDiyEngine,
     WikiHit,
     WikiPage,
-    cosine_similarity,
 )
+from scout.types import RagChunk, Scope
 from tests.fakes import FakeEmbedder
 
 
-@dataclass
-class _SyntheticPage:
-    """A minimal `PageLike` stand-in — no filesystem, no real vault."""
+@dataclass(slots=True)
+class RecordingBackend:
+    chunks: Sequence[RagChunk] = ()
+    calls: list[tuple[str, str | None, Scope | None, int]] = field(
+        default_factory=list
+    )
 
+    async def retrieve(
+        self,
+        hint: str,
+        *,
+        path: str | None = None,
+        scope: Scope | None = None,
+        k: int = 10,
+    ) -> Sequence[RagChunk]:
+        self.calls.append((hint, path, scope, k))
+        return self.chunks
+
+
+@dataclass(slots=True)
+class SyntheticPage:
     slug: str
     rel: str
     frontmatter: Mapping[str, object]
-    body: str = ""
-
-
-def _page(slug: str, summary: str, body: str = "", **extra: object) -> _SyntheticPage:
-    fm: dict[str, object] = {"summary": summary, **extra}
-    return _SyntheticPage(slug=slug, rel=f"wiki/{slug}.md", frontmatter=fm, body=body)
+    body: str
 
 
 @pytest.fixture
-def pages() -> list[_SyntheticPage]:
-    """Three pages: two clearly distinct topics + a third distinguishing tokens."""
-    return [
-        _page(
-            "kerberoasting",
-            "Kerberoasting requests a TGS for an SPN and cracks it offline",
-            body="# Kerberoasting\n\nAttack technique body.",
-        ),
-        _page(
-            "esc8",
-            "ESC8 relays NTLM to the AD CS web enrollment endpoint",
-            body="# ESC8\n\nADCS relay technique body.",
-        ),
-        _page(
-            "phishing",
-            "Phishing lures a user into opening a malicious attachment",
-            body="# Phishing\n\nSocial engineering body.",
-        ),
-    ]
-
-
-@pytest.fixture
-def engine(pages: list[_SyntheticPage], tmp_path: Path) -> Iterator[ScoutDiyEngine]:
-    instance = ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=pages, cache_path=tmp_path / "vector_cache.json"
-    )
-    yield instance
-    instance.close()
-
-
-# ── cosine_similarity (pure) ────────────────────────────────────────────
-def test_cosine_similarity_identical_vectors() -> None:
-    assert cosine_similarity([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == pytest.approx(1.0)
-
-
-def test_cosine_similarity_orthogonal_vectors() -> None:
-    assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
-
-
-def test_cosine_similarity_zero_vector_guard() -> None:
-    assert cosine_similarity([0.0, 0.0], [1.0, 2.0]) == 0.0
-    assert cosine_similarity([1.0, 2.0], [0.0, 0.0]) == 0.0
-    assert cosine_similarity([0.0, 0.0], [0.0, 0.0]) == 0.0
-
-
-def test_cosine_similarity_empty_vector_guard() -> None:
-    assert cosine_similarity([], []) == 0.0
-    assert cosine_similarity([], [1.0]) == 0.0
-
-
-def test_cosine_similarity_mismatched_length_guard() -> None:
-    assert cosine_similarity([1.0, 2.0], [1.0, 2.0, 3.0]) == 0.0
-
-
-# ── FakeEmbedder (pure/deterministic) ───────────────────────────────────
-async def test_fake_embedder_deterministic() -> None:
-    emb = FakeEmbedder()
-    a = await emb.embed(["hello world"])
-    b = await emb.embed(["hello world"])
-    assert a == b
-
-
-async def test_fake_embedder_empty_text_is_zero_vector() -> None:
-    emb = FakeEmbedder(dims=8)
-    (vec,) = await emb.embed([""])
-    assert vec == [0.0] * 8
-
-
-async def test_fake_embedder_preserves_order() -> None:
-    emb = FakeEmbedder()
-    out = await emb.embed(["alpha", "beta", "gamma"])
-    assert len(out) == 3
-
-
-# ── wiki_search ──────────────────────────────────────────────────────────
-async def test_wiki_search_ranks_closest_page_first(engine: ScoutDiyEngine) -> None:
-    hits = await engine.wiki_search("NTLM relay AD CS enrollment", k=5)
-    assert hits[0].page_id == "esc8"
-
-
-async def test_wiki_search_second_topic_ranks_first_for_its_query(
-    engine: ScoutDiyEngine,
-) -> None:
-    hits = await engine.wiki_search("TGS SPN Kerberoasting offline crack", k=5)
-    assert hits[0].page_id == "kerberoasting"
-
-
-async def test_wiki_search_respects_k(engine: ScoutDiyEngine) -> None:
-    hits = await engine.wiki_search("attack technique", k=2)
-    assert len(hits) == 2
-
-
-async def test_wiki_search_k_larger_than_corpus_returns_all(
-    engine: ScoutDiyEngine,
-) -> None:
-    hits = await engine.wiki_search("phishing attachment", k=100)
-    assert len(hits) == 3
-
-
-async def test_wiki_search_zero_k_returns_empty(engine: ScoutDiyEngine) -> None:
-    assert await engine.wiki_search("anything", k=0) == []
-
-
-async def test_wiki_search_negative_k_returns_empty(engine: ScoutDiyEngine) -> None:
-    assert await engine.wiki_search("anything", k=-1) == []
-
-
-async def test_wiki_search_empty_query_does_not_raise(engine: ScoutDiyEngine) -> None:
-    hits = await engine.wiki_search("", k=5)
-    assert len(hits) == 3
-    assert all(h.score > 0.0 for h in hits)
-
-
-async def test_wiki_search_empty_corpus_returns_empty(tmp_path: Path) -> None:
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[], cache_path=tmp_path / "cache.json"
-    ) as instance:
-        assert await instance.wiki_search("anything") == []
-
-
-async def test_wiki_search_returns_wikihit_shape(engine: ScoutDiyEngine) -> None:
-    (hit,) = await engine.wiki_search("phishing attachment", k=1)
-    assert isinstance(hit, WikiHit)
-    assert hit.page_id == "phishing"
-    assert hit.path == "wiki/phishing.md"
-    assert hit.summary.startswith("Phishing lures")
-    assert isinstance(hit.score, float)
-
-
-async def test_wiki_search_accepts_callable_page_supplier(tmp_path: Path) -> None:
-    calls = {"n": 0}
-
-    def load() -> list[_SyntheticPage]:
-        calls["n"] += 1
-        return [_page("only", "the only page here")]
-
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=load, cache_path=tmp_path / "cache.json"
-    ) as instance:
-        await instance.wiki_search("only page", k=5)
-        await instance.wiki_search("only page again", k=5)
-    # Index is built once and cached across calls.
-    assert calls["n"] == 1
-
-
-# ── wiki_read ────────────────────────────────────────────────────────────
-async def test_wiki_read_by_path_returns_frontmatter_and_body(
-    engine: ScoutDiyEngine,
-) -> None:
-    page = await engine.wiki_read("wiki/esc8.md")
-    assert isinstance(page, WikiPage)
-    assert page.frontmatter["summary"] == (
-        "ESC8 relays NTLM to the AD CS web enrollment endpoint"
-    )
-    assert page.body == "# ESC8\n\nADCS relay technique body."
-
-
-async def test_wiki_read_by_page_id(engine: ScoutDiyEngine) -> None:
-    page = await engine.wiki_read("kerberoasting")
-    assert str(page.frontmatter["summary"]).startswith("Kerberoasting")
-
-
-async def test_wiki_read_normalizes_backslash_paths(engine: ScoutDiyEngine) -> None:
-    page = await engine.wiki_read("wiki\\esc8.md")
-    assert page.body == "# ESC8\n\nADCS relay technique body."
-
-
-async def test_wiki_read_unknown_path_raises_keyerror(engine: ScoutDiyEngine) -> None:
-    with pytest.raises(KeyError):
-        await engine.wiki_read("wiki/does-not-exist.md")
-
-
-async def test_wiki_read_extra_frontmatter_fields_pass_through(tmp_path: Path) -> None:
-    p = _page("x", "summary text", department="redteam", entities=["foo"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[p], cache_path=tmp_path / "cache.json"
-    ) as instance:
-        page = await instance.wiki_read("x")
-    assert page.frontmatter["department"] == "redteam"
-    assert page.frontmatter["entities"] == ["foo"]
-
-
-# ── PageLike structural typing ────────────────────────────────────────────
-def test_synthetic_page_satisfies_pagelike_protocol() -> None:
-    p = _page("s", "a summary")
-    assert isinstance(p, PageLike)
-
-
-# ── LiteLLMEmbedder (network mocked — never touches the real network) ────
-class _TrackingTransport(httpx.AsyncBaseTransport):
-    def __init__(self, payload: object | None = None, status_code: int = 200) -> None:
-        self.requests: list[httpx.Request] = []
-        self.closed = False
-        self.payload = payload or {
-            "data": [
-                {"index": 1, "embedding": [0.2, 0.3]},
-                {"index": 0, "embedding": [0.1, 0.1]},
-            ]
-        }
-        self.status_code = status_code
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        return httpx.Response(
-            self.status_code,
-            request=request,
-            json=self.payload,
-        )
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-class _RawJsonTransport(httpx.AsyncBaseTransport):
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            content=(
-                b'{"data":['
-                b'{"index":0,"embedding":[0.1,1e999]},'
-                b'{"index":1,"embedding":[0.3,0.4]}]}'
-            ),
-            headers={"content-type": "application/json"},
-        )
-
-
-async def test_litellm_embedder_builds_request_and_parses_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fail_if_threaded(*args: object, **kwargs: object) -> object:
-        raise AssertionError("embedding HTTP must not use asyncio.to_thread")
-
-    monkeypatch.setattr(asyncio, "to_thread", fail_if_threaded)
-    transport = _TrackingTransport()
-    emb = LiteLLMEmbedder(
-        base_url="http://fake-litellm:4000",
-        model="snp-embed",
-        api_key="test-only-token",
-        dim=2,
-        transport=transport,
-    )
-    vectors = await emb.embed(["first", "second"])
-
-    assert vectors == [[0.1, 0.1], [0.2, 0.3]]
-    assert transport.closed is True
-    assert len(transport.requests) == 1
-    request = transport.requests[0]
-    assert str(request.url) == "http://fake-litellm:4000/v1/embeddings"
-    assert request.headers["authorization"] == "Bearer test-only-token"
-    assert request.read() == b'{"model":"snp-embed","input":["first","second"]}'
-
-
-async def test_litellm_embedder_context_reuses_then_closes_transport() -> None:
-    transport = _TrackingTransport()
-    embedder = LiteLLMEmbedder(api_key="test-only-token", dim=2, transport=transport)
-
-    async with embedder:
-        await embedder.embed(["first", "second"])
-        await embedder.embed(["first", "second"])
-        assert transport.closed is False
-
-    assert transport.closed is True
-    await embedder.aclose()  # idempotent
-    await embedder.close()  # compatibility hook is also idempotent
-
-
-def test_litellm_embedder_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LITELLM_MASTER_KEY", raising=False)
-
-    with pytest.raises(ValueError, match="LITELLM_MASTER_KEY"):
-        LiteLLMEmbedder()
-
-
-@pytest.mark.parametrize(
-    ("payload", "match"),
-    [
-        ({"data": [{"index": 0, "embedding": [0.1, 0.2]}]}, "cardinality"),
-        (
-            {
-                "data": [
-                    {"index": 0, "embedding": [0.1, 0.2]},
-                    {"index": 0, "embedding": [0.3, 0.4]},
-                ]
-            },
-            "duplicate index",
-        ),
-        (
-            {
-                "data": [
-                    {"index": 0, "embedding": [0.1, 0.2]},
-                    {"index": 2, "embedding": [0.3, 0.4]},
-                ]
-            },
-            "indices",
-        ),
-        (
-            {
-                "data": [
-                    {"index": 0, "embedding": [0.1, "bad"]},
-                    {"index": 1, "embedding": [0.3, 0.4]},
-                ]
-            },
-            "non-numeric",
-        ),
-        (
-            {
-                "data": [
-                    {"index": 0, "embedding": [0.1, 0.2]},
-                    {"index": 1, "embedding": [0.3]},
-                ]
-            },
-            "dimension",
-        ),
-    ],
-)
-async def test_litellm_embedder_rejects_malformed_response_contract(
-    payload: object, match: str
-) -> None:
-    embedder = LiteLLMEmbedder(
-        api_key="test-only-token",
-        dim=2,
-        transport=_TrackingTransport(payload),
+def scope() -> Scope:
+    return Scope(departments=frozenset({"infra", "ai_eng"}))
+
+
+def _chunk(
+    *,
+    text: str = "Best matching body passage",
+    path: str = "concepts/page.md",
+    score: float = 0.75,
+    **meta: str,
+) -> RagChunk:
+    defaults = {
+        "content_hash": "sha:page",
+        "title": "Page Title",
+        "type": "concept",
+        "tldr": "A compact routing sentence.",
+        "degraded": "false",
+    }
+    return RagChunk(
+        text=text,
+        file_path=path,
+        score=score,
+        meta={**defaults, **meta},
     )
 
-    with pytest.raises(EmbeddingError, match=match):
-        await embedder.embed(["first", "second"])
+
+def _engine(backend: RecordingBackend) -> ScoutDiyEngine:
+    return ScoutDiyEngine(embedder=FakeEmbedder(), rag_backend=backend)
 
 
-async def test_litellm_embedder_rejects_non_finite_response_values() -> None:
-    embedder = LiteLLMEmbedder(
-        api_key="test-only-token",
-        dim=2,
-        transport=_RawJsonTransport(),
-    )
-
-    with pytest.raises(EmbeddingError, match="non-finite"):
-        await embedder.embed(["first", "second"])
-
-
-async def test_litellm_embedder_normalizes_http_failures() -> None:
-    embedder = LiteLLMEmbedder(
-        api_key="test-only-token",
-        dim=2,
-        transport=_TrackingTransport({"error": "synthetic"}, status_code=503),
-    )
-
-    with pytest.raises(EmbeddingError, match="call failed"):
-        await embedder.embed(["first"])
-
-
-# ── from_vault (real integration against synthetic vault files on disk) ──
-async def test_from_vault_real_integration_with_synthetic_vault(tmp_path: Path) -> None:
-    wiki_dir = tmp_path / "wiki"
-    techniques_dir = wiki_dir / "techniques"
-    techniques_dir.mkdir(parents=True)
-
-    page_file = techniques_dir / "kerberoasting.md"
-    page_file.write_text(
-        """---
-type: technique
-title: Kerberoasting Attack
-summary: Kerberoasting requests a service ticket for an SPN to crack offline.
-entities: [kerberoasting, active-directory, spn]
-department: redteam
-sources: []
-last_compiled: 2026-08-18
+def _write_page(
+    root: Path,
+    *,
+    rel: str = "concepts/page.md",
+    title: str = "Page Title",
+    body: str | None = None,
+    page_type: str = "concept",
+) -> Path:
+    page = root / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        f"""---
+title: {title}
+type: {page_type}
+updated: 2026-08-28
+sources:
+  - path: raw/report.pdf
+    loc: p.2
+    hint: exact evidence phrase
 ---
+{body or '''# Page Title
+
 ## TL;DR
-Verbatim attack notes.
-""",
+A compact routing sentence.
+
+## Detail
+Body evidence is read from the current Markdown file.
+
+## Cross-References
+See [[other|Other Page]] and [[third#Part]].
+'''}""",
         encoding="utf-8",
     )
+    return page
 
-    with ScoutDiyEngine.from_vault(
+
+def _vault_engine(root: Path) -> ScoutDiyEngine:
+    return ScoutDiyEngine.from_vault(
         FakeEmbedder(),
-        wiki_dir=wiki_dir,
-        cache_path=tmp_path / "cache.json",
-    ) as instance:
-        hits = await instance.wiki_search("service ticket SPN crack", k=5)
-        assert len(hits) == 1
-        assert hits[0].page_id == "kerberoasting"
-        assert "ticket for an SPN" in hits[0].summary
-
-        read_page = await instance.wiki_read("kerberoasting")
-        assert read_page.frontmatter["title"] == "Kerberoasting Attack"
-        assert "Verbatim attack notes." in read_page.body
-
-
-async def test_ensure_index_creates_and_populates_fts(tmp_path: Path) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    p1 = _page("p1", "some summary text")
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[p1], cache_path=cache_path
-    ) as instance:
-        await instance._ensure_index()
-
-    search_db = cache_path.parent / "search.db"
-    assert search_db.exists()
-
-    import sqlite3
-
-    with sqlite3.connect(search_db) as conn:
-        cursor = conn.execute("SELECT page_id, summary FROM fts_index")
-        rows = cursor.fetchall()
-        assert len(rows) == 1
-        assert rows[0] == ("p1", "some summary text")
-
-
-async def test_ensure_index_rebuilds_fts_when_search_db_missing(tmp_path: Path) -> None:
-    """When vector cache exists but search.db is deleted/missing, FTS index is rebuilt."""
-    import sqlite3
-
-    cache_path = tmp_path / "vector_cache.json"
-    p1 = _page("p1", "summary for page one")
-    p2 = _page("p2", "summary for page two")
-
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[p1, p2], cache_path=cache_path
-    ) as engine1:
-        await engine1._ensure_index()
-
-    search_db = cache_path.parent / "search.db"
-    assert search_db.exists()
-    assert cache_path.exists()
-
-    # Simulate missing/corrupted search.db while cache_path remains
-    search_db.unlink()
-    assert not search_db.exists()
-
-    # New engine instance with existing cache_path must rebuild search.db
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[p1, p2], cache_path=cache_path
-    ) as engine2:
-        await engine2._ensure_index()
-
-    assert search_db.exists()
-    with sqlite3.connect(search_db) as conn:
-        cursor = conn.execute("SELECT page_id FROM fts_index ORDER BY page_id")
-        rows = [r[0] for r in cursor.fetchall()]
-        assert rows == ["p1", "p2"]
-
-
-async def test_ensure_index_uses_cache_and_only_embeds_uncached(tmp_path: Path) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-
-    calls = {"embed": 0}
-
-    class CountingEmbedder(FakeEmbedder):
-        async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-            calls["embed"] += 1
-            return await super().embed(texts)
-
-    p1 = _page("p1", "summary one", entities=["a", "b"])
-    p2 = _page("p2", "summary two", entities=["c"])
-
-    # First run: should embed the 2 pages + 1 query
-    with ScoutDiyEngine(
-        embedder=CountingEmbedder(), pages=[p1, p2], cache_path=cache_path
-    ) as engine1:
-        await engine1.wiki_search("query")
-    assert calls["embed"] == 2
-
-    # Second run with same pages: should read from cache, only embed query
-    calls["embed"] = 0
-    with ScoutDiyEngine(
-        embedder=CountingEmbedder(), pages=[p1, p2], cache_path=cache_path
-    ) as engine2:
-        await engine2.wiki_search("query")
-    assert calls["embed"] == 1
-
-    # Third run with one new page: should embed the 1 new page + 1 query
-    p3 = _page("p3", "summary three", entities=[])
-    calls["embed"] = 0
-    with ScoutDiyEngine(
-        embedder=CountingEmbedder(), pages=[p1, p2, p3], cache_path=cache_path
-    ) as engine3:
-        await engine3.wiki_search("query")
-    assert calls["embed"] == 2
-
-
-def _fts_rows(search_db: Path) -> list[tuple[str, str, str, str]]:
-    with sqlite3.connect(search_db) as connection:
-        cursor = connection.execute(
-            "SELECT page_id, title, summary, entities FROM fts_index ORDER BY page_id"
-        )
-        records: list[tuple[str, str, str, str]] = []
-        for row in cursor.fetchall():
-            page_id, title, summary, entities = row
-            records.append((str(page_id), str(title), str(summary), str(entities)))
-        return records
-
-
-async def test_fts_reconciles_title_only_change_with_warm_vector_cache(
-    tmp_path: Path,
-) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    first = _page("p1", "unchanged summary", title="Old title", entities=["alpha"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[first], cache_path=cache_path
-    ) as engine1:
-        await engine1._ensure_index()
-
-    changed = _page("p1", "unchanged summary", title="New title", entities=["alpha"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[changed], cache_path=cache_path
-    ) as engine2:
-        await engine2._ensure_index()
-
-    assert _fts_rows(tmp_path / "search.db") == [
-        ("p1", "New title", "unchanged summary", "alpha")
-    ]
-
-
-async def test_fts_deletes_removed_pages_without_orphans(tmp_path: Path) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    p1 = _page("p1", "first", title="First", entities=[])
-    p2 = _page("p2", "second", title="Second", entities=[])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[p1, p2], cache_path=cache_path
-    ) as engine1:
-        await engine1._ensure_index()
-
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[p2], cache_path=cache_path
-    ) as engine2:
-        await engine2._ensure_index()
-
-    assert [row[0] for row in _fts_rows(tmp_path / "search.db")] == ["p2"]
-
-
-async def test_fts_reconciles_summary_and_entity_changes(tmp_path: Path) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    before = _page("p1", "old summary", title="Title", entities=["old"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[before], cache_path=cache_path
-    ) as engine1:
-        await engine1._ensure_index()
-
-    after = _page("p1", "new summary", title="Title", entities=["new", "beta"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[after], cache_path=cache_path
-    ) as engine2:
-        await engine2._ensure_index()
-
-    assert _fts_rows(tmp_path / "search.db") == [
-        ("p1", "Title", "new summary", "beta,new")
-    ]
-
-
-async def test_fts_repairs_stale_row_even_when_vector_cache_is_warm(
-    tmp_path: Path,
-) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    page = _page("p1", "current summary", title="Current", entities=["entity"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[page], cache_path=cache_path
-    ) as engine1:
-        await engine1._ensure_index()
-
-    search_db = tmp_path / "search.db"
-    with sqlite3.connect(search_db) as connection:
-        connection.execute(
-            "UPDATE fts_index SET title = ?, summary = ? WHERE page_id = ?",
-            ("Stale", "stale summary", "p1"),
-        )
-        connection.commit()
-
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[page], cache_path=cache_path
-    ) as engine2:
-        await engine2._ensure_index()
-
-    assert _fts_rows(search_db) == [("p1", "Current", "current summary", "entity")]
-
-
-async def test_fts_rebuilds_empty_database_with_warm_vector_cache(
-    tmp_path: Path,
-) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    page = _page("p1", "summary", title="Title", entities=["entity"])
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[page], cache_path=cache_path
-    ) as engine1:
-        await engine1._ensure_index()
-
-    search_db = tmp_path / "search.db"
-    with sqlite3.connect(search_db) as connection:
-        connection.execute("DELETE FROM fts_index")
-        connection.commit()
-
-    with ScoutDiyEngine(
-        embedder=FakeEmbedder(), pages=[page], cache_path=cache_path
-    ) as engine2:
-        await engine2._ensure_index()
-
-    assert _fts_rows(search_db) == [("p1", "Title", "summary", "entity")]
-
-
-async def test_engine_context_closes_sqlite_and_close_is_idempotent(
-    tmp_path: Path,
-) -> None:
-    engine = ScoutDiyEngine(
-        embedder=FakeEmbedder(),
-        pages=[_page("p1", "summary")],
-        cache_path=tmp_path / "vector_cache.json",
+        wiki_dir=root,
+        rag_backend=RecordingBackend(),
     )
 
-    with engine:
-        await engine._ensure_index()
-        assert engine._fts_conn is not None
 
-    assert engine._fts_conn is None
-    engine.close()
-    engine.close()
+def test_embedding_contract_is_the_shared_async_contract() -> None:
+    embedder = FakeEmbedder()
+    assert isinstance(embedder, Embedder)
+    assert LiteLLMEmbedder is LiteLLMBatchEmbedder
 
 
-async def test_engine_async_context_closes_sqlite(tmp_path: Path) -> None:
+def test_synthetic_page_satisfies_pagelike_protocol() -> None:
+    page = SyntheticPage("page", "concepts/page.md", {}, "body")
+    assert isinstance(page, PageLike)
+
+
+async def test_scope_less_search_is_refused_before_any_shortcut() -> None:
+    engine = _engine(RecordingBackend())
+    with pytest.raises(ValueError, match="authenticated scope"):
+        await engine.wiki_search("query")
+    with pytest.raises(ValueError, match="authenticated scope"):
+        await engine.wiki_search("", k=0)
+
+
+async def test_search_threads_exact_scope_and_request(scope: Scope) -> None:
+    backend = RecordingBackend([_chunk()])
+    hits = await _engine(backend).wiki_search("body meaning", k=7, scope=scope)
+    assert backend.calls == [("body meaning", None, scope, 7)]
+    assert len(hits) == 1
+
+
+@pytest.mark.parametrize(("query", "k"), [("", 5), ("   ", 5), ("query", 0), ("q", -1)])
+async def test_empty_or_nonpositive_search_skips_backend(
+    query: str, k: int, scope: Scope
+) -> None:
+    backend = RecordingBackend([_chunk()])
+    assert await _engine(backend).wiki_search(query, k=k, scope=scope) == []
+    assert backend.calls == []
+
+
+async def test_backend_chunk_is_adapted_to_page_hit(scope: Scope) -> None:
+    backend = RecordingBackend([_chunk(score=0.42)])
+    (hit,) = await _engine(backend).wiki_search("query", scope=scope)
+    assert isinstance(hit, WikiHit)
+    assert hit.page_id == "page"
+    assert hit.path == "concepts/page.md"
+    assert hit.type == "concept"
+    assert hit.title == "Page Title"
+    assert hit.score == pytest.approx(0.42)
+    assert hit.snippet == "A compact routing sentence."
+
+
+@pytest.mark.parametrize("word_count", [40, 41, 100])
+async def test_search_snippet_never_exceeds_forty_words(
+    word_count: int, scope: Scope
+) -> None:
+    text = " ".join(f"word-{index}" for index in range(word_count))
+    backend = RecordingBackend([_chunk(text=text, tldr="")])
+    (hit,) = await _engine(backend).wiki_search("query", scope=scope)
+    assert len(hit.snippet.split()) == min(word_count, 40)
+    assert len(hit.snippet.split()) <= 40
+
+
+async def test_seen_hash_returns_only_canonical_stub(scope: Scope) -> None:
+    backend = RecordingBackend([_chunk()])
+    (hit,) = await _engine(backend).wiki_search(
+        "query", seen=["sha:page"], scope=scope
+    )
+    assert hit.seen is True
+    assert hit.snippet == ""
+    assert hit.canonical() == {
+        "path": "concepts/page.md",
+        "title": "Page Title",
+        "seen": True,
+    }
+
+
+async def test_unseen_canonical_hit_is_bounded_data_shape(scope: Scope) -> None:
+    backend = RecordingBackend([_chunk()])
+    (hit,) = await _engine(backend).wiki_search("query", scope=scope)
+    assert hit.canonical() == {
+        "path": "concepts/page.md",
+        "type": "concept",
+        "score": 0.75,
+        "snippet": "A compact routing sentence.",
+        "seen": False,
+        "degraded": False,
+    }
+
+
+async def test_degradation_state_and_reason_survive_adapter(scope: Scope) -> None:
+    backend = RecordingBackend(
+        [_chunk(degraded="true", degraded_reason="embedding_timeout")]
+    )
+    (hit,) = await _engine(backend).wiki_search("query", scope=scope)
+    assert hit.degraded is True
+    assert hit.reason == "embedding_timeout"
+    assert hit.canonical()["reason"] == "embedding_timeout"
+
+
+async def test_source_chunk_routes_to_its_wiki_page(scope: Scope) -> None:
+    backend = RecordingBackend(
+        [_chunk(path="raw/report.pdf", wiki_path="concepts/compiled.md")]
+    )
+    (hit,) = await _engine(backend).wiki_search("query", scope=scope)
+    assert hit.path == "concepts/compiled.md"
+    assert hit.page_id == "compiled"
+
+
+async def test_search_deduplicates_chunks_routed_to_same_page(scope: Scope) -> None:
+    backend = RecordingBackend(
+        [
+            _chunk(path="concepts/page.md", score=0.9),
+            _chunk(path="raw/report.pdf", score=0.8, wiki_path="concepts/page.md"),
+            _chunk(path="concepts/other.md", score=0.7, title="Other"),
+        ]
+    )
+    hits = await _engine(backend).wiki_search("query", k=5, scope=scope)
+    assert [hit.path for hit in hits] == ["concepts/page.md", "concepts/other.md"]
+
+
+async def test_backend_failure_is_not_hidden(scope: Scope) -> None:
+    class BrokenBackend(RecordingBackend):
+        async def retrieve(
+            self,
+            hint: str,
+            *,
+            path: str | None = None,
+            scope: Scope | None = None,
+            k: int = 10,
+        ) -> Sequence[RagChunk]:
+            del hint, path, scope, k
+            raise RuntimeError("database unavailable")
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await _engine(BrokenBackend()).wiki_search("query", scope=scope)
+
+
+async def test_cache_compatibility_argument_never_writes_local_files(
+    tmp_path: Path, scope: Scope
+) -> None:
+    cache = tmp_path / "retired" / "cache.json"
     engine = ScoutDiyEngine(
         embedder=FakeEmbedder(),
-        pages=[_page("p1", "summary")],
-        cache_path=tmp_path / "vector_cache.json",
+        rag_backend=RecordingBackend([_chunk()]),
+        cache_path=cache,
+    )
+    await engine.wiki_search("query", scope=scope)
+    assert not cache.exists()
+    assert list(tmp_path.rglob("*")) == []
+
+
+async def test_internal_backend_reuses_shared_embedder_and_closes(
+    monkeypatch: pytest.MonkeyPatch, scope: Scope
+) -> None:
+    from scout.backends import pgvector
+
+    created: list[object] = []
+    closed: list[bool] = []
+
+    class OwnedBackend(RecordingBackend):
+        def __init__(self, *, embedder: object) -> None:
+            super().__init__([_chunk()])
+            created.append(embedder)
+
+        async def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(pgvector, "PgVectorRlsBackend", OwnedBackend)
+    embedder = FakeEmbedder()
+    engine = ScoutDiyEngine(embedder=embedder)
+    await engine.wiki_search("query", scope=scope)
+    await engine.aclose()
+    await engine.aclose()
+    assert created == [embedder]
+    assert closed == [True]
+
+
+async def test_injected_backend_is_not_closed_by_engine(scope: Scope) -> None:
+    class ExternalBackend(RecordingBackend):
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    backend = ExternalBackend([_chunk()])
+    async with _engine(backend) as engine:
+        await engine.wiki_search("query", scope=scope)
+    assert backend.closed is False
+
+
+async def test_scope_less_read_is_refused(tmp_path: Path) -> None:
+    _write_page(tmp_path)
+    with pytest.raises(ValueError, match="authenticated scope"):
+        await _vault_engine(tmp_path).wiki_read("concepts/page.md")
+
+
+async def test_full_read_returns_canonical_disk_envelope(
+    tmp_path: Path, scope: Scope
+) -> None:
+    page_path = _write_page(tmp_path)
+    page = await _vault_engine(tmp_path).wiki_read(
+        "concepts/page.md", scope=scope
+    )
+    assert isinstance(page, WikiPage)
+    assert page.body == page_path.read_text(encoding="utf-8").split("---\n", 2)[2]
+    assert page.path == "concepts/page.md"
+    assert page.title == "Page Title"
+    assert page.type == "concept"
+    assert page.updated == "2026-08-28"
+    assert page.tldr == "A compact routing sentence."
+    assert page.links == ("other", "third")
+    assert page.sources[0]["path"] == "raw/report.pdf"  # type: ignore[index]
+    envelope = page.canonical()
+    assert set(envelope) == {
+        "path",
+        "title",
+        "type",
+        "updated",
+        "tldr",
+        "outline",
+        "sections",
+        "sources",
+        "links",
+        "content_hash",
+    }
+    assert envelope["sections"] == {
+        "TL;DR": "A compact routing sentence.",
+        "Detail": "Body evidence is read from the current Markdown file.",
+        "Cross-References": "See [[other|Other Page]] and [[third#Part]].",
+    }
+
+
+async def test_tldr_mode_returns_minimal_envelope(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(tmp_path)
+    page = await _vault_engine(tmp_path).wiki_read(
+        "page", mode="tldr", scope=scope
+    )
+    assert set(page.canonical()) == {
+        "path",
+        "title",
+        "type",
+        "tldr",
+        "content_hash",
+    }
+    assert "Body evidence" not in str(page.canonical())
+
+
+async def test_outline_mode_excludes_section_bodies(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(tmp_path)
+    page = await _vault_engine(tmp_path).wiki_read(
+        "Page Title", mode="outline", scope=scope
+    )
+    envelope = page.canonical()
+    assert set(envelope) == {
+        "path",
+        "title",
+        "type",
+        "tldr",
+        "content_hash",
+        "outline",
+    }
+    outline = cast(list[Mapping[str, object]], envelope["outline"])
+    headings = [item["heading"] for item in outline]
+    assert headings == ["TL;DR", "Detail", "Cross-References"]
+    assert "Body evidence" not in str(envelope)
+
+
+async def test_section_read_is_case_insensitive_and_narrow(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(tmp_path)
+    page = await _vault_engine(tmp_path).wiki_read(
+        "concepts/page.md", section="detail", scope=scope
+    )
+    assert page.mode == "section"
+    assert page.canonical()["sections"] == {
+        "Detail": "Body evidence is read from the current Markdown file."
+    }
+    assert "Cross-References" not in str(page.canonical())
+
+
+async def test_missing_or_ambiguous_section_is_refused(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(
+        tmp_path,
+        body="""# Page Title
+
+## TL;DR
+Summary.
+
+## First
+### Notes
+First notes.
+
+## Second
+### Notes
+Second notes.
+""",
+    )
+    engine = _vault_engine(tmp_path)
+    with pytest.raises(KeyError, match="ambiguous"):
+        await engine.wiki_read("page", section="Notes", scope=scope)
+    with pytest.raises(KeyError, match="no such wiki section"):
+        await engine.wiki_read("page", section="Missing", scope=scope)
+
+
+async def test_invalid_read_mode_is_refused(tmp_path: Path, scope: Scope) -> None:
+    _write_page(tmp_path)
+    with pytest.raises(ValueError, match="unsupported"):
+        await _vault_engine(tmp_path).wiki_read("page", mode="everything", scope=scope)
+
+
+@pytest.mark.parametrize("identifier", ["page", "Page Title", "concepts/page.md", "concepts\\page.md"])
+async def test_read_resolves_slug_title_and_normalized_path(
+    identifier: str, tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(tmp_path)
+    page = await _vault_engine(tmp_path).wiki_read(identifier, scope=scope)
+    assert page.path == "concepts/page.md"
+
+
+async def test_read_rejects_traversal_and_unknown_page(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(tmp_path)
+    engine = _vault_engine(tmp_path)
+    with pytest.raises(KeyError, match="escapes"):
+        await engine.wiki_read("../outside.md", scope=scope)
+    with pytest.raises(KeyError, match="no such"):
+        await engine.wiki_read("missing", scope=scope)
+
+
+async def test_ambiguous_title_is_refused(tmp_path: Path, scope: Scope) -> None:
+    _write_page(tmp_path, rel="concepts/one.md", title="Same Title")
+    _write_page(tmp_path, rel="entities/two.md", title="Same Title")
+    with pytest.raises(KeyError, match="ambiguous"):
+        await _vault_engine(tmp_path).wiki_read("Same Title", scope=scope)
+
+
+async def test_each_read_observes_current_disk_bytes(
+    tmp_path: Path, scope: Scope
+) -> None:
+    path = _write_page(tmp_path)
+    engine = _vault_engine(tmp_path)
+    before = await engine.wiki_read("page", scope=scope)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "A compact routing sentence.", "A freshly edited routing sentence."
+        ),
+        encoding="utf-8",
+    )
+    after = await engine.wiki_read("page", scope=scope)
+    assert before.content_hash != after.content_hash
+    assert before.body != after.body
+    assert after.tldr == "A freshly edited routing sentence."
+
+
+async def test_horizontal_rule_survives_section_parsing(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(
+        tmp_path,
+        body="""# Page Title
+
+## TL;DR
+Summary.
+
+## Detail
+Above the rule.
+
+---
+
+Below the rule.
+""",
+    )
+    page = await _vault_engine(tmp_path).wiki_read(
+        "page", section="Detail", scope=scope
+    )
+    assert page.sections["Detail"] == "Above the rule.\n\n---\n\nBelow the rule."
+
+
+async def test_read_uses_body_tldr_chain_without_summary_frontmatter(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(
+        tmp_path,
+        body="""# Page Title
+
+This lead paragraph is the routing text even without summary metadata.
+
+## Detail
+Deeper evidence.
+""",
+    )
+    page = await _vault_engine(tmp_path).wiki_read("page", mode="tldr", scope=scope)
+    assert page.tldr == (
+        "This lead paragraph is the routing text even without summary metadata."
     )
 
-    async with engine as active:
-        await active._ensure_index()
-        assert active._fts_conn is not None
 
-    assert engine._fts_conn is None
-
-
-async def test_engine_repeated_open_close_cycles_leave_database_usable(
-    tmp_path: Path,
+async def test_wikilinks_are_normalized_and_deduplicated(
+    tmp_path: Path, scope: Scope
 ) -> None:
-    cache_path = tmp_path / "vector_cache.json"
-    page = _page("p1", "summary", title="Title")
+    _write_page(
+        tmp_path,
+        body="""# Page Title
 
-    for _ in range(3):
-        with ScoutDiyEngine(
-            embedder=FakeEmbedder(), pages=[page], cache_path=cache_path
-        ) as engine:
-            await engine._ensure_index()
+## TL;DR
+Summary.
 
-    assert _fts_rows(tmp_path / "search.db") == [("p1", "Title", "summary", "")]
+## Links
+[[target|Alias]], [[target#Section]], and [[second]].
+""",
+    )
+    page = await _vault_engine(tmp_path).wiki_read("page", scope=scope)
+    assert page.links == ("target", "second")
+
+
+async def test_non_list_sources_default_to_empty(
+    tmp_path: Path, scope: Scope
+) -> None:
+    page_path = _write_page(tmp_path)
+    page_path.write_text(
+        page_path.read_text(encoding="utf-8").replace(
+            "sources:\n  - path: raw/report.pdf\n    loc: p.2\n    hint: exact evidence phrase",
+            "sources: malformed",
+        ),
+        encoding="utf-8",
+    )
+    page = await _vault_engine(tmp_path).wiki_read("page", scope=scope)
+    assert page.sources == ()

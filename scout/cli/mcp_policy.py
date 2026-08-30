@@ -7,8 +7,8 @@ redundant MCP tool, since an MCP client lists tools natively.
 
 Exposure is not 1:1 on purpose. A tool definition costs roughly 100-500 tokens
 of every agent's context, and a long tool list measurably degrades tool
-selection — agents call the wrong tool. Eight commands next to `rag_fetch` and
-basic-memory's tools is a crowded list for no benefit, so the five verification
+selection — agents call the wrong tool. Retrieval plus every operator command
+would be a crowded list for no benefit, so the five verification
 commands collapse into one `verify` tool with a `stage` argument. That is the
 shape `check` already had.
 
@@ -156,27 +156,12 @@ POLICIES: tuple[ToolPolicy, ...] = (
         "fetch",
         Exposure.HIDDEN,
         reason=(
-            "R-4.1/R-4.2: rag_fetch on the Scout server is the ONLY door into RAG. "
-            "A second retrieval tool here would be a second door, whatever it "
-            "shares internally"
+            "V3 withdraws direct address retrieval from the agent surface; "
+            "the operator command remains available for diagnostics only"
         ),
     ),
-    ToolPolicy(
-        "search",
-        Exposure.HIDDEN,
-        reason=(
-            "the snp-wiki server already exposes search_notes over the same vault; "
-            "two search tools is exactly the crowding that degrades tool selection"
-        ),
-    ),
-    ToolPolicy(
-        "read",
-        Exposure.HIDDEN,
-        reason=(
-            "the snp-wiki server already exposes read_note over the same vault; "
-            "a second reading tool is context cost for a capability the agent has"
-        ),
-    ),
+    ToolPolicy("search", Exposure.TOOL, tool="wiki_search"),
+    ToolPolicy("read", Exposure.TOOL, tool="wiki_read"),
     ToolPolicy(
         "install-agent",
         Exposure.HIDDEN,
@@ -190,8 +175,8 @@ POLICIES: tuple[ToolPolicy, ...] = (
         "compile-cancel",
         Exposure.HIDDEN,
         reason=(
-            "the tool surface is deliberately four, and an agent that started a "
-            "batch can stop caring about it — stopping one is the operator's "
+            "the tool surface stays deliberately small, and an agent that started "
+            "a batch can stop caring about it — stopping one is the operator's "
             "job at a terminal. A task-capable client gets tasks/cancel natively"
         ),
     ),

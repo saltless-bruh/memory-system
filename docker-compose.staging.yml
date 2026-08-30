@@ -32,6 +32,4 @@ services:
     ports: !override
       - "127.0.0.1:${SNP_STAGING_HOST_SYNC_PORT:-19000}:9000"
 
-  basic-memory:
-    ports: !override
-      - "127.0.0.1:${SNP_STAGING_BASIC_MEMORY_PORT:-18765}:8765"
+  

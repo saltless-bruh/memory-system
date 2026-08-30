@@ -1024,15 +1024,27 @@ command(
 )
 command(
     "search",
-    "Rank vault pages against a free-text query.",
+    "Rank distinct vault pages through the shared pgvector index.",
     "scout.cli.commands.wiki:search",
     args=(
         ArgSpec("query", "string", required=True),
+        ArgSpec(
+            "--dept",
+            "string",
+            required=True,
+            enum=("redteam", "blueteam", "ai_eng", "infra"),
+            description="Explicit local RLS scope; `all` is not caller authority.",
+        ),
         ArgSpec(
             "--limit",
             "integer",
             default=5,
             description="Maximum hits. Must be positive.",
+        ),
+        ArgSpec(
+            "--seen",
+            "string[]",
+            description="Content hashes already present in context; matching pages become stubs.",
         ),
     ),
     # `bounded`, not `unbounded`: the caller's own `--limit` fixes the size and
@@ -1041,7 +1053,7 @@ command(
     # saying the result is bounded, which it is.
     cardinality=Cardinality.BOUNDED,
     errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-    example=("convolution", "--limit", "3", "-o", "json"),
+    example=("convolution", "--dept", "ai_eng", "--limit", "3", "-o", "json"),
     output_fields=(
         FieldSpec("query", "string"),
         FieldSpec("count", "integer"),
@@ -1052,17 +1064,22 @@ command(
                 "hit",
                 "object",
                 fields=(
-                    FieldSpec("page_id", "string"),
                     FieldSpec("path", "string"),
+                    FieldSpec("title", "string", nullable=True),
+                    FieldSpec("type", "string", nullable=True),
                     FieldSpec(
                         "score",
                         "number",
+                        nullable=True,
                         description=(
                             "Reciprocal Rank Fusion weight, capped near 0.033. "
                             "NOT a similarity: no threshold on it is meaningful."
                         ),
                     ),
-                    FieldSpec("summary", "string"),
+                    FieldSpec("snippet", "string", nullable=True),
+                    FieldSpec("seen", "boolean"),
+                    FieldSpec("degraded", "boolean", nullable=True),
+                    FieldSpec("reason", "string", nullable=True),
                 ),
             ),
         ),
@@ -1070,7 +1087,7 @@ command(
 )
 command(
     "read",
-    "Read a compiled page by its title, slug, or path.",
+    "Read a canonical page envelope from the current vault file.",
     "scout.cli.commands.wiki:read",
     args=(
         ArgSpec(
@@ -1079,30 +1096,61 @@ command(
             required=True,
             description="Title, slug, or path under wiki/. An ambiguous title exits 3.",
         ),
+        ArgSpec(
+            "--dept",
+            "string",
+            required=True,
+            enum=("redteam", "blueteam", "ai_eng", "infra"),
+            description="Explicit local RLS scope; `all` is not caller authority.",
+        ),
+        ArgSpec(
+            "--mode",
+            "string",
+            default="full",
+            enum=("full", "tldr", "outline"),
+            description="Choose the amount of page context to return.",
+        ),
+        ArgSpec(
+            "--section",
+            "string",
+            description="Return one named section instead of the full page.",
+        ),
     ),
     errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-    example=("convolutional-neural-networks", "-o", "json"),
+    example=("convolutional-neural-networks", "--dept", "ai_eng", "-o", "json"),
     output_fields=(
         FieldSpec("path", "string"),
         FieldSpec("title", "string"),
-        FieldSpec("slug", "string"),
-        FieldSpec("department", "string"),
-        FieldSpec("summary", "string"),
-        FieldSpec("entities", "array", items=FieldSpec("entity", "string")),
+        FieldSpec("type", "string"),
+        FieldSpec("tldr", "string"),
+        FieldSpec("content_hash", "string"),
+        FieldSpec("updated", "string", nullable=True),
+        FieldSpec(
+            "outline",
+            "array",
+            nullable=True,
+            items=FieldSpec(
+                "heading",
+                "object",
+                fields=(
+                    FieldSpec("heading", "string"),
+                    FieldSpec("tokens", "integer"),
+                ),
+            ),
+        ),
+        FieldSpec("sections", "object", nullable=True),
         FieldSpec(
             "sources",
             "array",
+            nullable=True,
             items=FieldSpec("source", "object"),
-            description="The page's addresses: pass one to `snpmemory fetch`.",
         ),
-        FieldSpec("last_compiled", "string"),
         FieldSpec(
-            "wikilinks",
+            "links",
             "array",
+            nullable=True,
             items=FieldSpec("slug", "string"),
-            description="Related pages, per R-1.5 (body wikilinks, never frontmatter).",
         ),
-        FieldSpec("body", "string"),
     ),
 )
 command(

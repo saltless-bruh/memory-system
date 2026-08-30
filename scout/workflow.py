@@ -20,6 +20,7 @@ the flow can use basic-memory or Scout-DIY and production pgvector or a fake.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -33,11 +34,25 @@ from scout.types import Address, Citation, ContextPiece, FetchStatus, RagBackend
 class WikiEngine(Protocol):
     """The wiki lookup contract (design §2.2) — basic-memory or Scout-DIY."""
 
-    async def wiki_search(self, query: str, k: int = 5) -> Sequence[WikiHit]:
+    async def wiki_search(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        seen: Sequence[str] = (),
+        scope: Scope | None = None,
+    ) -> Sequence[WikiHit]:
         """Return top-K pages for `query`."""
         ...
 
-    async def wiki_read(self, path: str) -> WikiPage:
+    async def wiki_read(
+        self,
+        path: str,
+        *,
+        mode: str = "full",
+        section: str | None = None,
+        scope: Scope | None = None,
+    ) -> WikiPage:
         """Read one page by path or id."""
         ...
 
@@ -100,6 +115,16 @@ def _addresses_from_page(page: WikiPage) -> list[Address]:
     return addresses
 
 
+def _accepts_keyword(method: Callable[..., object], keyword: str) -> bool:
+    """Allow pre-V3 injected test adapters while production stays scoped."""
+    parameters = inspect.signature(method).parameters.values()
+    return any(
+        parameter.name == keyword
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 async def answer_query(
     wiki: WikiEngine,
     rag: RagBackend,
@@ -125,12 +150,18 @@ async def answer_query(
         An `Answer`. On the page-only branch, `used_rag` is False and `rag`
         is never awaited — the property the test pins (R-5.1).
     """
-    hits = await wiki.wiki_search(query, k)
+    if _accepts_keyword(wiki.wiki_search, "scope"):
+        hits = await wiki.wiki_search(query, k, scope=scope)
+    else:
+        hits = await wiki.wiki_search(query, k)
     if not hits:
         return Answer(query=query, status=AnswerStatus.NO_PAGE)
 
     top = hits[0]
-    page = await wiki.wiki_read(top.path)
+    if _accepts_keyword(wiki.wiki_read, "scope"):
+        page = await wiki.wiki_read(top.path, scope=scope)
+    else:
+        page = await wiki.wiki_read(top.path)
 
     descend = need_rag(page) if callable(need_rag) else need_rag
     if not descend:

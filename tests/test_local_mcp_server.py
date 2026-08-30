@@ -21,7 +21,14 @@ def _tools() -> list[Any]:
 
 def test_the_tool_surface_matches_the_policy() -> None:
     names = {tool.name for tool in _tools()}
-    assert names == {"verify", "plan_articles", "compile_plan", "compile_status"}
+    assert names == {
+        "wiki_search",
+        "wiki_read",
+        "verify",
+        "plan_articles",
+        "compile_plan",
+        "compile_status",
+    }
 
 
 def test_building_the_server_touches_no_socket() -> None:
@@ -31,14 +38,20 @@ def test_building_the_server_touches_no_socket() -> None:
     or credential. The MCP surface makes the same promise, and it only holds
     because implementations load at call time rather than at registration.
     """
-    assert len(_tools()) == 4
+    assert len(_tools()) == 6
 
 
 def test_read_tools_are_annotated_read_only_and_write_tools_are_not() -> None:
     """A client decides whether to prompt from these hints."""
     by_name = {tool.name: tool for tool in _tools()}
 
-    for name in ("verify", "plan_articles", "compile_status"):
+    for name in (
+        "wiki_search",
+        "wiki_read",
+        "verify",
+        "plan_articles",
+        "compile_status",
+    ):
         annotations = by_name[name].annotations
         assert annotations.readOnlyHint is True
         assert annotations.destructiveHint is False

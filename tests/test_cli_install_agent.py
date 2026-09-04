@@ -99,12 +99,18 @@ def test_confirm_installs_over_an_existing_agent_directory(tmp_path: Path) -> No
     assert (tmp_path / ".agent" / "rules" / "snp-memory.md").is_file()
 
 
-def test_the_installed_project_gets_all_three_servers(tmp_path: Path) -> None:
+def test_the_installed_project_gets_the_two_v3_servers(tmp_path: Path) -> None:
+    """`snp-wiki` was basic-memory, and V3 removed it from the stack.
+
+    An installed project must be handed the two servers that exist, and must
+    not be told to connect to the retired one — a stale entry here points a
+    fresh checkout at a port nothing listens on.
+    """
     result = install_agent(str(tmp_path), config=_config())
 
-    assert result.data["servers"] == ["scout", "snp-wiki", "snpmemory"]
+    assert result.data["servers"] == ["scout", "snpmemory"]
     written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
-    assert set(written["mcpServers"]) == {"snp-wiki", "scout", "snpmemory"}
+    assert set(written["mcpServers"]) == {"scout", "snpmemory"}
 
 
 def test_installing_is_idempotent(tmp_path: Path) -> None:

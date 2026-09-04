@@ -91,6 +91,7 @@ def _build_search_engine(cfg: Config, wiki_dir: Path) -> ScoutDiyEngine:
         user=settings.user,
         password=settings.password,
         embedder=embedder,
+        corpus="wiki",
     )
     return ScoutDiyEngine.from_vault(
         embedder,
@@ -116,7 +117,7 @@ async def _close_backend(engine: ScoutDiyEngine) -> None:
             await result
 
 
-def read(
+async def read_async(
     page: str,
     *,
     dept: str,
@@ -125,8 +126,6 @@ def read(
     config: Injected = None,
 ) -> CommandResult:
     """Read a canonical page envelope by title, slug, or path."""
-    import asyncio
-
     from scout.cli.commands.rag import _scope_for
     from scout.diy_engine import ScoutDiyEngine
 
@@ -136,13 +135,13 @@ def read(
     engine = ScoutDiyEngine.from_vault(_ReadOnlyEmbedder(), wiki_dir=wiki_dir)
 
     try:
-        found = asyncio.run(
-            engine.wiki_read(page, mode=mode, section=section, scope=scope)
-        )
+        found = await engine.wiki_read(page, mode=mode, section=section, scope=scope)
     except CliError:
         raise
     except (KeyError, ValueError) as exc:
-        raise input_error(str(exc), hint="pass a valid page, mode, and section") from exc
+        raise input_error(
+            str(exc), hint="pass a valid page, mode, and section"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - disk/parser failures are infrastructure
         raise infrastructure_error(
             "the wiki page could not be read",
@@ -154,9 +153,7 @@ def read(
     if found.mode == "tldr":
         summary = found.tldr
     elif found.mode == "outline":
-        summary = "\n".join(
-            str(item.get("heading", "")) for item in found.outline
-        )
+        summary = "\n".join(str(item.get("heading", "")) for item in found.outline)
     elif found.mode == "section":
         summary = "\n\n".join(found.sections.values())
     else:
@@ -168,7 +165,29 @@ def read(
     )
 
 
-def search(
+def read(
+    page: str,
+    *,
+    dept: str,
+    mode: str = "full",
+    section: str | None = None,
+    config: Injected = None,
+) -> CommandResult:
+    """Synchronous CLI adapter for :func:`read_async`."""
+    import asyncio
+
+    return asyncio.run(
+        read_async(
+            page,
+            dept=dept,
+            mode=mode,
+            section=section,
+            config=config,
+        )
+    )
+
+
+async def search_async(
     query: str,
     *,
     dept: str,
@@ -177,8 +196,6 @@ def search(
     config: Injected = None,
 ) -> CommandResult:
     """Rank distinct vault pages through the shared pgvector index."""
-    import asyncio
-
     from scout.cli.commands.rag import _scope_for
 
     cfg: Config = config
@@ -199,19 +216,13 @@ def search(
             cause=type(exc).__name__,
         ) from exc
 
-    async def run() -> list[Any]:
-        try:
-            return await engine.wiki_search(
-                query,
-                k=limit,
-                seen=seen or (),
-                scope=scope,
-            )
-        finally:
-            await _close_backend(engine)
-
     try:
-        hits = asyncio.run(run())
+        hits = await engine.wiki_search(
+            query,
+            k=limit,
+            seen=seen or (),
+            scope=scope,
+        )
     except Exception as exc:  # noqa: BLE001 - database/provider faults are one class
         raise infrastructure_error(
             "the wiki search backend could not be reached",
@@ -222,6 +233,8 @@ def search(
             retryable=True,
             cause=type(exc).__name__,
         ) from exc
+    finally:
+        await _close_backend(engine)
 
     return CommandResult(
         data={
@@ -235,4 +248,26 @@ def search(
             else f"no page matches {query!r}"
         ),
         messages=(f"{len(hits)} hit(s) for {query!r}",),
+    )
+
+
+def search(
+    query: str,
+    *,
+    dept: str,
+    limit: int = 5,
+    seen: list[str] | None = None,
+    config: Injected = None,
+) -> CommandResult:
+    """Synchronous CLI adapter for :func:`search_async`."""
+    import asyncio
+
+    return asyncio.run(
+        search_async(
+            query,
+            dept=dept,
+            limit=limit,
+            seen=seen,
+            config=config,
+        )
     )

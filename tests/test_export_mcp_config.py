@@ -13,27 +13,17 @@ import scripts.export_mcp_config as exporter
 
 
 @pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
-def test_generated_config_preserves_basic_memory_and_authenticates_scout(
+def test_generated_config_exposes_only_v3_servers_and_authenticates_scout(
     client: str,
 ) -> None:
     config = exporter.generate_config(client)
     server_key = "servers" if client == "vscode" else "mcpServers"
     servers = config[server_key]
-    basic = servers["snp-wiki"]
+    assert set(servers) == {"scout", exporter.LOCAL_SERVER_NAME}
     scout = servers["scout"]
 
-    if client == "cursor":
-        assert basic == {"type": "sse", "url": "http://localhost:8765/mcp"}
-    elif client == "vscode":
-        assert basic == {"type": "http", "url": "http://localhost:8765/mcp"}
+    if client == "vscode":
         assert scout["type"] == "stdio"
-    elif client == "gemini":
-        assert basic == {"httpUrl": "http://localhost:8765/mcp"}
-    else:
-        assert basic == {
-            "command": "npx",
-            "args": ["-y", "mcp-remote", "http://localhost:8765/mcp"],
-        }
 
     assert scout["command"] == "npx"
     assert scout["args"] == [
@@ -136,7 +126,14 @@ def test_all_writes_every_client_and_preserves_unrelated_servers(
     monkeypatch.setattr(exporter, "CLIENT_CONFIG_PATHS", paths)
     cursor_path = Path(paths["cursor"])
     cursor_path.write_text(
-        json.dumps({"mcpServers": {"unrelated": {"url": "http://other"}}}),
+        json.dumps(
+            {
+                "mcpServers": {
+                    "unrelated": {"url": "http://other"},
+                    "snp-wiki": {"url": "http://localhost:8765/mcp"},
+                }
+            }
+        ),
         encoding="utf-8",
     )
     vscode_path = Path(paths["vscode"])
@@ -149,15 +146,13 @@ def test_all_writes_every_client_and_preserves_unrelated_servers(
     for client, path_string in paths.items():
         written = json.loads(Path(path_string).read_text(encoding="utf-8"))
         server_key = "servers" if client == "vscode" else "mcpServers"
-        assert (
-            written[server_key]["snp-wiki"]
-            == exporter.generate_config(client)[server_key]["snp-wiki"]
-        )
+        assert "snp-wiki" not in written[server_key]
         assert (
             written[server_key]["scout"]
             == exporter.generate_config(client)[server_key]["scout"]
         )
     assert "unrelated" in json.loads(cursor_path.read_text())["mcpServers"]
+    assert "snp-wiki" not in json.loads(cursor_path.read_text())["mcpServers"]
     assert "unrelated" in json.loads(vscode_path.read_text())["servers"]
 
 
@@ -221,15 +216,15 @@ def test_unknown_client_rejected() -> None:
 
 
 @pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
-def test_every_client_gets_all_three_servers(client: str) -> None:
-    """An agent installed from this repo must reach the authoring path too.
+def test_every_client_gets_exactly_the_v3_servers(client: str) -> None:
+    """An installed agent reaches V3 retrieval and the authoring path.
 
-    Before T2.1 the exporter emitted the two read paths and none of the write
-    one, so an installed agent could search and fetch but not compile.
+    The retired basic-memory server must not be scaffolded after Scout proves
+    both canonical V3 read tools.
     """
     server_key = "servers" if client == "vscode" else "mcpServers"
     servers = exporter.generate_config(client)[server_key]
-    assert set(servers) == {"snp-wiki", "scout", exporter.LOCAL_SERVER_NAME}
+    assert set(servers) == {"scout", exporter.LOCAL_SERVER_NAME}
 
 
 @pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
@@ -275,4 +270,11 @@ def test_the_exported_entry_actually_starts_the_advertised_tools() -> None:
     assert local["args"][0] == "mcp"
 
     served = {tool.name for tool in asyncio.run(build_server().list_tools())}
-    assert served == {"verify", "plan_articles", "compile_plan", "compile_status"}
+    assert served == {
+        "verify",
+        "plan_articles",
+        "compile_plan",
+        "compile_status",
+        "wiki_search",
+        "wiki_read",
+    }

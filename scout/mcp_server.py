@@ -80,7 +80,13 @@ def _default_engine(backend: RagBackend) -> ScoutDiyEngine:
     embedder = cast(Embedder, getattr(backend, "embedder", None))
     configured = os.environ.get("WIKI_DIR")
     replica = Path("/vault-replica/current/wiki")
-    wiki_dir = Path(configured) if configured else replica if replica.is_dir() else vault.WIKI_DIR
+    wiki_dir = (
+        Path(configured)
+        if configured
+        else replica
+        if replica.is_dir()
+        else vault.WIKI_DIR
+    )
     return ScoutDiyEngine.from_vault(
         embedder,
         wiki_dir=wiki_dir,

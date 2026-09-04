@@ -164,16 +164,90 @@ class ContextualChunker:
             context_parts.append(f"Context: {loc}")
         return f"[{' | '.join(context_parts)}]"
 
+    def _is_table_line(self, line: str) -> bool:
+        """Check if a line is a Markdown table row (starts with |)."""
+        stripped = line.strip()
+        return bool(stripped and stripped.startswith("|"))
+
+    def _find_table_bounds(
+        self, text: str, chunk_start: int, chunk_end: int
+    ) -> tuple[int, int] | None:
+        """Find table bounds if a table straddles the chunk boundary.
+
+        If a table spans across chunk_end, returns (table_start, table_end) within the
+        full text, otherwise returns None.
+        """
+        lines_list = text.splitlines(keepends=True)
+        pos = 0
+        end_line_idx = None
+
+        # Find which line contains chunk_end
+        for i, line in enumerate(lines_list):
+            if pos <= chunk_end <= pos + len(line):
+                end_line_idx = i
+                break
+            pos += len(line)
+
+        if end_line_idx is None:
+            return None
+
+        # Check if we're cutting through a table
+        if not any(
+            self._is_table_line(lines_list[j])
+            for j in range(
+                max(0, end_line_idx - 5), min(len(lines_list), end_line_idx + 2)
+            )
+        ):
+            return None
+
+        # Find table that might straddle the boundary
+        for search_idx in range(
+            max(0, end_line_idx - 5), min(len(lines_list), end_line_idx + 1)
+        ):
+            if self._is_table_line(lines_list[search_idx]):
+                # Found a table, find its full extent
+                table_start_idx = search_idx
+                table_end_idx = search_idx
+
+                # Expand backwards
+                for i in range(search_idx - 1, -1, -1):
+                    if self._is_table_line(lines_list[i]):
+                        table_start_idx = i
+                    else:
+                        break
+
+                # Expand forwards
+                for i in range(search_idx + 1, len(lines_list)):
+                    if self._is_table_line(lines_list[i]):
+                        table_end_idx = i
+                    else:
+                        break
+
+                # Calculate byte positions
+                byte_start = sum(len(lines_list[i]) for i in range(table_start_idx))
+                byte_end = sum(len(lines_list[i]) for i in range(table_end_idx + 1))
+
+                # Return only if table straddles chunk_end
+                if byte_start < chunk_end <= byte_end:
+                    return (byte_start, byte_end)
+
+        return None
+
     def _split_text(self, text: str) -> list[str]:
-        """Split one section into ordered chunk bodies with a sliding overlap."""
+        """Split one section into ordered chunk bodies with a sliding overlap.
+
+        Markdown tables are kept whole in a single chunk to preserve their structure.
+        """
         if len(text) <= self.max_chunk_chars:
             return [text]
 
         bodies: list[str] = []
         overlap = min(self.overlap_chars, self.max_chunk_chars - 1)
         start = 0
+
         while start < len(text):
             end = min(start + self.max_chunk_chars, len(text))
+
             if end < len(text):
                 boundary = max(
                     text.rfind("\n", start + 1, end),
@@ -181,11 +255,21 @@ class ContextualChunker:
                 )
                 if boundary > start:
                     end = boundary
+
+            # Check if we'd be splitting a table - if so, expand to include it
+            table_bounds = self._find_table_bounds(text, start, end)
+            if table_bounds is not None:
+                table_start, table_end = table_bounds
+                # Expand chunk to include full table
+                end = table_end
+
             chunk_body = text[start:end].strip()
             if chunk_body:
                 bodies.append(chunk_body)
+
             if end >= len(text):
                 break
+
             next_start = end - overlap
             start = next_start if next_start > start else start + 1
 

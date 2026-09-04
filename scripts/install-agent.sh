@@ -66,6 +66,11 @@ mkdir -p "${TARGET_AGENT_DIR}/instructions"
 mkdir -p "${TARGET_AGENT_DIR}/workflows"
 mkdir -p "${TARGET_AGENT_DIR}/skills"
 
+# Remove only the two SNP-owned V2 components withdrawn by V3. This is bounded
+# cleanup, not a mirror delete: custom rules, skills, and workflows survive.
+rm -rf "${TARGET_AGENT_DIR}/skills/snp-auto-heal-vault"
+rm -f "${TARGET_AGENT_DIR}/workflows/snp-heal.md"
+
 # 2. Non-destructively copy rules
 cp -f "${PACKAGE_SRC}/rules/snp-memory.md" "${TARGET_AGENT_DIR}/rules/"
 
@@ -86,16 +91,14 @@ done
 
 # 6. Scaffold .mcp.json if not present
 #
-# Three servers, matching manifest.json and scripts/export_mcp_config.py:
-# snp-wiki reads the vault, scout is the only door into RAG, and snpmemory
-# authors and verifies. The third is stdio and needs the checkout it serves
-# pinned in argv, because it resolves configuration and relative paths against
-# its working directory.
+# Two servers, matching plugin.json and scripts/export_mcp_config.py: Scout
+# serves V3 retrieval and snpmemory serves the local retrieval/authoring surface.
+# The stdio server needs the checkout it serves pinned in argv.
 if [[ ! -f "${TARGET_DIR}/.mcp.json" ]]; then
     {
         printf '{\n  "mcpServers": {\n'
-        printf '    "snp-wiki": {\n      "url": "http://localhost:8765/mcp"\n    },\n'
-        printf '    "scout": {\n      "url": "http://localhost:8080/mcp"\n    }'
+        printf '    "scout": {\n      "url": "http://localhost:8080/mcp",\n'
+        printf '      "headers": {"Authorization": "${SCOUT_AUTH_HEADER}"}\n    }'
         if [[ -n "${LOCAL_CHECKOUT}" ]]; then
             printf ',\n    "snpmemory": {\n      "command": "snpmemory",\n'
             printf '      "args": ["mcp", "--root", "%s"]\n    }' "${LOCAL_CHECKOUT}"
@@ -108,6 +111,9 @@ if [[ ! -f "${TARGET_DIR}/.mcp.json" ]]; then
         echo "   persistent checkout to point it at. From your memory-system"
         echo "   clone, run: snpmemory mcp-config --client claude"
     fi
+else
+    echo "ℹ️  Preserved existing .mcp.json; run snpmemory mcp-config --client claude"
+    echo "   to reconcile SNP-managed server entries without replacing custom ones."
 fi
 
 echo ""
@@ -116,7 +122,7 @@ echo "✅ SNP Memory System Agent Package Successfully Installed!"
 echo "=========================================================================="
 echo "  • Rules Installed:        ${TARGET_AGENT_DIR}/rules/snp-memory.md"
 echo "  • Workflows Installed:    ${TARGET_AGENT_DIR}/workflows/ (/snp-query, /snp-compile, etc.)"
-echo "  • Skills Installed:       ${TARGET_AGENT_DIR}/skills/ (8 progressive disclosure skills)"
+echo "  • Skills Installed:       ${TARGET_AGENT_DIR}/skills/ (7 progressive disclosure skills)"
 echo "  • Instructions Installed: ${TARGET_AGENT_DIR}/instructions/"
 echo "=========================================================================="
 echo "🚀 NEXT STEP: Open your agent chat (Cursor / Claude / Gemini) and type:"

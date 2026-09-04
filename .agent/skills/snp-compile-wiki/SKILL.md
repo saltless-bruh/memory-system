@@ -1,92 +1,37 @@
 ---
 name: snp-compile-wiki
-description: "Use this skill when synthesizing, compiling, or summarizing a newly indexed raw file (e.g. an RFC, a report, a spreadsheet) into the Wiki Knowledge Vault."
+description: "Use this skill when a user asks you to author or revise a compiled wiki page from available evidence while preserving the V3 schema and pull-request governance."
 ---
 
-# snp-compile-wiki
+# Compile a wiki page
 
-## Purpose
-This skill guides the synthesis of raw documents (`raw/`) into compiled Knowledge Vault notes (`wiki/`) that satisfy the 7-field frontmatter contract and PR-first governance.
+## Preconditions
 
----
+- The user requested a page change.
+- The evidence is already available and may be cited honestly.
+- You are on a feature branch and will preserve unrelated work.
 
-## 1. Mint a Verifiable RAG Address (Rule R-6.3)
+Source fetching and cache population are deferred. If the necessary evidence
+is not available, stop the authoring attempt and state what is missing.
 
-Never hand-write `sources[].hint`. Always mint it against PostgreSQL pgvector:
+## Authoring sequence
 
-```bash
-uv run python scripts/mint.py \
-  --path raw/papers/computers-12-00091.pdf \
-  --hint "Convolutional Neural Networks" \
-  --department ai_eng \
-  --loc "p.12"
-```
+1. Read the target vault's `SCHEMA.md`; it overrides templates elsewhere.
+2. Use a lowercase-hyphen filename and the V3 fields `title`, `created`,
+   `updated`, `type`, `tags`, `sources`, and `confidence`. Preserve optional
+   `contested`, `contradictions`, and capture metadata.
+3. Write an H1 and free-form grounded sections. Add a concise `## TL;DR` when
+   useful, `## Provenance` when sources exist, and required
+   `## Cross-References` with at least two `[[wikilinks]]`.
+4. Begin sections and lists with enough context for body-chunk retrieval. Keep
+   one primary subject per page.
+5. Update the authored catalogue and editorial log only as the vault's schema
+   requires. Never replace them with generated empty descriptions or machine
+   operational messages.
+6. Review the schema and headings explicitly. The current automated checker is
+   transitional and does not certify the complete V3 contract.
+7. Submit the page on a pull request for human review. Never merge directly to
+   a protected branch.
 
-### Expected Output:
-```yaml
-sources:
-  - path: raw/papers/computers-12-00091.pdf
-    loc: "p.12"
-    hint: "Convolutional Neural Networks"
-```
-
----
-
-## 2. Frontmatter Contract & Section Schema (Rule R-1.3)
-
-Every page in `wiki/` (`concepts/`, `techniques/`, `entities/`, `playbooks/`) must have these exact 7 fields and 4 sections:
-
-```markdown
----
-type: concept              # technique | entity | playbook | concept
-title: Convolutional Neural Networks
-summary: Deep learning algorithms that automatically extract features using shared weights and local connections.
-entities: [convolutional-neural-networks, deep-learning, feature-extraction]
-department: ai_eng         # Scope hook (redteam | blueteam | ai_eng | infra)
-sources:                   # ADDRESS out to RAG Data Vault
-  - path: raw/papers/computers-12-00091.pdf
-    loc: "p.12"
-    hint: "Convolutional Neural Networks"
-last_compiled: 2026-08-19
----
-
-## TL;DR
-Dense, assertive summary of the compiled technical knowledge — no conversational filler.
-
-## Technical Specifications
-Detailed specifications, algorithms, mathematical formulations, and architectures.
-
-## Provenance
-Direct ties to raw/ sources and reconciliation of conflicting information.
-
-## Cross-References
-Relational links using [[wikilink-slug]] syntax only.
-```
-
----
-
-## 3. Automated Compilation CLI
-
-```bash
-uv run python scripts/compile_note.py \
-  --path raw/papers/computers-12-00091.pdf \
-  --title "Convolutional Neural Networks" \
-  --category concepts \
-  --dept ai_eng \
-  --loc "p.12"
-```
-
----
-
-## 4. Lint & PR Proposal (Rules R-6.4, R-7.3)
-
-```bash
-# 1. Check frontmatter schema & index consistency
-uv run python scripts/gen_index.py --check
-
-# 2. Check live RAG address resolution
-uv run python scripts/verify_addresses.py
-
-# 3. Create branch and propose PR (NEVER push directly to main)
-uv run python scripts/propose_page.py --page wiki/concepts/convolutional-neural-networks.md
-```
+Source references record provenance; they are not manually authored semantic
+pointers into the retrieval index.

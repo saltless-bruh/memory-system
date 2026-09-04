@@ -33,7 +33,7 @@ def _build_production_backend(backend_choice: str) -> RagBackend:
         raise ValueError("production RAG_BACKEND must be pgvector")
     from scout.backends.pgvector import PgVectorRlsBackend
 
-    return PgVectorRlsBackend()
+    return PgVectorRlsBackend(corpus="wiki")
 
 
 def main() -> None:  # pragma: no cover - deploy wiring (needs a live transport)

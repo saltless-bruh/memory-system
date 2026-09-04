@@ -35,6 +35,16 @@ services:
       # Gitea itself has no provider/model egress requirement.
       GITEA__service__DISABLE_REGISTRATION: "true"
       GITEA__security__INSTALL_LOCK: "true"
+      # Gitea refuses to deliver webhooks to private addresses by default
+      # (ALLOWED_HOST_LIST defaults to `external`), and every address on a
+      # compose network is private. The hook to host-sync was configured,
+      # active, and reachable, and Gitea still dropped every delivery with
+      # "webhook can only call allowed HTTP servers". That silently breaks
+      # acceptance workflow W-2: the push succeeds, the task is queued, and
+      # nothing tells the author their edit never reached the index.
+      # Named rather than `private` or `*` so this permits exactly one
+      # target and a second service cannot inherit egress by accident.
+      GITEA__webhook__ALLOWED_HOST_LIST: host-sync
     volumes:
       - gitea-data:/data
       - /etc/timezone:/etc/timezone:ro

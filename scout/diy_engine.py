@@ -239,7 +239,9 @@ def _select_section(sections: Mapping[str, str], requested: str) -> dict[str, st
     wanted = requested.strip().casefold()
     if not wanted:
         raise ValueError("section must not be empty")
-    exact = [(key, value) for key, value in sections.items() if key.casefold() == wanted]
+    exact = [
+        (key, value) for key, value in sections.items() if key.casefold() == wanted
+    ]
     if len(exact) == 1:
         return dict(exact)
     leaf = [
@@ -318,7 +320,7 @@ class ScoutDiyEngine:
         if self.rag_backend is None:
             from scout.backends.pgvector import PgVectorRlsBackend
 
-            self.rag_backend = PgVectorRlsBackend(embedder=self.embedder)
+            self.rag_backend = PgVectorRlsBackend(embedder=self.embedder, corpus="wiki")
             self._owns_backend = True
         return self.rag_backend
 
@@ -411,7 +413,9 @@ class ScoutDiyEngine:
             qualifier = "ambiguous" if matches else "no such"
             raise KeyError(f"{qualifier} wiki page: {identifier}")
         selected = matches[0]
-        return vault.parse_page(selected.path), selected.path.relative_to(root).as_posix()
+        return vault.parse_page(selected.path), selected.path.relative_to(
+            root
+        ).as_posix()
 
     def _memory_page(self, identifier: str) -> tuple[PageLike, str]:
         target = normalize_path(identifier)

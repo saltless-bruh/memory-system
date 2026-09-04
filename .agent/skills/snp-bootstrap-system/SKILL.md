@@ -1,40 +1,24 @@
 ---
 name: snp-bootstrap-system
-description: "Use this skill when you need to deploy, restart, or bring up the entire SNP Memory System V2 infrastructure via Docker, PostgreSQL 16, and LiteLLM."
+description: "Use this skill to bootstrap, start, restart, or inspect the SNP Memory System V3 infrastructure with Docker, PostgreSQL, LiteLLM, Scout, and ingestion services."
 ---
 
-# snp-bootstrap-system
+# Bootstrap the SNP Memory System
 
-## Purpose
-The SNP Memory System V2 uses Compose services for Git, LiteLLM, PostgreSQL,
-one-shot migrations, Scout, ingestion, host-sync, and basic-memory. This skill
-guides ordered bring-up without relying on a stale service count.
+Use the repository scripts and Compose dependency graph; do not start runtime
+services against a pending schema.
 
-## How to use
+1. Run `./scripts/bootstrap.sh`.
+2. Populate `.env` with cloud-provider credentials and Scout authentication.
+3. Keep migration, query, and ingestion database identities separate.
+4. Run `docker compose up -d --build`.
+5. Confirm `postgres-migrate` completed before Scout and sync-job, then inspect
+   `docker compose ps` and the documented readiness endpoints.
 
-1. **Verify Host Requirements**
-   Ensure Docker, Docker Compose, and Python 3.12+ are installed.
-   
-2. **Configure API Keys**
-   Run `./scripts/bootstrap.sh`, then configure Cloud API, Scout auth, and
-   webhook values in `.env`. Keep the generated admin, query, and ingest secret
-   files separate; runtime services must not fall back to the admin identity.
+Scout is the sole remote retrieval server and exposes `wiki_search` followed by
+`wiki_read`. The local `snpmemory` stdio server exposes the same retrieval pair
+plus authoring and verification tools. Development authentication is
+loopback-only; remote clients use a bearer token.
 
-3. **Run the Automated Bootstrap**
-   ```bash
-   ./scripts/bootstrap.sh
-   ```
-
-4. **Bring up Docker Containers**
-   Build and start the entire stack in detached mode:
-   ```bash
-   docker compose up -d --build
-   ```
-
-5. **Verify System Health**
-   - Check container status: `docker compose ps`; `postgres-migrate` must
-     complete successfully before Scout and sync-job.
-   - Check replica publication: `curl -fsS http://127.0.0.1:9000/ready`.
-   - Run `python3 scripts/gen_index.py --check`.
-   - Run live `uv run python scripts/verify_addresses.py` only with its backend
-     configured; interpret exits as 0 PASS, 1 semantic drift, 2 infrastructure.
+Do not infer health from a running container alone. Report a failed migration,
+credential error, or unavailable embedding provider as infrastructure failure.

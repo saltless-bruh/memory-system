@@ -7,7 +7,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATUS = REPO_ROOT / "docs" / "ARCHITECTURE_STATUS.md"
-VERIFIER = REPO_ROOT / "scripts" / "verify_addresses.py"
 
 #: Every tree that ships the agent contract. `.agent/` is authoritative.
 AGENT_TREES = (".agent", ".claude", "packages/snp-agent")
@@ -115,28 +114,22 @@ def test_portable_agent_files_are_exact_mirrors() -> None:
         assert agent_path.read_bytes() == package_path.read_bytes(), relative
 
 
-def test_address_criterion_in_docs_is_the_one_the_verifier_runs() -> None:
-    """The workflow must name the constants that actually decide a PASS.
-
-    `/snp-verify` used to instruct agents to require `score >= 0.70` — a
-    threshold that never existed in code (finding M3). It now names `TOP_RANK`
-    and `GROUNDING_MIN_COVERAGE`, and this test fails if either constant
-    disappears from `scripts/verify_addresses.py` or stops being named in any
-    tree's copy of the workflow, so the prose cannot drift away from the gate
-    again without a red test.
-    """
-    source = VERIFIER.read_text(encoding="utf-8")
-    for constant in ("TOP_RANK", "GROUNDING_MIN_COVERAGE"):
-        assert re.search(rf"^{constant}\s*=", source, re.MULTILINE), (
-            f"scripts/verify_addresses.py no longer defines {constant}"
-        )
+def test_query_and_verification_workflows_encode_the_v3_boundary() -> None:
+    """Mirrors must agree on the active sequence and verifier limitation."""
+    retired = re.compile(
+        r"\b(?:rag_fetch|search_notes|read_note|write_note|list_notes)\b",
+        re.IGNORECASE,
+    )
     for tree in AGENT_TREES:
-        path = REPO_ROOT / tree / "workflows" / "snp-verify.md"
-        content = path.read_text(encoding="utf-8")
-        for constant in ("TOP_RANK", "GROUNDING_MIN_COVERAGE"):
-            assert constant in content, (
-                f"{path.relative_to(REPO_ROOT)} does not name {constant}"
-            )
+        query = REPO_ROOT / tree / "workflows" / "snp-query.md"
+        query_text = query.read_text(encoding="utf-8")
+        assert 0 <= query_text.find("wiki_search") < query_text.find("wiki_read")
+        assert not retired.search(query_text)
+
+        verify = REPO_ROOT / tree / "workflows" / "snp-verify.md"
+        verify_text = verify.read_text(encoding="utf-8")
+        assert "narrower than the complete V3 page contract" in verify_text
+        assert not retired.search(verify_text)
 
 
 def test_live_test_docs_name_the_fail_closed_host_prerequisites() -> None:
@@ -190,14 +183,8 @@ def test_the_source_health_audit_flags_its_own_stale_examples() -> None:
 def test_no_agent_instruction_claims_multilingual_wiki_search() -> None:
     """Agent guidance must not contradict a measurement in this repository.
 
-    `CLAUDE.md` told every agent that `search_notes` is "multilingual; Vietnamese
-    ok" while `ARCHITECTURE_STATUS.md` §OD-1 records `recall@1 0.625` on
-    Vietnamese paraphrases and *recommends replacing the model*. Instructions are
-    the worst place for a claim the repository can disprove: docs are read once,
-    instructions are followed every time.
-
-    This guard is scoped to the claim, not the word — OD-1 itself must keep
-    discussing multilingual models, and `search_notes` must stay described.
+    OD-1 records a measured language limitation. Active instructions may name
+    that limitation but may not claim unmeasured multilingual capability.
     """
     status = (REPO_ROOT / "docs" / "ARCHITECTURE_STATUS.md").read_text(encoding="utf-8")
     if "OD-1" not in status:
@@ -216,7 +203,7 @@ def test_no_agent_instruction_claims_multilingual_wiki_search() -> None:
             continue
         text = path.read_text(encoding="utf-8").lower()
         for line in text.splitlines():
-            if "search_notes" not in line and "wiki search" not in line:
+            if "wiki_search" not in line and "wiki search" not in line:
                 continue
             if "multilingual" in line or "vietnamese ok" in line:
                 # Naming the limitation is the point; claiming the capability is not.

@@ -1,36 +1,31 @@
 ---
 name: snp-ingest-raw-data
-description: "Use this skill when adding new raw documents, PDFs, RFCs, spreadsheets, or source code files into the Data Vault so they are indexed into PostgreSQL 16 pgvector."
+description: "Use this skill when a user asks to place and index a supported local source artifact or wiki checkout through the V3 ingestion pipeline."
 ---
 
-# snp-ingest-raw-data
+# Ingest local evidence
 
-## Purpose
-The SNP Memory System V2 processes supported PDF, Markdown/text, CSV/TSV,
-source-code, and image artifacts and indexes them into **PostgreSQL 16 +
-pgvector** with HNSW indexing, full-text search, and Row-Level Security (RLS).
+## Supported current path
 
-## How to use
+1. Put an authorized local artifact beneath `raw/` without changing its bytes.
+2. Assign one or more canonical departments and use the ingestion identity,
+   never the migration administrator or query identity.
+3. Let sync-job reconcile it, or invoke the repository's explicit ingestion
+   command for that path.
+4. Confirm the document produced body-derived chunks with the configured model
+   stamp. A zero-chunk result is a failure, not a successful empty document.
+5. Query for vocabulary present in the body and confirm the intended document
+   is retrievable within the authorized scope.
 
-1. **Place Files in the Raw Warehouse (`raw/`)**
-   All original unstructured files must reside under the `raw/` directory. Organize into logical directories (e.g., `raw/architecture/`, `raw/reports/`, `raw/data/`, `raw/code/`, `raw/runbooks/`).
-   
-   Example:
-   ```bash
-   cp ~/Downloads/vllm_benchmark_report.pdf raw/reports/
-   ```
+Markdown wiki pages are chunked by heading and indexed as the `wiki` corpus.
+Other supported local documents retain their format-specific parser behavior.
 
-2. **Ingest into PostgreSQL Data Vault**
-   - **Automatic (Nhịp A Daemon)**: When running in Docker, the `sync-job` container continuously watches `raw/` and auto-ingests any new or modified file into PostgreSQL.
-   - **Direct CLI Ingestion**: To immediately ingest from the command line without waiting:
-     ```bash
-     uv run python scripts/ingest_v2.py
-     ```
+## Deferred external-source path
 
-3. **Verify Database Ingestion**
-   Mint an address with explicit department and locator, then run live address
-   verification. Exit `2` is an infrastructure/configuration failure, not an
-   address defect.
+External URL fetch, immutable caching, digest recording, and on-demand source
+extraction are not implemented yet. Do not pretend that placing a URL in page
+metadata downloads or indexes it. Record the pending source and tell the user
+that the fetch queue must land before its contents can be retrieved.
 
-4. **Compile the Wiki Knowledge Page**
-   After raw data is indexed, synthesize a structured Wiki note so humans and agents can navigate to it. Use the `snp-compile-wiki` skill to mint a verifiable address and write the note.
+After evidence is indexed, offer the separate page-compilation workflow only
+when the user wants a wiki change.

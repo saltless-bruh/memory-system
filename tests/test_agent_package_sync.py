@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import TypedDict, cast
 
 import yaml
 
@@ -51,15 +52,10 @@ def _is_claude_excluded(subdir: str, rel: Path) -> bool:
 
 # Root-level files whose divergence README.md and docs/ARCHITECTURE_STATUS.md
 # explicitly promise cannot happen.
-# `package.json` is npm metadata and is shared. `plugin.json` and `mcp.json`
-# are deliberately NOT: they describe the *distribution*, and `.agent/` is this
-# repository's working contract rather than a plugin. Since the superpowers
-# layer is repo-local, the two trees legitimately differ, and a manifest
-# claiming otherwise in both places would be the accident this tier removed.
-REQUIRED_SHARED_ROOT_FILES = ("package.json",)
-
-#: Files that belong to the distribution only.
-PACKAGE_ONLY_ROOT_FILES = ("plugin.json", "mcp.json")
+# `.agent/` is the authoritative superset and carries byte-identical portable
+# metadata as well as the contract subtrees. `.claude/` mirrors only the four
+# contract subtrees because these root files describe distribution/install.
+REQUIRED_SHARED_ROOT_FILES = ("package.json", "plugin.json", "mcp.json")
 
 # Empty agent-config directories that must never reappear in the repo root.
 # `~` is what an unquoted/unexpanded tilde in a shell command leaves behind.
@@ -93,9 +89,7 @@ def test_package_manifest_validity() -> None:
     mcp_path = PACKAGE_DIR / "mcp.json"
     assert mcp_path.is_file(), f"Missing mcp.json at {mcp_path}"
     servers = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]
-    # `snp-wiki`, not `basic-memory`: an agent's tool namespace comes from the
-    # key a client config gives a server, and every other surface uses this one.
-    assert set(servers) == {"snp-wiki", "scout", "snpmemory"}
+    assert set(servers) == {"scout", "snpmemory"}
 
     project = data["extensions"]["io.snp.memory"]
     assert "entrypoints" in project
@@ -124,17 +118,11 @@ def test_packages_to_agent_parity() -> None:
     assert PACKAGE_DIR.is_dir(), f"Package dir missing: {PACKAGE_DIR}"
     assert AGENT_DIR.is_dir(), f"Agent dir missing: {AGENT_DIR}"
 
-    # `plugin.json` / `mcp.json` describe the distribution and exist only in the
-    # package; `.agent/` is this repository's working contract, not a plugin.
-    package_files = _relative_files(PACKAGE_DIR) - {
-        Path(name) for name in PACKAGE_ONLY_ROOT_FILES
-    }
+    package_files = _relative_files(PACKAGE_DIR)
     agent_files = _relative_files(AGENT_DIR)
 
     # Guard against a vacuous pass if either tree is emptied or relocated. The
-    # floor counts only the shared files: `plugin.json` and `mcp.json` are
-    # excluded above, and `manifest.json` no longer exists.
-    assert len(package_files) >= 18, (
+    assert len(package_files) >= 19, (
         f"packages/snp-agent looks truncated: only {len(package_files)} file(s)"
     )
 
@@ -199,7 +187,7 @@ def test_agent_snp_components_mirrored_in_package() -> None:
             assert (skill_dir / rel).read_bytes() == pkg_file.read_bytes(), (
                 f"Content mismatch for skills/{skill_dir.name}/{rel}"
             )
-    assert mirrored_skills == 8, f"Expected 8 snp-* skills, found {mirrored_skills}"
+    assert mirrored_skills == 7, f"Expected 7 snp-* skills, found {mirrored_skills}"
 
     agent_workflows = AGENT_DIR / "workflows"
     assert agent_workflows.is_dir(), f"Missing {agent_workflows}"
@@ -216,8 +204,8 @@ def test_agent_snp_components_mirrored_in_package() -> None:
             "packages/snp-agent/workflows"
         )
         assert wf_file.read_bytes() == pkg_wf.read_bytes()
-    assert mirrored_workflows == 6, (
-        f"Expected 6 snp-* workflows, found {mirrored_workflows}"
+    assert mirrored_workflows == 5, (
+        f"Expected 5 snp-* workflows, found {mirrored_workflows}"
     )
 
 
@@ -356,10 +344,16 @@ def test_workflows_frontmatter_schema() -> None:
 # ── the package ships what it says it ships (Tier 3, F-4) ─────────────────
 
 
-def _declared() -> dict[str, object]:
+class _DeclaredPackage(TypedDict):
+    skills: list[str]
+    workflows: list[str]
+    instructions: list[str]
+    rules: list[str]
+
+
+def _declared() -> _DeclaredPackage:
     data = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))
-    ships: dict[str, object] = data["extensions"]["io.snp.memory"]["ships"]
-    return ships
+    return cast(_DeclaredPackage, data["extensions"]["io.snp.memory"]["ships"])
 
 
 def test_the_package_ships_exactly_what_plugin_json_declares() -> None:
@@ -375,18 +369,22 @@ def test_the_package_ships_exactly_what_plugin_json_declares() -> None:
     actual_skills = sorted(
         d.name for d in (PACKAGE_DIR / "skills").iterdir() if (d / "SKILL.md").is_file()
     )
-    assert actual_skills == sorted(declared["skills"]), (  # type: ignore[arg-type]
+    assert actual_skills == sorted(declared["skills"]), (
         "packages/snp-agent/skills does not match plugin.json's declared set"
     )
 
+    declared_files: dict[str, list[str]] = {
+        "workflows": declared["workflows"],
+        "instructions": declared["instructions"],
+    }
     for kind, subdir in (("workflows", "workflows"), ("instructions", "instructions")):
         actual = sorted(p.name for p in (PACKAGE_DIR / subdir).glob("*.md"))
-        assert actual == sorted(declared[kind]), (  # type: ignore[arg-type]
+        assert actual == sorted(declared_files[kind]), (
             f"packages/snp-agent/{subdir} does not match plugin.json's declared set"
         )
 
     actual_rules = sorted(p.name for p in (PACKAGE_DIR / "rules").glob("*.md"))
-    assert actual_rules == sorted(declared["rules"])  # type: ignore[arg-type]
+    assert actual_rules == sorted(declared["rules"])
 
 
 def test_the_repo_local_layer_is_declared_and_genuinely_absent() -> None:
@@ -433,7 +431,7 @@ def test_the_repo_local_layer_is_declared_and_genuinely_absent() -> None:
 
 def test_the_plugin_manifest_validates_against_agent_plugins_1_0_0() -> None:
     """Vendored schemas, like the CLI Spec. A spec revision is a test failure."""
-    import jsonschema
+    import jsonschema  # type: ignore[import-untyped]
 
     fixtures = REPO_ROOT / "tests" / "fixtures"
     for name, document in (

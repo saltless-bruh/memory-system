@@ -2,10 +2,10 @@
   "name": "@snp/memory-agent",
   "version": "2.0.0",
   "type": "module",
-  "description": "SNP Memory System Agent Bundle with dual-layer Knowledge & Data Vault skills.",
+  "description": "Portable SNP Memory System V3 retrieval and authoring contract.",
   "author": "SNP Architecture Team",
   "license": "MIT",
-  "main": "manifest.json",
+  "main": "plugin.json",
   "scripts": {
     "verify": "python3 scripts/export_agent_bundle.py --verify",
     "bundle": "python3 scripts/export_agent_bundle.py --bundle",

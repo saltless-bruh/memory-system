@@ -89,6 +89,7 @@ ignore_missing_imports = true
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+exclude = ["artifacts/audits/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]

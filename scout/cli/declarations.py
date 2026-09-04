@@ -1025,7 +1025,7 @@ command(
 command(
     "search",
     "Rank distinct vault pages through the shared pgvector index.",
-    "scout.cli.commands.wiki:search",
+    "scout.cli.commands.wiki:search_async",
     args=(
         ArgSpec("query", "string", required=True),
         ArgSpec(
@@ -1088,7 +1088,7 @@ command(
 command(
     "read",
     "Read a canonical page envelope from the current vault file.",
-    "scout.cli.commands.wiki:read",
+    "scout.cli.commands.wiki:read_async",
     args=(
         ArgSpec(
             "page",

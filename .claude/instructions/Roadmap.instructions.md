@@ -1,16 +1,17 @@
 # Project Roadmap — SNP Memory System
 
-> **Historical roadmap.** The PostgreSQL pgvector/RLS architecture described as
-> future below has been implemented. Use `docs/ARCHITECTURE_STATUS.md`,
-> `README.md`, and `AGENTS.md` for current operations.
+The active architecture uses one PostgreSQL hybrid index and one Scout
+retrieval contract:
 
-- **V1 (Current)**:
-  - Phase 0: Gates & Foundation
-  - Phase 1: LLM-Wiki Engine (`basic-memory` + `gen_index.py`)
-  - Phase 2: RAG + Scout Bridge (`rag_fetch` + `post_filter`)
-  - Phase 3: End-to-End Query Workflow & Packaging
-  - Phase 4: Agent Onboarding & Production Hardening
+1. `wiki_search` ranks distinct wiki pages from body-derived chunks.
+2. `wiki_read` returns a canonical page envelope at selectable granularity.
+3. Scope is resolved from the verified caller and threaded through both calls.
+4. Wiki and local source ingestion share the configured 1024-dimensional cloud
+   embedding route.
 
-- **V2 (Future)**:
-  - Swappable RAG Engine (R2R / pgvector)
-  - Row-level RBAC enforcement
+Current follow-on work includes sync rename/delete reconciliation, an index
+inspector, complete V3 vault verification, external source fetch/cache, and
+rebuild reproducibility. Do not present a deferred subsystem as deployed.
+
+Use `docs/ARCHITECTURE_STATUS.md`, AGENTS.md, and the active unlazy plan for
+current sequencing. Historical roadmaps are evidence, not operating authority.

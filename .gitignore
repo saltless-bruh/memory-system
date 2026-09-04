@@ -81,3 +81,9 @@ docs/news-file_need-check/*.pdf
 # Extracted figures and tables. Regenerated deterministically from raw/ by
 # `snpmemory extract`; byte-identical every run, so there is nothing to preserve.
 derived/
+
+# Obsidian editor state. The vault's knowledge is the .md files; everything
+# under .obsidian/ is per-machine UI state that churns on every open and
+# carries no meaning for the index or for another reader.
+.obsidian/graph.json
+wiki/.obsidian/

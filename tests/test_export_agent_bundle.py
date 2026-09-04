@@ -76,8 +76,20 @@ def test_bundle_package(tmp_path: Path) -> None:
         names = tar.getnames()
         assert "plugin.json" in names
         assert "package.json" in names
-        assert any(n.startswith("skills/") for n in names)
-        assert any(n.startswith("workflows/") for n in names)
+        skill_names = {
+            name.split("/")[1]
+            for name in names
+            if name.startswith("skills/") and name.endswith("/SKILL.md")
+        }
+        workflow_names = {
+            name.split("/")[1]
+            for name in names
+            if name.startswith("workflows/") and name.endswith(".md")
+        }
+        assert len(skill_names) == 7
+        assert len(workflow_names) == 5
+        assert "snp-auto-heal-vault" not in skill_names
+        assert "snp-heal.md" not in workflow_names
 
 
 def test_sync_packages(tmp_path: Path) -> None:
@@ -102,11 +114,7 @@ def test_install_to_cursor(tmp_path: Path) -> None:
     cursor_mcp = created["cursor_mcp"]
     assert cursor_mcp.is_file()
     data = json.loads(cursor_mcp.read_text(encoding="utf-8"))
-    assert "mcpServers" in data
-    # `snp-wiki`, not `basic-memory`: the key a client config gives a server is
-    # the agent's tool namespace, and every other surface already used this one.
-    assert "snp-wiki" in data["mcpServers"]
-    assert "scout" in data["mcpServers"]
+    assert set(data["mcpServers"]) == {"scout", "snpmemory"}
 
 
 def test_install_to_claude(tmp_path: Path) -> None:
@@ -150,14 +158,7 @@ def test_main_cli_flags(tmp_path: Path) -> None:
 def test_the_bundle_installer_emits_what_the_one_generator_emits(
     client: str, tmp_path: Path
 ) -> None:
-    """This file used to carry its own copy of every client config.
-
-    It named the wiki server `basic-memory` and authenticated with
-    `SCOUT_AUTH_TOKEN`, while the documentation, `export_mcp_config.py` and
-    `install-agent.sh` all used `snp-wiki` and `SCOUT_AUTH_HEADER`. A user who
-    followed the documentation got a config from this path that could not
-    authenticate against Scout at all.
-    """
+    """Bundle installs delegate to the one V3 config generator."""
     import json
 
     import scripts.export_agent_bundle as bundle
@@ -174,7 +175,7 @@ def test_the_bundle_installer_emits_what_the_one_generator_emits(
     key = "servers" if client == "vscode" else "mcpServers"
 
     assert produced[key] == exporter.generate_config(client)[key]
-    assert set(produced[key]) == {"snp-wiki", "scout", "snpmemory"}
+    assert set(produced[key]) == {"scout", "snpmemory"}
 
 
 @pytest.mark.parametrize("client", ["cursor", "claude", "vscode"])
@@ -214,3 +215,24 @@ def test_installing_preserves_servers_this_project_does_not_own(
     merged = json.loads(target.read_text(encoding="utf-8"))
     assert merged["keep"] is True
     assert merged["mcpServers"]["theirs"] == {"url": "http://x"}
+
+
+def test_antigravity_upgrade_removes_only_retired_snp_components(
+    tmp_path: Path,
+) -> None:
+    agent = tmp_path / ".agent"
+    retired_skill = agent / "skills" / "snp-auto-heal-vault"
+    retired_skill.mkdir(parents=True)
+    (retired_skill / "SKILL.md").write_text("stale", encoding="utf-8")
+    retired_workflow = agent / "workflows" / "snp-heal.md"
+    retired_workflow.parent.mkdir(parents=True)
+    retired_workflow.write_text("stale", encoding="utf-8")
+    custom = agent / "skills" / "custom-team" / "SKILL.md"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("preserve", encoding="utf-8")
+
+    install_to_client(DEFAULT_PACKAGE_DIR, "antigravity", base_dir=tmp_path)
+
+    assert not retired_skill.exists()
+    assert not retired_workflow.exists()
+    assert custom.read_text(encoding="utf-8") == "preserve"

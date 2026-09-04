@@ -543,11 +543,13 @@ def test_a_failed_git_step_is_named_without_leaking_the_url() -> None:
 
     from scripts import host_sync
 
-    with tempfile.TemporaryDirectory() as tmp:
-        with pytest.raises(host_sync.GitStepError) as excinfo:
-            host_sync._run_git(
-                ["fetch", "no-such-remote", "refs/heads/x:refs/heads/x"], cwd=Path(tmp)
-            )
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        pytest.raises(host_sync.GitStepError) as excinfo,
+    ):
+        host_sync._run_git(
+            ["fetch", "no-such-remote", "refs/heads/x:refs/heads/x"], cwd=Path(tmp)
+        )
 
     message = str(excinfo.value)
     assert "fetch" in message

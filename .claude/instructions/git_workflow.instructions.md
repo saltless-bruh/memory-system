@@ -1,14 +1,22 @@
 # Git Workflow — SNP Memory System
 
-1. **PR-First Changes**:
-   - Never commit directly to `main`.
-   - Create a feature or note branch, commit changes, and propose a PR.
+## Agent-initiated changes
 
-2. **Automated Verification**:
-   - Before opening a PR, ensure `python3 scripts/gen_index.py --check` passes.
-   - Run `timeout 300s uv run pytest -m 'not integration' --disable-socket -q`.
-   - Run live integration tests separately only against the disposable
-     `snp-memory-it` project.
+1. Never push or merge directly to `main` or `master`; use a feature branch and
+   human-reviewed pull request (rules R-6.4, R-7.3).
+2. The agent surface enforces this rule by absent capability: no exposed tool
+   performs a git push.
+3. Preserve unrelated work and stage only intended files.
+4. Run bounded offline tests with sockets disabled. Run integration tests only
+   against the documented disposable project when live services are in scope.
+5. Treat `index.md` and `log.md` as authored control documents. Update them only
+   according to the target vault's schema; do not replace them with generated
+   blank descriptions or machine operational messages.
+6. Report checks actually run, and distinguish content findings from
+   infrastructure failures and unrun live gates.
 
-3. **Index Generation**:
-   - Do NOT hand-edit `wiki/index.md`. Run `python3 scripts/gen_index.py` to regenerate upon note changes.
+## Human editing in Obsidian
+
+Humans edit the vault directly in Obsidian and push to `main` or `master`.
+The next agent answer reflects the edit with no operator action required
+(acceptance workflow W-2).

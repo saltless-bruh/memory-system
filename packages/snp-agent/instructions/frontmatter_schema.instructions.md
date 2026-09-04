@@ -1,27 +1,39 @@
-# SNP Frontmatter Schema & Page Authoring Contract
+# SNP V3 Page Schema and Authoring Contract
 
-Every markdown file in `wiki/` must satisfy the 7-field frontmatter contract:
+The target vault's `SCHEMA.md` is authoritative. A new page uses YAML
+frontmatter in this shape:
 
 ```yaml
 ---
-type: technique            # Required: technique | concept | playbook | entity
-title: PagedAttention Engine # Required: Human-readable display title
-summary: High-density, assertive one-sentence summary for vector routing. # Required: EXACTLY ONE sentence
-entities: [paged-attention, vllm, kv-cache] # Required: 2-8 lowercase entity tags
-department: ai_eng         # Required: redteam | blueteam | ai_eng | infra
-sources:                   # Required: RAG address pointers (empty list [] for pure concepts)
-  - path: raw/reports/vllm_high_throughput_serving.pdf
-    loc: p.2
-    hint: PagedAttention KV-Cache Virtual Block Allocation
-last_compiled: 2026-08-17  # Required: YYYY-MM-DD format
+title: Page Title
+created: 2026-09-04
+updated: 2026-09-04
+type: entity
+tags: [security, openshift]
+sources: [https://example.com/source]
+confidence: high
+contested: false
+contradictions: []
 ---
 ```
 
-## Mandatory Body Structure (In Exact Order):
-1. `## TL;DR`: Dense, assertive summary (no narrative fluff).
-2. `## Technical Specifications`: Domain knowledge, architecture, parameters, and specifications.
-3. `## Provenance`: Direct tie-back to raw sources and notes on conflicting data.
-4. `## Cross-References`: Graph relations using `[[wikilink-slug]]` syntax only.
+Allowed page types are `entity`, `concept`, `comparison`, `query`, `summary`,
+and `schema`. Confidence is `high`, `medium`, or `low`. `contested` and
+`contradictions` are optional. Preserve additional capture metadata rather than
+normalizing it away. Source entries are provenance references; authors do not
+invent cached-content digests.
 
-## Automated Verification:
-Run `python3 scripts/gen_index.py --check` before submitting. Exit code 0 is mandatory.
+Use a lowercase-hyphen filename, bump `updated` on edit, and add new pages to
+the authored catalogue and editorial log according to the vault's own rules.
+Never regenerate those control documents from sparse metadata.
+
+## Body frame
+
+Every page has an H1 and `## Cross-References`. `## TL;DR` is recommended.
+`## Provenance` is required when sources are declared. Interior sections are
+free-form. Add at least two outbound `[[wikilinks]]`, introduce lists with a
+context sentence, and keep one primary subject per page.
+
+The current automated checker does not yet certify this complete V3 contract.
+Review these requirements explicitly and report the verifier limitation rather
+than presenting a narrower check as full conformance.

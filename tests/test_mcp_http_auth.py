@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,8 +17,10 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 
 from scout.auth import load_auth_config
+from scout.diy_engine import ScoutDiyEngine
 from scout.mcp_server import build_server
 from scout.types import RagBackend, RagChunk, Scope
+from tests.fakes import FakeEmbedder
 
 
 class HttpRecordingBackend(RagBackend):
@@ -36,7 +39,9 @@ class HttpRecordingBackend(RagBackend):
         return [RagChunk(text="verbatim", file_path=path or "raw/a.md")]
 
 
-def _server():
+def _server(
+    wiki_dir: Path | None = None,
+) -> tuple[Any, HttpRecordingBackend]:
     backend = HttpRecordingBackend()
     config = load_auth_config(
         {
@@ -48,7 +53,33 @@ def _server():
             ),
         }
     )
-    return build_server(backend, auth_config=config), backend
+    engine = (
+        ScoutDiyEngine.from_vault(
+            FakeEmbedder(), wiki_dir=wiki_dir, rag_backend=backend
+        )
+        if wiki_dir is not None
+        else None
+    )
+    return build_server(backend, auth_config=config, wiki_engine=engine), backend
+
+
+def _write_page(root: Path) -> None:
+    page = root / "concepts" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        """---
+title: Protected Page
+type: concept
+updated: 2026-08-31
+sources: []
+---
+# Protected Page
+
+## TL;DR
+Canonical protected read.
+""",
+        encoding="utf-8",
+    )
 
 
 def _jwt_server() -> tuple[Any, HttpRecordingBackend, str, str]:
@@ -93,7 +124,7 @@ def _encode_jwt(private_key: str, **overrides: object) -> str:
     return jwt.encode(claims, private_key, algorithm="RS256")
 
 
-def _factory(app: Any):
+def _factory(app: Any) -> Callable[..., httpx.AsyncClient]:
     def factory(**kwargs: Any) -> httpx.AsyncClient:
         kwargs.pop("follow_redirects", None)
         return httpx.AsyncClient(
@@ -156,7 +187,43 @@ async def test_authorization_header_reaches_current_access_token_and_can_narrow(
             {"query": "text", "department": "infra"},
         )
     assert not result.is_error
+    assert isinstance(result.data, list)
+    assert result.data[0]["path"] == "raw/a.md"
     assert backend.calls == [Scope(departments=frozenset({"infra"}))]
+
+
+async def test_protected_http_wiki_read_returns_canonical_payload(
+    tmp_path: Path,
+) -> None:
+    _write_page(tmp_path)
+    server, backend = _server(tmp_path)
+    app = server.http_app(stateless_http=True)
+    transport = StreamableHttpTransport(
+        "http://scout.test/mcp",
+        auth="valid-token",
+        httpx_client_factory=_factory(app),
+    )
+    async with app.lifespan(app), Client(transport) as client:
+        result = await client.call_tool(
+            "wiki_read",
+            {
+                "path": "concepts/page.md",
+                "mode": "tldr",
+                "department": "infra",
+            },
+        )
+    assert not result.is_error
+    assert result.data is not None
+    assert result.data["path"] == "concepts/page.md"
+    assert result.data["tldr"] == "Canonical protected read."
+    assert set(result.data) == {
+        "path",
+        "title",
+        "type",
+        "tldr",
+        "content_hash",
+    }
+    assert backend.calls == []
 
 
 async def test_forbidden_department_is_tool_error_and_never_calls_backend() -> None:

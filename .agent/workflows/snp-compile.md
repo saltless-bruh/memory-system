@@ -1,37 +1,22 @@
 ---
-description: Synthesizes a raw document into a structured, AGENTS.md-compliant Knowledge Vault note on a PR feature branch.
+description: Authors or revises a V3 wiki page from available evidence on a feature branch for human review.
 ---
 
 # /snp-compile
 
-Execute the following compilation steps:
+1. Confirm the user requested a wiki change and that the supporting evidence is
+   already available. Source fetching is not yet implemented.
+2. Read the target vault's `SCHEMA.md` and inspect neighboring pages for local
+   conventions.
+3. Author the V3 frontmatter, H1, grounded free-form sections, optional
+   `## TL;DR`, required source-dependent `## Provenance`, and mandatory
+   `## Cross-References` with at least two `[[wikilinks]]`.
+4. Preserve extra capture metadata, immutable evidence, and authored control
+   documents. Do not generate blank catalogue descriptions.
+5. Review every schema and heading requirement explicitly. Current automation
+   does not certify the entire V3 page contract.
+6. Put the change on a feature branch and open a pull request for human review.
+   Preserve unrelated work and never merge directly to a protected branch.
 
-1. **Verify Raw Document Existence**:
-   - Verify that the target file exists under `raw/` or in the Data Vault warehouse.
-
-2. **Mint a Verifiable RAG Address (Rule R-6.3)**:
-   - Generate candidate phrases describing the document's core concepts.
-   - Run `python scripts/mint.py --path raw/<file> --hint "<candidate>" --department <department> --loc "<locator>"`.
-   - Use the first hint that returns `PASS`.
-
-3. **Author the Markdown Note**:
-   - On a feature branch, run `python scripts/compile_note.py --path raw/<file> --title "<title>" --category <category> --dept <department> --loc "<locator>"`.
-   - The compiler requires strict model JSON, scoped minting, candidate lint,
-     overwrite protection, per-file atomic replacement, and exact rollback on
-     ordinary failures. It does not claim a cross-file crash transaction.
-   - Structure the body in deterministic order:
-     - `## TL;DR` (1 paragraph dense summary)
-     - `## Technical Specifications` (domain knowledge and architecture)
-     - `## Provenance` (raw sources and data conflicts)
-     - `## Cross-References` (`[[wikilink-slug]]` links only)
-
-4. **Verify Schema & Index**:
-   - Run `python3 scripts/gen_index.py --check` to confirm zero lint errors.
-
-5. **Branch & Propose (Rule R-6.4, R-7.3)**:
-   - Run `python scripts/propose_page.py --page wiki/<category>/<slug>.md`.
-   - It rejects pre-staged work and commits only the page plus changed generated
-     companions (`wiki/index.md`, `wiki/log.md`). Local branch/add/commit
-     failures restore the original branch; an ambiguous push failure preserves
-     the verified local commit. Open a Pull Request; **NEVER** push directly to
-     `main`.
+Source metadata records provenance; it does not contain manually composed
+semantic index pointers.

@@ -15,12 +15,18 @@ Two properties must not be re-implemented by callers:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, cast
 
 from scout.cli.config import resolve as resolve_config
 from scout.cli.registry import CommandSpec
 from scout.cli.result import CommandResult
+
+
+async def _await_result(result: Awaitable[CommandResult]) -> CommandResult:
+    return await result
 
 
 def invoke(spec: CommandSpec, *args: Any, **kwargs: Any) -> CommandResult:
@@ -29,4 +35,19 @@ def invoke(spec: CommandSpec, *args: Any, **kwargs: Any) -> CommandResult:
     config = resolve_config(spec.prerequisite)
     if "config" in inspect.signature(function).parameters:
         kwargs["config"] = config
-    return function(*args, **kwargs)
+    result: object = function(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return asyncio.run(_await_result(cast(Awaitable[CommandResult], result)))
+    return cast(CommandResult, result)
+
+
+async def ainvoke(spec: CommandSpec, *args: Any, **kwargs: Any) -> CommandResult:
+    """Async counterpart used by MCP tools backed by async command logic."""
+    function = spec.load()
+    config = resolve_config(spec.prerequisite)
+    if "config" in inspect.signature(function).parameters:
+        kwargs["config"] = config
+    result: object = function(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await cast(Awaitable[CommandResult], result)
+    return cast(CommandResult, result)

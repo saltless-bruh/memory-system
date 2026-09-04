@@ -36,7 +36,13 @@ DEFAULT_PACKAGE_DIR = REPO_ROOT / "packages" / "snp-agent"
 #: new one, so a mismatch is a migration to make, not a version to tolerate.
 PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 DEFAULT_AGENT_DIR = REPO_ROOT / ".agent"
+DEFAULT_CLAUDE_DIR = REPO_ROOT / ".claude"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist"
+CONTRACT_SUBDIRS = ("instructions", "rules", "skills", "workflows")
+RETIRED_COMPONENTS = (
+    Path("skills/snp-auto-heal-vault"),
+    Path("workflows/snp-heal.md"),
+)
 
 
 class PackageError(Exception):
@@ -127,17 +133,25 @@ def sync_packages(
     target_dir: Path,
     *,
     filter_snp_only: bool = False,
+    prune_retired: bool = False,
 ) -> list[Path]:
     """Synchronize files from source_dir to target_dir."""
     if not source_dir.is_dir():
         raise PackageError(f"Source directory does not exist: {source_dir}")
 
     target_dir.mkdir(parents=True, exist_ok=True)
+    if prune_retired:
+        remove_retired_components(target_dir)
     synced_files: list[Path] = []
 
     for src_file in source_dir.rglob("*"):
         if src_file.is_file():
             rel_path = src_file.relative_to(source_dir)
+            if any(
+                rel_path == retired or retired in rel_path.parents
+                for retired in RETIRED_COMPONENTS
+            ):
+                continue
             if filter_snp_only:
                 # If filtering, only copy snp-* or manifest files
                 parts = rel_path.parts
@@ -158,6 +172,92 @@ def sync_packages(
         f"✓ Synchronized {len(synced_files)} file(s) from {source_dir.name}/ -> {target_dir.name}/"
     )
     return synced_files
+
+
+def remove_retired_components(target_dir: Path) -> list[Path]:
+    """Remove only the two SNP-owned components retired by V3.
+
+    This is intentionally not a generic mirror delete: custom skills,
+    workflows, and repository-local development files must survive upgrades.
+    """
+    removed: list[Path] = []
+    for relative in RETIRED_COMPONENTS:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise PackageError(f"unsafe retired component path: {relative}")
+        target = target_dir / relative
+        if target.is_dir():
+            shutil.rmtree(target)
+            removed.append(target)
+        elif target.exists():
+            target.unlink()
+            removed.append(target)
+    return removed
+
+
+def sync_contract_mirrors(
+    package_dir: Path = DEFAULT_PACKAGE_DIR,
+    agent_dir: Path = DEFAULT_AGENT_DIR,
+    claude_dir: Path = DEFAULT_CLAUDE_DIR,
+) -> list[Path]:
+    """Sync portable files to `.agent` and active contract files to `.claude`."""
+    synced = sync_packages(
+        package_dir,
+        agent_dir,
+        prune_retired=True,
+    )
+    remove_retired_components(claude_dir)
+    for subdir in CONTRACT_SUBDIRS:
+        synced.extend(sync_packages(package_dir / subdir, claude_dir / subdir))
+
+    manifest = load_manifest(package_dir)
+    repo_local = manifest["extensions"]["io.snp.memory"]["repoLocal"]
+    for name in repo_local["instructions"]:
+        source = agent_dir / "instructions" / name
+        if not source.is_file():
+            raise PackageError(f"Missing repo-local instruction: {source}")
+        target = claude_dir / "instructions" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != source.read_bytes():
+            shutil.copy2(source, target)
+            synced.append(target)
+    return synced
+
+
+def sync_declared_agent_package(
+    agent_dir: Path,
+    package_dir: Path,
+) -> list[Path]:
+    """Copy only manifest-declared portable files from `.agent` to a package."""
+    manifest = load_manifest(package_dir)
+    ships = manifest["extensions"]["io.snp.memory"]["ships"]
+    relative_files = {
+        Path("package.json"),
+        Path("plugin.json"),
+        Path("mcp.json"),
+        *(Path("instructions") / name for name in ships["instructions"]),
+        *(Path("rules") / name for name in ships["rules"]),
+        *(Path("workflows") / name for name in ships["workflows"]),
+    }
+    for skill in ships["skills"]:
+        skill_root = agent_dir / "skills" / skill
+        relative_files.update(
+            path.relative_to(agent_dir)
+            for path in skill_root.rglob("*")
+            if path.is_file()
+        )
+
+    remove_retired_components(package_dir)
+    synced: list[Path] = []
+    for relative in sorted(relative_files):
+        source = agent_dir / relative
+        if not source.is_file():
+            raise PackageError(f"Missing declared agent file: {source}")
+        target = package_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != source.read_bytes():
+            shutil.copy2(source, target)
+            synced.append(target)
+    return synced
 
 
 def bundle_package(package_dir: Path, output_dir: Path = DEFAULT_DIST_DIR) -> Path:
@@ -192,12 +292,8 @@ def install_to_client(
     created_files: dict[str, Path] = {}
     target = target_client.lower().strip()
 
-    # Client MCP configuration comes from `export_mcp_config.generate_config`,
-    # never from a copy kept here. This file used to carry its own — naming the
-    # wiki server `basic-memory` and authenticating with `SCOUT_AUTH_TOKEN`
-    # while the documentation, the exporter and the installer all used
-    # `snp-wiki` and `SCOUT_AUTH_HEADER`. A user who followed the docs got a
-    # config from this path that could not authenticate.
+    # Client MCP configuration comes from the shared generator, never a second
+    # copy maintained here.
     project_config_paths = {
         "cursor": base_dir / ".cursor" / "mcp.json",
         "claude": base_dir / ".mcp.json",
@@ -215,7 +311,7 @@ def install_to_client(
 
     elif target == "antigravity":
         agent_dir = base_dir / ".agent"
-        sync_packages(package_dir, agent_dir)
+        sync_packages(package_dir, agent_dir, prune_retired=True)
         created_files["antigravity_agent"] = agent_dir
 
     elif target not in project_config_paths:
@@ -273,9 +369,9 @@ def main(argv: list[str] | None = None) -> int:
             bundle_package(args.package_dir, args.dist_dir)
         elif args.sync:
             if args.direction == "packages-to-agent":
-                sync_packages(args.package_dir, DEFAULT_AGENT_DIR)
+                sync_contract_mirrors(args.package_dir)
             else:
-                sync_packages(DEFAULT_AGENT_DIR, args.package_dir, filter_snp_only=True)
+                sync_declared_agent_package(DEFAULT_AGENT_DIR, args.package_dir)
         elif args.install:
             install_to_client(args.package_dir, args.install)
         else:

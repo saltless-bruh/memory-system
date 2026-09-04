@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -48,7 +49,7 @@ def _vault(tmp_path: Path) -> Path:
     return tmp_path / "wiki"
 
 
-def _pages(tmp_path: Path) -> list:
+def _pages(tmp_path: Path) -> list[Any]:
     from scout import vault
 
     return vault.load_pages(_vault(tmp_path))
@@ -373,3 +374,29 @@ def test_shared_embedder_accepts_configured_v1_root_without_rewriting(
     assert seen["base_url"] == "http://gateway:4000/v1"
     assert seen["model"] == "pinned-model-001"
     assert engine.rag_backend is not None
+
+
+def test_cli_search_engine_is_built_on_the_wiki_tier(tmp_path: Path) -> None:
+    """`snpmemory wiki search` answers from the same tier the served surface
+    does. If the CLI were unfiltered it would surface raw evidence that
+    `wiki_search` hides, and the two paths would disagree about what the vault
+    contains.
+    """
+    from unittest.mock import patch
+
+    from scout.cli.commands.wiki import _build_search_engine
+
+    cfg = _config(
+        tmp_path,
+        POSTGRES_HOST="127.0.0.1",
+        POSTGRES_PORT="5432",
+        POSTGRES_DB="snp_rag",
+        POSTGRES_QUERY_USER="rag_app_role",
+        POSTGRES_QUERY_PASSWORD="unused-in-this-test",
+    )
+    with (
+        patch("scout.backends.pgvector.PgVectorRlsBackend") as constructed,
+        patch("scout.diy_engine.ScoutDiyEngine.from_vault"),
+    ):
+        _build_search_engine(cfg, _vault(tmp_path))
+    assert constructed.call_args.kwargs.get("corpus") == "wiki"

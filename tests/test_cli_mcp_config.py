@@ -213,6 +213,8 @@ def test_root_pins_the_working_directory_so_a_client_may_launch_anywhere(
         "plan_articles",
         "compile_plan",
         "compile_status",
+        "wiki_search",
+        "wiki_read",
     }
 
 

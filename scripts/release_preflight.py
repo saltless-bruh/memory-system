@@ -58,19 +58,132 @@ def _images_are_immutable(images: object, revision: str) -> bool:
     for image in images:
         if not isinstance(image, dict) or not isinstance(image.get("image"), str):
             return False
+        image_name = image["image"]
         digest = image.get("digest")
         image_revision = image.get("revision")
-        if digest is not None and not (
+        has_digest = (
             isinstance(digest, str)
             and digest.startswith("sha256:")
             and _is_sha256(digest[7:])
-        ):
+        )
+        if digest is not None and not has_digest:
             return False
-        if image_revision is not None and image_revision != revision:
-            return False
-        if digest is None and image_revision != revision:
+
+        # A third-party image reference pinned at ``@sha256:...`` is immutable
+        # because of that digest. Its OCI revision label belongs to its upstream
+        # project, so requiring it to equal this repository's candidate SHA
+        # would reject every correctly pinned image that happens to publish the
+        # standard label. Locally built images have ordinary candidate tags;
+        # those must carry *this* candidate revision label even when the local
+        # Docker daemon reports an image digest, since that digest alone does
+        # not prove which source revision built it.
+        if "@sha256:" in image_name:
+            if not has_digest:
+                return False
+            continue
+        if image_revision != revision:
             return False
     return True
+
+
+def _restore_evidence_findings(
+    restore_result: object,
+    *,
+    expected_project: str,
+    expected_migrations: list[str],
+    backup_id: str,
+) -> list[ReleaseFinding]:
+    """Validate the immutable evidence emitted by the staging restore helper.
+
+    The archive ledger and the restored ledger are separate evidence. Looking
+    only at current staging state would let a later migration-service run hide a
+    bad restore; looking only at an archive selector would repeat the v0.2.1
+    false negative caused by a selector that silently matched no table.
+    """
+    if not isinstance(restore_result, dict):
+        return [
+            ReleaseFinding(
+                "restore-result",
+                "the staging restore result is missing or malformed",
+            )
+        ]
+
+    findings: list[ReleaseFinding] = []
+    if restore_result.get("backup_id") != backup_id:
+        findings.append(
+            ReleaseFinding(
+                "restore-backup",
+                "the restore result does not name the requested backup ID",
+            )
+        )
+    archive_sha = restore_result.get("archive_sha256")
+    if not _is_sha256(archive_sha):
+        findings.append(
+            ReleaseFinding(
+                "restore-archive",
+                "the restore result does not record a valid archive checksum",
+            )
+        )
+    if restore_result.get("target_project") != expected_project:
+        findings.append(
+            ReleaseFinding(
+                "restore-target",
+                "the restore result names a different Compose project",
+            )
+        )
+    if restore_result.get("role_bootstrap") != "postgres-migrate":
+        findings.append(
+            ReleaseFinding(
+                "restore-roles",
+                "the restore result does not prove the staged role bootstrap",
+            )
+        )
+    archive_ledger = restore_result.get("archive_migration_ledger")
+    restored_ledger = restore_result.get("migration_ledger")
+    if archive_ledger != expected_migrations:
+        findings.append(
+            ReleaseFinding(
+                "restore-archive-migrations",
+                "the archive does not contain the complete migration ledger",
+            )
+        )
+    if restored_ledger != expected_migrations:
+        findings.append(
+            ReleaseFinding(
+                "restore-migrations",
+                "the archive did not restore the complete migration ledger",
+            )
+        )
+    if archive_ledger != restored_ledger:
+        findings.append(
+            ReleaseFinding(
+                "restore-ledger-match",
+                "the archive and restored migration ledgers disagree",
+            )
+        )
+    return findings
+
+
+def _read_restore_result(path: Path) -> dict[str, Any]:
+    """Load restore evidence from outside the candidate worktree."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        pass
+    else:
+        raise ManifestError(
+            f"restore result must be outside the repository: {resolved}"
+        )
+    try:
+        value = json.loads(resolved.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ManifestError(f"could not read restore result {resolved}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ManifestError(f"restore result is not valid JSON: {resolved}") from exc
+    if not isinstance(value, dict):
+        raise ManifestError("restore result must be a JSON object")
+    return value
 
 
 def validate_release_evidence(
@@ -80,6 +193,8 @@ def validate_release_evidence(
     expected_revision: str | None,
     expected_migrations: list[str],
     backup_id: str,
+    restore_result: object | None = None,
+    compose_project: str | None = None,
 ) -> list[ReleaseFinding]:
     """Return every release blocker determinable from recorded/observed evidence."""
     findings: list[ReleaseFinding] = []
@@ -146,6 +261,16 @@ def validate_release_evidence(
             )
         )
 
+    expected_project = compose_project or str(recorded.get("compose_project", ""))
+    findings.extend(
+        _restore_evidence_findings(
+            restore_result,
+            expected_project=expected_project,
+            expected_migrations=expected_migrations,
+            backup_id=backup_id,
+        )
+    )
+
     if not manifest_matches(recorded, observed):
         findings.append(
             ReleaseFinding(
@@ -197,6 +322,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=os.environ.get("SNP_RELEASE_BACKUP_ID", ""),
         help="operator-recorded PostgreSQL backup or restore-point identifier",
     )
+    parser.add_argument(
+        "--restore-result",
+        type=Path,
+        required=True,
+        help="external JSON result written by scripts/release_backup.py restore",
+    )
     return parser.parse_args(argv)
 
 
@@ -210,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ManifestError(
                 f"release manifest must be a JSON object: {manifest_path}"
             )
+        restore_result = _read_restore_result(args.restore_result)
         capability = capability_fingerprint_from_file(args.capability_file)
         expected_migrations = [path.name for path in discover_migrations()]
         observed = collect_manifest(
@@ -228,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
         expected_revision=os.environ.get("SNP_GIT_REVISION"),
         expected_migrations=expected_migrations,
         backup_id=args.backup_id,
+        restore_result=restore_result,
+        compose_project=args.compose_project,
     )
     if findings:
         for finding in findings:

@@ -217,3 +217,70 @@ def test_pgvector_rejects_invalid_ranking_configuration() -> None:
         PgVectorRlsBackend(raw_rank_penalty=-1)
     with pytest.raises(ValueError, match="timeout"):
         PgVectorRlsBackend(dense_timeout_seconds=0)
+
+
+async def test_pgvector_is_unfiltered_by_default_so_the_compile_pipeline_sees_raw() -> (
+    None
+):
+    """`retrieve()` is the only method on `RagBackend`, and the compile
+    pipeline calls it to ground a page against **raw** evidence. A backend
+    built with no corpus must bind SQL NULL, which both queries read as "every
+    corpus". This is the guardrail for the defect where the wiki tier was a
+    constant in shared SQL and silently made groundedness circular.
+    """
+    pool, connection = _mock_pool([_pg_row()])
+    backend = PgVectorRlsBackend(embedder=FakeEmbedder(), pool=pool)
+
+    assert backend.corpus is None
+    await backend.retrieve("evidence", scope=Scope(departments=frozenset({"infra"})))
+    assert connection.fetch.call_args.args[9] is None
+
+
+async def test_pgvector_binds_the_corpus_tier_rather_than_inlining_it() -> None:
+    """The tier travels as a bind parameter, never as a literal in the SQL.
+
+    Asserting the absence of the literal is what stops a future edit from
+    re-hardcoding the filter: the query text must stay corpus-agnostic so one
+    backend class can serve both the wiki tier and the unfiltered pipeline.
+    """
+    pool, connection = _mock_pool([_pg_row()])
+    backend = PgVectorRlsBackend(embedder=FakeEmbedder(), pool=pool, corpus="wiki")
+
+    await backend.retrieve("tiered", scope=Scope(departments=frozenset({"infra"})))
+
+    call = connection.fetch.call_args
+    query = " ".join(str(call.args[0]).split())
+    assert re.search(r"->>\s*'corpus'\s*=\s*\$\d+::text", query)
+    assert "'wiki'" not in query
+    assert call.args[9] == "wiki"
+
+
+async def test_pgvector_sparse_fallback_keeps_the_corpus_tier() -> None:
+    """A dead embedding service must degrade the arm, never the authority.
+
+    The sparse query binds one fewer parameter than the hybrid one, so the
+    tier sits at a different position; a renumbering mistake here would drop
+    the filter only on the degraded path, where it is least likely to be
+    noticed.
+    """
+
+    class TimeoutEmbedder:
+        async def aembed_texts(self, _texts: Sequence[str]) -> list[list[float]]:
+            raise TimeoutError("controlled timeout")
+
+    pool, connection = _mock_pool([_pg_row("wiki/sparse.md")])
+    backend = PgVectorRlsBackend(
+        embedder=TimeoutEmbedder(),
+        pool=pool,
+        dense_timeout_seconds=0.01,
+        corpus="wiki",
+    )
+
+    chunks = await backend.retrieve(
+        "degraded", scope=Scope(departments=frozenset({"infra"}))
+    )
+
+    call = connection.fetch.call_args
+    assert "vector_matches" not in str(call.args[0])
+    assert call.args[8] == "wiki"
+    assert chunks[0].meta["degraded"] == "true"

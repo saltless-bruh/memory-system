@@ -36,21 +36,27 @@ WITH vector_matches AS (
            ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS v_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.doc_id = c.doc_id
-    WHERE ($2::text IS NULL OR d.source_uri = $2::text)
+    WHERE ($9::text IS NULL OR c.metadata->>'corpus' = $9::text)
+      AND ($2::text IS NULL OR d.source_uri = $2::text)
     ORDER BY c.embedding <=> $1::vector
     LIMIT $3
 ),
 text_matches AS (
     SELECT c.chunk_id, c.doc_id, c.chunk_text, c.metadata, d.source_uri,
            ROW_NUMBER() OVER (
-               ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $4)) DESC,
+               ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $4)), 0)
+                      + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $4)), 0)
+                      DESC,
                         c.chunk_id
            ) AS t_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.doc_id = c.doc_id
-    WHERE c.tsv @@ plainto_tsquery('english', $4)
+    WHERE ($9::text IS NULL OR c.metadata->>'corpus' = $9::text)
+      AND (c.tsv @@ plainto_tsquery('english', $4) OR c.tsv_simple @@ plainto_tsquery('simple', $4))
       AND ($2::text IS NULL OR d.source_uri = $2::text)
-    ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $4)) DESC, c.chunk_id
+    ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $4)), 0)
+           + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $4)), 0)
+           DESC, c.chunk_id
     LIMIT $3
 ),
 combined AS (
@@ -97,14 +103,19 @@ _SPARSE_QUERY = """
 WITH text_matches AS (
     SELECT c.chunk_id, c.doc_id, c.chunk_text, c.metadata, d.source_uri,
            ROW_NUMBER() OVER (
-               ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $3)) DESC,
+               ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $3)), 0)
+                      + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $3)), 0)
+                      DESC,
                         c.chunk_id
            ) AS t_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.doc_id = c.doc_id
-    WHERE c.tsv @@ plainto_tsquery('english', $3)
+    WHERE ($8::text IS NULL OR c.metadata->>'corpus' = $8::text)
+      AND (c.tsv @@ plainto_tsquery('english', $3) OR c.tsv_simple @@ plainto_tsquery('simple', $3))
       AND ($1::text IS NULL OR d.source_uri = $1::text)
-    ORDER BY ts_rank(c.tsv, plainto_tsquery('english', $3)) DESC, c.chunk_id
+    ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $3)), 0)
+           + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $3)), 0)
+           DESC, c.chunk_id
     LIMIT $2
 ),
 scored AS (
@@ -154,6 +165,7 @@ class PgVectorRlsBackend(RagBackend):
         raw_rank_penalty: int = DEFAULT_RAW_RANK_PENALTY,
         contested_rank_penalty: int = DEFAULT_CONTESTED_RANK_PENALTY,
         dense_timeout_seconds: float = DEFAULT_DENSE_TIMEOUT_SECONDS,
+        corpus: str | None = None,
     ) -> None:
         if rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
@@ -172,6 +184,7 @@ class PgVectorRlsBackend(RagBackend):
         self.raw_rank_penalty = raw_rank_penalty
         self.contested_rank_penalty = contested_rank_penalty
         self.dense_timeout_seconds = dense_timeout_seconds
+        self.corpus = corpus
 
     async def _get_pool(self) -> asyncpg.Pool:
         """Lazily creates and returns the connection pool.
@@ -276,6 +289,7 @@ class PgVectorRlsBackend(RagBackend):
                     self.rrf_k,
                     self.raw_rank_penalty,
                     self.contested_rank_penalty,
+                    self.corpus,
                 )
             else:
                 rows = await conn.fetch(
@@ -288,6 +302,7 @@ class PgVectorRlsBackend(RagBackend):
                     self.rrf_k,
                     self.raw_rank_penalty,
                     self.contested_rank_penalty,
+                    self.corpus,
                 )
 
         chunks: list[RagChunk] = []

@@ -1,20 +1,20 @@
 ---
-description: Ingests a supported PDF, text/Markdown, CSV/TSV, code, or image artifact into the PostgreSQL 16 pgvector Data Vault.
+description: Indexes an authorized local source or wiki checkout through the V3 body-chunk ingestion path and verifies scoped retrieval.
 ---
 
 # /snp-ingest
 
-Execute the following ingestion protocol:
+1. Place the unchanged local artifact beneath `raw/`, or identify the mounted
+   wiki checkout to synchronize.
+2. Use `rag_ingest_role` and canonical department ACLs; never substitute the
+   migration administrator or query identity.
+3. Let sync-job reconcile the path, or run the repository's explicit local
+   ingestion command when the operator requested it.
+4. Confirm body-derived chunks were stored with the configured embedding model
+   and dimension. Zero chunks is a failure.
+5. Run a scoped `wiki_search` query using body vocabulary, then `wiki_read` the
+   intended page when this is a wiki ingestion.
 
-1. **Place and Ingest**:
-   - Copy the target file into `./raw/<category>/<filename>`.
-   - Let `sync-job` reconcile it, or run
-     `uv run python scripts/ingest_v2.py --path raw/<category>/<filename> --dept <department>`.
-   - Ingestion runs as `rag_ingest_role`; never substitute a migration-admin
-     credential. No central ingest REST endpoint is implemented.
-
-2. **Verify Database Chunks**:
-   - Confirm that the file is indexed and embeddings are stored in PostgreSQL 16 `pgvector`.
-
-3. **Prompt Note Compilation**:
-   - Prompt the user: *"File successfully indexed. Would you like me to run `/snp-compile` to author its Knowledge Vault note?"*
+External URL fetch/cache and on-demand source extraction are deferred. Merely
+recording a URL does not download or index its content. Report that boundary
+and do not claim the external evidence is searchable.

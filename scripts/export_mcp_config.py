@@ -25,9 +25,9 @@ CLIENT_CONFIG_PATHS: dict[str, str] = {
 
 SUPPORTED_CLIENTS = ["cursor", "vscode", "claude", "gemini"]
 
-_BASIC_MEMORY_URL = "http://localhost:8765/mcp"
 _SCOUT_URL = "http://localhost:8080/mcp"
 _SCOUT_AUTH_HEADER_ENV = "SCOUT_AUTH_HEADER"
+_RETIRED_SERVER_NAMES = frozenset({"snp-wiki"})
 
 #: The checkout this script belongs to — the default for the local server's
 #: pinned root, since a config exported from a clone should serve that clone.
@@ -41,20 +41,6 @@ LOCAL_SERVER_NAME = "snpmemory"
 #: Installed by `[project.scripts]`, so the exported entry can name a command on
 #: PATH rather than a path into a checkout the user may not have.
 _LOCAL_SERVER_COMMAND = "snpmemory"
-
-
-def _basic_memory_config(client: str) -> dict[str, Any]:
-    """Return the project's existing, unauthenticated basic-memory config."""
-    if client == "cursor":
-        return {"type": "sse", "url": _BASIC_MEMORY_URL}
-    if client == "vscode":
-        return {"type": "http", "url": _BASIC_MEMORY_URL}
-    if client == "gemini":
-        return {"httpUrl": _BASIC_MEMORY_URL}
-    return {
-        "command": "npx",
-        "args": ["-y", "mcp-remote", _BASIC_MEMORY_URL],
-    }
 
 
 def _scout_config(client: str) -> dict[str, Any]:
@@ -112,7 +98,7 @@ def _local_server_config(client: str, root: Path) -> dict[str, Any]:
 
 
 def generate_config(client: str, root: Path | None = None) -> dict[str, Any]:
-    """Generate a client config for all three servers this system offers.
+    """Generate a client config for the V3 retrieval and authoring servers.
 
     Args:
         client: One of `SUPPORTED_CLIENTS`.
@@ -124,7 +110,6 @@ def generate_config(client: str, root: Path | None = None) -> dict[str, Any]:
     server_key = "servers" if client == "vscode" else "mcpServers"
     return {
         server_key: {
-            "snp-wiki": _basic_memory_config(client),
             "scout": _scout_config(client),
             LOCAL_SERVER_NAME: _local_server_config(client, root or REPO_ROOT),
         }
@@ -142,6 +127,8 @@ def merge_configs(
         existing[server_key] = existing_servers
     if not isinstance(existing_servers, dict):
         raise ValueError(f"existing {server_key} value is not an object")
+    for retired in _RETIRED_SERVER_NAMES:
+        existing_servers.pop(retired, None)
 
     servers = new_config.get(server_key, {})
     if not isinstance(servers, dict):

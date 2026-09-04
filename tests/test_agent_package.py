@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -24,7 +25,9 @@ def test_package_rules_and_instructions() -> None:
     """Verify rule and instruction files exist and are non-empty."""
     rule_file = PACKAGE_DIR / "rules" / "snp-memory.md"
     assert rule_file.is_file()
-    assert "Rule R-5" in rule_file.read_text(encoding="utf-8")
+    rule_text = rule_file.read_text(encoding="utf-8")
+    assert rule_text.index("wiki_search") < rule_text.index("wiki_read")
+    assert "R-8.5" in rule_text
 
     expected_instructions = [
         "agent_guide.instructions.md",
@@ -44,7 +47,6 @@ def test_package_workflows_frontmatter() -> None:
         "snp-compile.md",
         "snp-ingest.md",
         "snp-verify.md",
-        "snp-heal.md",
         "snp-reload.md",
     ]
     for wf_name in expected_workflows:
@@ -63,9 +65,8 @@ def test_package_workflows_frontmatter() -> None:
 
 
 def test_package_skills_frontmatter() -> None:
-    """Verify all 8 domain skills in packages/snp-agent/skills have valid SKILL.md frontmatter."""
+    """Verify all seven domain skills have valid SKILL.md frontmatter."""
     expected_skills = [
-        "snp-auto-heal-vault",
         "snp-bootstrap-system",
         "snp-compile-wiki",
         "snp-export-mcp",
@@ -158,13 +159,13 @@ def test_installer_nested_path(tmp_path: Path) -> None:
 
 
 def test_package_and_root_skills_synchronized() -> None:
-    """Verify all 8 domain skills in packages/snp-agent/skills match .agent/skills/."""
+    """Verify all seven domain skills match .agent/skills/."""
     root_skills = sorted(
         p.name for p in (REPO_ROOT / ".agent" / "skills").glob("snp-*")
     )
     pkg_skills = sorted(p.name for p in PACKAGE_DIR.glob("skills/snp-*"))
     assert root_skills == pkg_skills
-    assert len(pkg_skills) == 8
+    assert len(pkg_skills) == 7
 
 
 # ── the three config surfaces must not drift (T2.1) ───────────────────────
@@ -200,12 +201,7 @@ def test_the_manifest_and_the_exporter_describe_the_same_servers() -> None:
 def test_the_manifest_lists_the_local_servers_real_tools() -> None:
     """`requiredTools` has to name tools the servers actually serve.
 
-    Both in-process servers are covered here. `snp-wiki` runs in a container and
-    is covered by tests/integration/test_wiki_tool_surface_live.py, because
-    reaching it needs Docker and this suite stays hermetic. The split is named
-    in plugin.json's own note so a reader can check the claim rather than
-    trust it -- an earlier version of that note said every server was verified
-    while only `snpmemory` was, and `list_notes` sat in the manifest unserved.
+    Both active servers are built in-process here, keeping this check hermetic.
     """
     import asyncio
     import json
@@ -215,6 +211,7 @@ def test_the_manifest_lists_the_local_servers_real_tools() -> None:
     from scout.auth import AuthConfig, AuthMode, CallerIdentity
     from scout.mcp.local_server import build_server
     from scout.mcp_server import build_server as build_scout
+    from scout.types import RagChunk, Scope
 
     declared = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))[
         "extensions"
@@ -224,8 +221,16 @@ def test_the_manifest_lists_the_local_servers_real_tools() -> None:
     assert set(declared["snpmemory"]) == served_local
 
     class _NullBackend:
-        async def retrieve(self, *args: object, **kwargs: object) -> list[object]:
-            return []
+        async def retrieve(
+            self,
+            hint: str,
+            *,
+            path: str | None = None,
+            scope: Scope | None = None,
+            k: int = 10,
+        ) -> Sequence[RagChunk]:
+            del hint, path, scope, k
+            return ()
 
     scout_config = AuthConfig(
         mode=AuthMode.DEVELOPMENT,
@@ -238,7 +243,9 @@ def test_the_manifest_lists_the_local_servers_real_tools() -> None:
     )
     served_scout = {
         tool.name
-        for tool in asyncio.run(build_scout(_NullBackend(), auth_config=scout_config).list_tools())
+        for tool in asyncio.run(
+            build_scout(_NullBackend(), auth_config=scout_config).list_tools()
+        )
     }
     assert set(declared["scout"]) == served_scout
 
@@ -252,7 +259,7 @@ def test_the_local_server_is_declared_stdio_and_carries_no_url() -> None:
     assert local["command"] == "snpmemory"
 
 
-def test_the_installer_scaffolds_all_three_servers(tmp_path: Path) -> None:
+def test_the_installer_scaffolds_exactly_the_v3_servers(tmp_path: Path) -> None:
     """The surface an installed agent actually reads."""
     import json
 
@@ -261,7 +268,30 @@ def test_the_installer_scaffolds_all_three_servers(tmp_path: Path) -> None:
     )
     scaffolded = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
 
-    assert set(scaffolded["mcpServers"]) == {"snp-wiki", "scout", "snpmemory"}
+    assert set(scaffolded["mcpServers"]) == {"scout", "snpmemory"}
     local = scaffolded["mcpServers"]["snpmemory"]
     assert local["command"] == "snpmemory"
     assert local["args"] == ["mcp", "--root", str(REPO_ROOT)]
+
+
+def test_installer_removes_retired_components_but_preserves_custom_files(
+    tmp_path: Path,
+) -> None:
+    agent_dir = tmp_path / ".agent"
+    retired_skill = agent_dir / "skills" / "snp-auto-heal-vault"
+    retired_skill.mkdir(parents=True)
+    (retired_skill / "SKILL.md").write_text("stale", encoding="utf-8")
+    retired_workflow = agent_dir / "workflows" / "snp-heal.md"
+    retired_workflow.parent.mkdir(parents=True)
+    retired_workflow.write_text("stale", encoding="utf-8")
+    custom = agent_dir / "skills" / "custom-team" / "SKILL.md"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("custom", encoding="utf-8")
+
+    subprocess.run(
+        [str(INSTALLER_SCRIPT), str(tmp_path)], check=True, capture_output=True
+    )
+
+    assert not retired_skill.exists()
+    assert not retired_workflow.exists()
+    assert custom.read_text(encoding="utf-8") == "custom"

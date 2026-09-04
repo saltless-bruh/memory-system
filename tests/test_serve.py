@@ -18,3 +18,17 @@ def test_production_server_builds_pgvector_only() -> None:
     sentinel = object()
     with patch("scout.backends.pgvector.PgVectorRlsBackend", return_value=sentinel):
         assert _build_production_backend("pgvector") is sentinel
+
+
+def test_production_server_serves_only_the_wiki_tier() -> None:
+    """The served surface is `wiki_search` and `wiki_read` and nothing else, so
+    the backend behind it must be built on the wiki corpus.
+
+    Asserting the keyword rather than just the class is what stops the tier
+    from being deleted here unnoticed: `PgVectorRlsBackend()` defaults to every
+    corpus, which is correct for the compile pipeline and wrong for the
+    authenticated surface the demo talks to.
+    """
+    with patch("scout.backends.pgvector.PgVectorRlsBackend") as constructed:
+        _build_production_backend("pgvector")
+    assert constructed.call_args.kwargs.get("corpus") == "wiki"

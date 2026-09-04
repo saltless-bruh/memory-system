@@ -30,9 +30,7 @@ from tests.fakes import FakeEmbedder
 @dataclass(slots=True)
 class RecordingBackend:
     chunks: Sequence[RagChunk] = ()
-    calls: list[tuple[str, str | None, Scope | None, int]] = field(
-        default_factory=list
-    )
+    calls: list[tuple[str, str | None, Scope | None, int]] = field(default_factory=list)
 
     async def retrieve(
         self,
@@ -105,7 +103,9 @@ sources:
     loc: p.2
     hint: exact evidence phrase
 ---
-{body or '''# Page Title
+{
+            body
+            or '''# Page Title
 
 ## TL;DR
 A compact routing sentence.
@@ -115,7 +115,8 @@ Body evidence is read from the current Markdown file.
 
 ## Cross-References
 See [[other|Other Page]] and [[third#Part]].
-'''}""",
+'''
+        }""",
         encoding="utf-8",
     )
     return page
@@ -189,9 +190,7 @@ async def test_search_snippet_never_exceeds_forty_words(
 
 async def test_seen_hash_returns_only_canonical_stub(scope: Scope) -> None:
     backend = RecordingBackend([_chunk()])
-    (hit,) = await _engine(backend).wiki_search(
-        "query", seen=["sha:page"], scope=scope
-    )
+    (hit,) = await _engine(backend).wiki_search("query", seen=["sha:page"], scope=scope)
     assert hit.seen is True
     assert hit.snippet == ""
     assert hit.canonical() == {
@@ -283,11 +282,13 @@ async def test_internal_backend_reuses_shared_embedder_and_closes(
 
     created: list[object] = []
     closed: list[bool] = []
+    corpora: list[str | None] = []
 
     class OwnedBackend(RecordingBackend):
-        def __init__(self, *, embedder: object) -> None:
+        def __init__(self, *, embedder: object, corpus: str | None = None) -> None:
             super().__init__([_chunk()])
             created.append(embedder)
+            corpora.append(corpus)
 
         async def close(self) -> None:
             closed.append(True)
@@ -300,6 +301,10 @@ async def test_internal_backend_reuses_shared_embedder_and_closes(
     await engine.aclose()
     assert created == [embedder]
     assert closed == [True]
+    # The engine's own backend serves wiki_search, so it must be built on the
+    # wiki tier. Accepting the keyword and dropping it would let the tier be
+    # deleted from the wiring with every offline test still green.
+    assert corpora == ["wiki"]
 
 
 async def test_injected_backend_is_not_closed_by_engine(scope: Scope) -> None:
@@ -325,9 +330,7 @@ async def test_full_read_returns_canonical_disk_envelope(
     tmp_path: Path, scope: Scope
 ) -> None:
     page_path = _write_page(tmp_path)
-    page = await _vault_engine(tmp_path).wiki_read(
-        "concepts/page.md", scope=scope
-    )
+    page = await _vault_engine(tmp_path).wiki_read("concepts/page.md", scope=scope)
     assert isinstance(page, WikiPage)
     assert page.body == page_path.read_text(encoding="utf-8").split("---\n", 2)[2]
     assert page.path == "concepts/page.md"
@@ -357,13 +360,9 @@ async def test_full_read_returns_canonical_disk_envelope(
     }
 
 
-async def test_tldr_mode_returns_minimal_envelope(
-    tmp_path: Path, scope: Scope
-) -> None:
+async def test_tldr_mode_returns_minimal_envelope(tmp_path: Path, scope: Scope) -> None:
     _write_page(tmp_path)
-    page = await _vault_engine(tmp_path).wiki_read(
-        "page", mode="tldr", scope=scope
-    )
+    page = await _vault_engine(tmp_path).wiki_read("page", mode="tldr", scope=scope)
     assert set(page.canonical()) == {
         "path",
         "title",
@@ -442,7 +441,9 @@ async def test_invalid_read_mode_is_refused(tmp_path: Path, scope: Scope) -> Non
         await _vault_engine(tmp_path).wiki_read("page", mode="everything", scope=scope)
 
 
-@pytest.mark.parametrize("identifier", ["page", "Page Title", "concepts/page.md", "concepts\\page.md"])
+@pytest.mark.parametrize(
+    "identifier", ["page", "Page Title", "concepts/page.md", "concepts\\page.md"]
+)
 async def test_read_resolves_slug_title_and_normalized_path(
     identifier: str, tmp_path: Path, scope: Scope
 ) -> None:
@@ -548,9 +549,7 @@ Summary.
     assert page.links == ("target", "second")
 
 
-async def test_non_list_sources_default_to_empty(
-    tmp_path: Path, scope: Scope
-) -> None:
+async def test_non_list_sources_default_to_empty(tmp_path: Path, scope: Scope) -> None:
     page_path = _write_page(tmp_path)
     page_path.write_text(
         page_path.read_text(encoding="utf-8").replace(

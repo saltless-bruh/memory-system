@@ -117,3 +117,17 @@ def run_tool(
     except CliError as exc:
         raise ToolFailure(exc.to_result()) from None
     return to_tool_result(result, detail=detail)
+
+
+async def arun_tool(
+    spec: Any, *args: Any, detail: bool = False, **kwargs: Any
+) -> dict[str, Any]:
+    """Async equivalent for command implementations that await shared engines."""
+    from scout.cli.errors import CliError
+    from scout.cli.invoke import ainvoke
+
+    try:
+        result = await ainvoke(spec, *args, **kwargs)
+    except CliError as exc:
+        raise ToolFailure(exc.to_result()) from None
+    return to_tool_result(result, detail=detail)

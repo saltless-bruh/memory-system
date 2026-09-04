@@ -142,6 +142,36 @@ def archive_check_command(source_project: str, *, allow_live_source: bool) -> li
     )
 
 
+def archive_ledger_command(
+    target_project: str, *, compose_files: tuple[str, ...]
+) -> list[str]:
+    """Render only the migration-ledger data from an archive on stdin.
+
+    ``pg_restore --table`` matches a bare relation name. A schema-qualified
+    selector silently matches nothing, which produced the false empty-ledger
+    diagnosis during the first v0.2.1 staging drill.
+    """
+    if not compose_files:
+        raise BackupError("archive ledger inspection requires staging compose files")
+    try:
+        project = validate_compose_project(target_project)
+        return compose_command(
+            project,
+            "exec",
+            "-T",
+            "--user",
+            "postgres",
+            "postgres",
+            "pg_restore",
+            "--data-only",
+            "--table=schema_migrations",
+            "--file=-",
+            compose_files=compose_files,
+        )
+    except ManifestError as exc:
+        raise BackupError(str(exc)) from exc
+
+
 def bootstrap_roles_command(
     target_project: str, *, compose_files: tuple[str, ...]
 ) -> list[str]:
@@ -198,12 +228,13 @@ def _run(
     stdin: BinaryIO | None = None,
     stdout: BinaryIO | int | None = None,
 ) -> str:
+    effective_stdout: BinaryIO | int = subprocess.PIPE if stdout is None else stdout
     try:
         completed = subprocess.run(  # noqa: S603 - command is assembled fixed argv
             command,
             check=False,
             stdin=stdin,
-            stdout=stdout,
+            stdout=effective_stdout,
             stderr=subprocess.PIPE,
             timeout=180,
         )
@@ -219,6 +250,32 @@ def _run(
         if completed.stdout
         else ""
     )
+
+
+def _migration_ledger_from_restore_sql(output: str) -> list[str]:
+    """Extract ordered migration versions from pg_restore's COPY data."""
+    lines = output.splitlines()
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("COPY public.schema_migrations ")
+    ]
+    if not starts:
+        return []
+    if len(starts) != 1:
+        raise BackupError("archive contains multiple schema_migrations data sections")
+
+    versions: list[str] = []
+    for line in lines[starts[0] + 1 :]:
+        if line == r"\.":
+            return versions
+        version = line.split("\t", 1)[0]
+        if not version or not version.endswith(".sql"):
+            raise BackupError("archive migration ledger contains a malformed row")
+        if version in versions:
+            raise BackupError("archive migration ledger contains a duplicate version")
+        versions.append(version)
+    raise BackupError("archive migration ledger COPY section is unterminated")
 
 
 def _record_path(archive: Path) -> Path:
@@ -315,6 +372,13 @@ def restore_backup(
         record_path=record_path,
         confirmed_backup_id=confirmed_backup_id,
     )
+    with archive.open("rb") as archive_stream:
+        archive_ledger_sql = _run(
+            archive_ledger_command(target_project, compose_files=compose_files),
+            stdin=archive_stream,
+        )
+    archive_ledger = _migration_ledger_from_restore_sql(archive_ledger_sql)
+
     _run(bootstrap_roles_command(target_project, compose_files=compose_files))
     commands = restore_commands(target_project, record["database"])
     _run(commands[0])
@@ -337,14 +401,21 @@ def restore_backup(
             "-At",
             "-c",
             "SELECT version FROM schema_migrations ORDER BY version",
+            compose_files=compose_files,
         )
     ).splitlines()
+    if ledger != archive_ledger:
+        raise BackupError(
+            "restored migration ledger differs from archive "
+            f"(archive={len(archive_ledger)}, restored={len(ledger)})"
+        )
     restore_result = {
         "backup_id": record["backup_id"],
         "archive_sha256": record["sha256"],
         "database": record["database"],
         "target_project": project,
         "restored_at": datetime.now(UTC).isoformat(),
+        "archive_migration_ledger": archive_ledger,
         "migration_ledger": ledger,
         "role_bootstrap": "postgres-migrate",
     }

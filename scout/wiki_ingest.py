@@ -406,9 +406,21 @@ async def ingest_wiki(
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
-    """Ingest every vault page through the existing idempotent document upsert."""
+    """Ingest every vault page through the existing idempotent document upsert.
+
+    Excludes control documents (index.md, log.md) from chunk ingestion, though they
+    remain readable through wiki_read for direct queries.
+    """
+    # Resolve wiki_dir to absolute path to match vault.load_pages behavior
+    root = wiki_dir.resolve()  # noqa: ASYNC240
     pages = vault.load_pages(wiki_dir)
-    catalog = load_index_catalog(wiki_dir / "index.md")
+    # Exclude control documents from chunk ingestion (index.md is already excluded
+    # by vault.load_pages, but log.md is authored and must stay readable for wiki_read).
+    # Match against the root-level control document only, not any file with that name.
+    # Use resolved path to match vault.load_pages which returns absolute paths.
+    control_log = root / "log.md"
+    pages = [p for p in pages if p.path != control_log]
+    catalog = load_index_catalog(root / "index.md")
     settings = os.environ if env is None else env
     selected_embedder = embedder or LiteLLMBatchEmbedder(
         base_url=settings.get("LITELLM_BASE_URL"),

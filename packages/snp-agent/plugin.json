@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "snp-memory-agent",
   "version": "2.0.0",
-  "description": "Connects an AI coding agent to the SNP Memory System: a dual-layer institutional memory of a compiled Git wiki (Layer 1) and a PostgreSQL pgvector data vault reachable only through Scout's rag_fetch (Layer 2).",
+  "description": "Connects an AI coding agent to the SNP Memory System V3 page-retrieval and authoring contracts through Scout and snpmemory MCP servers.",
   "author": {
     "name": "SNP Architecture Team"
   },
@@ -20,7 +20,7 @@
       "rbac": {
         "departments": ["redteam", "blueteam", "ai_eng", "infra"],
         "defaultScope": "ai_eng",
-        "note": "A tool argument may narrow the caller's departments but never expand them. The document ACL value `all` is not caller authority."
+        "note": "A tool argument may narrow the caller's departments but never add or expand authority. The document ACL value `all` is not caller clearance."
       },
       "entrypoints": {
         "rules": "rules/snp-memory.md",
@@ -28,15 +28,20 @@
         "workflows": "workflows/"
       },
       "requiredTools": {
-        "note": "The tools each server in mcp.json must actually offer. snpmemory and scout are built in-process and introspected by tests/test_agent_package.py::test_the_manifest_lists_the_local_servers_real_tools; snp-wiki is a container and is introspected by tests/integration/test_wiki_tool_surface_live.py. Naming the tests is the point: an earlier version of this note claimed every server was checked while only one was, and `list_notes` sat here for weeks without being served.",
-        "snp-wiki": ["search_notes", "read_note", "write_note"],
-        "scout": ["rag_fetch"],
-        "snpmemory": ["verify", "plan_articles", "compile_plan", "compile_status"]
+        "note": "The declared tools are introspected against both in-process servers by tests/test_agent_package.py.",
+        "scout": ["wiki_search", "wiki_read"],
+        "snpmemory": [
+          "verify",
+          "plan_articles",
+          "compile_plan",
+          "compile_status",
+          "wiki_search",
+          "wiki_read"
+        ]
       },
       "ships": {
-        "note": "The authoritative list of what this package distributes. A component missing from the package, or present but undeclared, fails tests/test_agent_package_sync.py. The 25-file gap this closes was an accident that no test could see.",
+        "note": "The authoritative portable inventory; synchronization tests enforce both presence and byte identity.",
         "skills": [
-          "snp-auto-heal-vault",
           "snp-bootstrap-system",
           "snp-compile-wiki",
           "snp-export-mcp",
@@ -47,7 +52,6 @@
         ],
         "workflows": [
           "snp-compile.md",
-          "snp-heal.md",
           "snp-ingest.md",
           "snp-query.md",
           "snp-reload.md",
@@ -61,7 +65,7 @@
         "rules": ["snp-memory.md"]
       },
       "repoLocal": {
-        "note": "Deliberately NOT distributed. The superpowers layer is this repository's own development discipline, not part of the memory system's operating contract. Shipping it would tell a consumer's agent to write brainstorms and plans into their `artifacts/superpowers/`, for work that has nothing to do with the memory system. It lives in `.agent/` and stays there: `.claude/` deliberately omits it, because Claude Code runs the `unlazy` gate discipline and carrying both put two conflicting completion protocols in one session. tests/test_agent_package_sync.py enforces that absence in both directions.",
+        "note": "Not distributed: repository development instructions and the superpowers layer. Shared non-superpowers instructions remain mirrored into .claude; superpowers is excluded there because Claude uses unlazy completion discipline.",
         "prefixes": ["superpowers-"],
         "rules": ["superpowers.md"],
         "instructions": [

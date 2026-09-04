@@ -20,7 +20,6 @@ the flow can use basic-memory or Scout-DIY and production pgvector or a fake.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -40,7 +39,7 @@ class WikiEngine(Protocol):
         k: int = 5,
         *,
         seen: Sequence[str] = (),
-        scope: Scope | None = None,
+        scope: Scope,
     ) -> Sequence[WikiHit]:
         """Return top-K pages for `query`."""
         ...
@@ -51,7 +50,7 @@ class WikiEngine(Protocol):
         *,
         mode: str = "full",
         section: str | None = None,
-        scope: Scope | None = None,
+        scope: Scope,
     ) -> WikiPage:
         """Read one page by path or id."""
         ...
@@ -115,23 +114,13 @@ def _addresses_from_page(page: WikiPage) -> list[Address]:
     return addresses
 
 
-def _accepts_keyword(method: Callable[..., object], keyword: str) -> bool:
-    """Allow pre-V3 injected test adapters while production stays scoped."""
-    parameters = inspect.signature(method).parameters.values()
-    return any(
-        parameter.name == keyword
-        or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
-
-
 async def answer_query(
     wiki: WikiEngine,
     rag: RagBackend,
     query: str,
     *,
     need_rag: NeedRag = False,
-    scope: Scope | None = None,
+    scope: Scope,
     k: int = 5,
 ) -> Answer:
     """Run the wiki→(maybe RAG) query flow for `query` (R-5.1, R-5.4).
@@ -143,25 +132,23 @@ async def answer_query(
         need_rag: Whether to descend to RAG. `False` (default) means the page
             suffices → **RAG is never called** (R-5.1). A predicate lets the
             caller (the agent, in production) decide from the page content.
-        scope: Caller RBAC context passed through to the backend (R-4.8).
+        scope: Authenticated caller context forwarded unchanged to every wiki
+            operation and to the backend (R-4.8).
         k: Wiki top-K.
 
     Returns:
         An `Answer`. On the page-only branch, `used_rag` is False and `rag`
         is never awaited — the property the test pins (R-5.1).
     """
-    if _accepts_keyword(wiki.wiki_search, "scope"):
-        hits = await wiki.wiki_search(query, k, scope=scope)
-    else:
-        hits = await wiki.wiki_search(query, k)
+    if scope is None:
+        raise ValueError("answer_query requires an authenticated scope")
+
+    hits = await wiki.wiki_search(query, k, scope=scope)
     if not hits:
         return Answer(query=query, status=AnswerStatus.NO_PAGE)
 
     top = hits[0]
-    if _accepts_keyword(wiki.wiki_read, "scope"):
-        page = await wiki.wiki_read(top.path, scope=scope)
-    else:
-        page = await wiki.wiki_read(top.path)
+    page = await wiki.wiki_read(top.path, scope=scope)
 
     descend = need_rag(page) if callable(need_rag) else need_rag
     if not descend:

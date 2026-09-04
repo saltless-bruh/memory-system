@@ -222,6 +222,14 @@ The manifest, capability JSON, backup archive, checksum record, and restore
 result must live **outside** the Git worktree. Writing one under `artifacts/`
 would make the candidate dirty and correctly cause its preflight to fail.
 
+**Negative-evidence rule:** never authorize a live-state repair solely from an
+empty or absent result until the same observation method produces a positive
+result against a known-good control. A failed positive control makes the
+measurement unavailable; it does not prove absence. This rule exists because a
+schema-qualified `pg_restore --table=public.schema_migrations` selector silently
+matched nothing while the bare `--table=schema_migrations` selector returned all
+five rows.
+
 ```bash
 # These values are examples for the approved v0.2.1 staging transition.
 export SNP_RELEASE_TAG=v0.2.1
@@ -274,7 +282,10 @@ and restore the archive into that isolated database. The restore helper rejects
 the live default project, requires the exact backup-ID confirmation, invokes
 the staged migration service to bootstrap only the cluster-scoped roles, then
 drops and recreates only the named staging database, restores transactionally,
-and writes a result record. Do not start `sync-job` yet.
+and writes a result record. Before any database mutation it extracts the
+archive's migration ledger with the bare relation selector; after restore it
+reads the staging ledger back and refuses disagreement. Do not start `sync-job`
+yet.
 
 ```bash
 docker compose --project-name "$SNP_STAGE_PROJECT" \
@@ -292,9 +303,9 @@ uv run python scripts/release_backup.py restore \
   --compose-file docker-compose.yml \
   --compose-file docker-compose.staging.yml
 
-# The bootstrap service completed before restore; the restored migration ledger
-# is now the source-of-truth. Start readers, not the automatic writer. Compose
-# dependencies observe the successful one-shot service.
+# The bootstrap service completed before restore; archive and restored migration
+# ledgers agree. Start readers, not the automatic writer. Compose dependencies
+# observe the successful one-shot service.
 docker compose --project-name "$SNP_STAGE_PROJECT" \
   -f docker-compose.yml -f docker-compose.staging.yml \
   up -d --wait postgres-migrate litellm host-sync basic-memory scout
@@ -340,16 +351,21 @@ uv run python scripts/release_preflight.py \
   --compose-file docker-compose.yml \
   --compose-file docker-compose.staging.yml \
   --capability-file "$SNP_RELEASE_DIR/container-capability.json" \
-  --backup-id "$BACKUP_ID"
+  --backup-id "$BACKUP_ID" \
+  --restore-result "$SNP_RELEASE_DIR/${BACKUP_ID}.restore.json"
 ```
 
 `--check` compares the named Compose project **and ordered Compose files**, Git
 revision, dirty state, lock hashes, image digests or local OCI labels, migration
 ledger, and capability fingerprint. `release_preflight.py` additionally refuses
 a missing/mismatched `SNP_GIT_REVISION`, an incomplete migration ledger, or a
-blank backup ID. An infrastructure failure while collecting current Docker or
-PostgreSQL evidence exits `2`; an unsafe candidate exits `1`; neither condition
-permits deployment.
+blank backup ID. It also requires the restore helper's external result to name
+that exact backup, project, archive checksum, role bootstrap, and complete
+archive and **restored** migration ledgers. Those two ledgers must also agree, so
+neither a broken archive selector nor a subsequent staging migration can repair
+the evidence after the fact. An infrastructure failure while collecting current
+Docker or PostgreSQL evidence exits `2`; an unsafe candidate exits `1`; neither
+condition permits deployment.
 
 ### Rollback drill — required before production use
 

@@ -3275,3 +3275,37 @@ still `INSERT,SELECT` and policies `INSERT, SELECT` only.
 * **Not attempted:** no commit, tag, push, Docker build, restart, migration,
   re-ingest, backup, or runner activation was performed against the shared
   environment.
+
+## Execution: Generalizing `skill-creator` and Global Deployment
+
+- Step 1: Refactor `SKILL.md` to be agent-general [SUCCESS]
+  - Replaced vendor-specific assumptions ("Claude", "Claude Code", "Claude.ai", "Cowork", Anthropic internal data) with universal agent terminology.
+  - Adapted single-agent and subagent execution guidelines.
+- Step 2: Update scripts & eval viewers [SUCCESS]
+  - Updated `run_eval.py` to recognize `.agent/`, `.agents/`, `.git/`, and `.claude/` directories.
+  - Added robust import fallbacks to `package_skill.py`, `run_eval.py`, `improve_description.py`, and `run_loop.py`.
+  - Updated `improve_description.py` prompt instructions and unified execution under `_call_agent_cli`.
+  - Updated `eval-viewer/viewer.html` and `scripts/generate_report.py` to reference general AI agent sessions.
+- Step 3: Deploy to global skills directories [SUCCESS]
+  - Deployed to `~/.gemini/config/skills/skill-creator` (Antigravity Global Configuration).
+  - Deployed to `~/.gemini/antigravity/skills/skill-creator` (Antigravity CLI / Global).
+  - Synchronized with `~/.agents/skills/skill-creator`.
+
+### Verification Results:
+- `quick_validate.py`: PASS across all 3 locations.
+- `package_skill.py`: PASS, generated 72KB distributable `.skill` bundle.
+- `py_compile`: PASS across all scripts.
+- `npx skills ls -g`: PASS, active for Antigravity, Antigravity CLI, and connected agents.
+
+## Execution: Creating and Globally Deploying `ascii-diagram-explainer`
+
+- Batch 1: Creation of Skill & Patterns [SUCCESS]
+  - Created `~/.gemini/config/skills/ascii-diagram-explainer/SKILL.md`
+  - Created `~/.gemini/config/skills/ascii-diagram-explainer/references/patterns.md` with complete pattern gallery (workflows, architectures, call stacks, pipelines, sequences, state machines, and trees).
+- Batch 2: Deployment & Mirroring [SUCCESS]
+  - Mirrored to `~/.gemini/antigravity/skills/ascii-diagram-explainer/`
+  - Mirrored to `~/.agents/skills/ascii-diagram-explainer/`
+- Batch 3: Validation & Registry [SUCCESS]
+  - `quick_validate.py`: PASS across all 3 directories.
+  - `package_skill.py`: PASS, successfully packaged `ascii-diagram-explainer.skill` (4.3 KB).
+  - `npx skills ls -g`: PASS, registered globally for Antigravity, Antigravity CLI, and coding agents.

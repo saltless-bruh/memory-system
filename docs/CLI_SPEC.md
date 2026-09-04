@@ -16,11 +16,11 @@ consequences:
 * The distributed agent package instructs agents to run `python scripts/mint.py`
   and ships no `scripts/` directory. Half the documented workflow is unreachable
   on a user's machine.
-* Every future MCP tool would be a second implementation of something a script
-  already does, free to drift from it.
+* Every MCP tool must delegate to the same command implementation as the CLI,
+  or the two surfaces are free to drift.
 
 `snpmemory` is one dispatcher with three surfaces: a human CLI, a CI gate, and
-(later) MCP tools. The surfaces render differently; the logic is shared.
+local MCP tools. The surfaces render differently; the logic is shared.
 
 ## Audiences, and what each one needs
 
@@ -176,12 +176,10 @@ could ask a question:
 * Destructive actions require `--yes`; without it, exit `5` and name the flag in
   the `hint`. Do not proceed silently — an agent should hit a wall, not a trigger.
 
-**Worked example — `scripts/export_mcp_config.py`.** It already guards its
-prompt with `sys.stdin.isatty()` and errors cleanly when piped, so it does not
-hang. Two things still fail this rule: the prompt is the default path whenever a
-TTY is present rather than requiring `--interactive`, and `parser.error()` exits
-with argparse's `2`, which in §1 means *infrastructure failure* — a missing
-argument is `3`. Both must be corrected before it becomes `snpmemory mcp-config`.
+**Worked example — `snpmemory mcp-config`.** It never prompts unless
+`--interactive` is explicit, and its non-interactive path requires `--client`
+or `--all`. The command delegates to `scripts/export_mcp_config.py`, so config
+generation and safe merge behavior have one implementation.
 
 ---
 

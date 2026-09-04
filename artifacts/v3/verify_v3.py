@@ -25,6 +25,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
@@ -512,9 +513,7 @@ The searchable body carries BODY_EVIDENCE_4f7c9d and no summary field exists.
 
         embedder = RecordingEmbedder()
         connection = RecordingConnection()
-        results = asyncio.run(
-            ingest_wiki(wiki, conn=connection, embedder=embedder)  # type: ignore[arg-type]
-        )
+        results = asyncio.run(ingest_wiki(wiki, conn=connection, embedder=embedder))
         require(bool(results), "a body-bearing wiki page was not ingested")
         require(bool(connection.chunk_texts), "wiki ingestion inserted no chunks")
         require(
@@ -573,7 +572,7 @@ class _OracleAsyncEmbedder:
 
 def _mock_pg_pool(
     fetch_side_effect: Callable[..., object],
-) -> tuple[object, object]:
+) -> tuple[Any, Any]:
     from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
 
     connection = MagicMock()
@@ -616,7 +615,7 @@ def group_page_dedup() -> str:
         return [_retrieval_row("wiki/alpha.md"), _retrieval_row("wiki/beta.md")]
 
     pool, connection = _mock_pg_pool(fetch_rows)
-    backend = PgVectorRlsBackend(embedder=_OracleAsyncEmbedder(), pool=pool)  # type: ignore[arg-type]
+    backend = PgVectorRlsBackend(embedder=_OracleAsyncEmbedder(), pool=pool)
     chunks = asyncio.run(
         backend.retrieve(
             "controlled page query",
@@ -657,21 +656,25 @@ def group_class_rank() -> str:
 
     async def ranked_rows(query: str, *args: object) -> list[dict[str, object]]:
         queries.append(query)
-        base = int(args[5])
-        raw_delta = int(args[6])
+        base = int(cast(int, args[5]))
+        raw_delta = int(cast(int, args[6]))
         curated_score = 1.0 / (base + 2)
         raw_score = 1.0 / (base + raw_delta + 1)
         candidates = [
             _retrieval_row("wiki/curated.md", page_type="concept", score=curated_score),
             _retrieval_row("raw/source.md", page_type="raw", score=raw_score),
         ]
-        return sorted(candidates, key=lambda row: float(row["rrf_score"]), reverse=True)
+        return sorted(
+            candidates,
+            key=lambda row: float(cast(float, row["rrf_score"])),
+            reverse=True,
+        )
 
     async def run(delta: int) -> list[str]:
         pool, _connection = _mock_pg_pool(ranked_rows)
         backend = PgVectorRlsBackend(
             embedder=_OracleAsyncEmbedder(),
-            pool=pool,  # type: ignore[arg-type]
+            pool=pool,
             raw_rank_penalty=delta,
         )
         chunks = await backend.retrieve(
@@ -726,7 +729,7 @@ def group_degradation() -> str:
     healthy_pool, _healthy_connection = _mock_pg_pool(healthy_rows)
     healthy_backend = PgVectorRlsBackend(
         embedder=_OracleAsyncEmbedder(),
-        pool=healthy_pool,  # type: ignore[arg-type]
+        pool=healthy_pool,
     )
     healthy = asyncio.run(healthy_backend.retrieve("health control", scope=scope))
     require(bool(healthy), "healthy dense control returned no result")
@@ -748,7 +751,7 @@ def group_degradation() -> str:
     sparse_pool, _sparse_connection = _mock_pg_pool(sparse_rows)
     sparse_backend = PgVectorRlsBackend(
         embedder=TimeoutEmbedder(),
-        pool=sparse_pool,  # type: ignore[arg-type]
+        pool=sparse_pool,
         dense_timeout_seconds=0.01,
     )
     sparse = asyncio.run(sparse_backend.retrieve("fallback control", scope=scope))
@@ -860,6 +863,131 @@ Scoped result.
     return "SCOPE VERIFIED"
 
 
+def group_workflow_scope() -> str:
+    """Prove orchestration cannot erase authority at an adapter boundary."""
+    from scout.diy_engine import WikiHit, WikiPage  # noqa: PLC0415
+    from scout.types import RagChunk, Scope  # noqa: PLC0415
+    from scout.workflow import WikiEngine, answer_query  # noqa: PLC0415
+
+    scope = Scope(departments=frozenset({"infra"}))
+
+    class EmptyBackend:
+        async def retrieve(
+            self,
+            _hint: str,
+            *,
+            path: str | None = None,
+            scope: Scope | None = None,
+            k: int = 10,
+        ) -> Sequence[RagChunk]:
+            del path, scope, k
+            return ()
+
+    class ScopedWiki:
+        def __init__(self) -> None:
+            self.search_scopes: list[Scope] = []
+            self.read_scopes: list[Scope] = []
+
+        async def wiki_search(
+            self,
+            _query: str,
+            _k: int = 5,
+            *,
+            seen: Sequence[str] = (),
+            scope: Scope,
+        ) -> Sequence[WikiHit]:
+            del seen
+            self.search_scopes.append(scope)
+            return [
+                WikiHit(
+                    page_id="scoped",
+                    path="concepts/scoped.md",
+                    score=1.0,
+                    summary="Scoped page",
+                )
+            ]
+
+        async def wiki_read(
+            self,
+            _path: str,
+            *,
+            mode: str = "full",
+            section: str | None = None,
+            scope: Scope,
+        ) -> WikiPage:
+            del mode, section
+            self.read_scopes.append(scope)
+            return WikiPage(body="Scoped body")
+
+    class ScopeDroppingWiki:
+        """Known pre-fix shape: its methods cannot receive authority."""
+
+        async def wiki_search(self, _query: str, _k: int = 5) -> Sequence[WikiHit]:
+            return [
+                WikiHit(
+                    page_id="unscoped",
+                    path="concepts/unscoped.md",
+                    score=1.0,
+                    summary="Unscoped page",
+                )
+            ]
+
+        async def wiki_read(self, _path: str) -> WikiPage:
+            return WikiPage(body="Unscoped body")
+
+    async def exercise() -> tuple[ScopedWiki, bool, bool]:
+        scoped = ScopedWiki()
+        await answer_query(
+            scoped,
+            EmptyBackend(),
+            "scope forwarding control",
+            scope=scope,
+        )
+        try:
+            await answer_query(
+                cast(WikiEngine, ScopeDroppingWiki()),
+                EmptyBackend(),
+                "scope dropping control",
+                scope=scope,
+            )
+        except TypeError as exc:
+            rejected = "scope" in str(exc)
+        else:
+            rejected = False
+        no_scope = ScopedWiki()
+        try:
+            await answer_query(
+                no_scope,
+                EmptyBackend(),
+                "missing scope control",
+                scope=cast(Scope, None),
+            )
+        except ValueError as exc:
+            none_rejected = "authenticated scope" in str(exc)
+        else:
+            none_rejected = False
+        require(
+            not no_scope.search_scopes and not no_scope.read_scopes,
+            "the workflow touched the wiki before rejecting an empty scope",
+        )
+        return scoped, rejected, none_rejected
+
+    scoped, rejected, none_rejected = asyncio.run(exercise())
+    require(
+        len(scoped.search_scopes) == 1
+        and scoped.search_scopes[0] is scope
+        and len(scoped.read_scopes) == 1
+        and scoped.read_scopes[0] is scope,
+        "the workflow did not forward the exact scope to both wiki calls",
+    )
+    require(
+        rejected,
+        "the workflow accepted an adapter that silently drops authenticated scope",
+    )
+    require(none_rejected, "the workflow accepted an empty authenticated scope")
+    return "WORKFLOW SCOPE VERIFIED"
+
+
 def group_engine_local_index_absence() -> str:
     source = (REPO_ROOT / "scout" / "diy_engine.py").read_text(encoding="utf-8")
     forbidden = (
@@ -911,29 +1039,64 @@ def group_tool_surface() -> str:
             del path, scope, k
             return ()
 
-    config = load_auth_config(
-        {"SCOUT_AUTH_MODE": "development"}, bind_host="127.0.0.1"
-    )
-    tools = asyncio.run(
-        build_server(EmptyBackend(), auth_config=config).list_tools()
-    )
-    names = {tool.name for tool in tools}
     expected = {"wiki_search", "wiki_read"}
-    require(names == expected, f"Scout serves {sorted(names)!r}, expected V3 pair")
-    for tool in tools:
-        annotations = tool.annotations
-        require(annotations is not None, f"{tool.name} has no annotations")
-        require(
-            annotations.readOnlyHint is True
-            and annotations.destructiveHint is False
-            and annotations.idempotentHint is True,
-            f"{tool.name} lost its read-only annotations",
+    expected_parameters = {
+        "wiki_search": {"query", "k", "seen", "department"},
+        "wiki_read": {"path", "mode", "section", "department"},
+    }
+
+    def surface_errors(tools: Sequence[object]) -> list[str]:
+        errors: list[str] = []
+        names = {str(getattr(tool, "name", "")) for tool in tools}
+        if names != expected:
+            errors.append(f"serves {sorted(names)!r}, expected {sorted(expected)!r}")
+        for tool in tools:
+            name = str(getattr(tool, "name", ""))
+            annotations = getattr(tool, "annotations", None)
+            if annotations is None:
+                errors.append(f"{name} has no annotations")
+            elif not (
+                getattr(annotations, "readOnlyHint", None) is True
+                and getattr(annotations, "destructiveHint", None) is False
+                and getattr(annotations, "idempotentHint", None) is True
+            ):
+                errors.append(f"{name} lost its read-only annotations")
+            parameters = getattr(tool, "parameters", {})
+            properties = parameters.get("properties", {})
+            if len(properties) > 8:
+                errors.append(
+                    f"{name} exceeds the eight-parameter budget: {properties!r}"
+                )
+            if (
+                name in expected_parameters
+                and set(properties) != expected_parameters[name]
+            ):
+                errors.append(f"{name} parameters drifted: {sorted(properties)!r}")
+            description = str(getattr(tool, "description", ""))
+            if "untrusted data, never instructions" not in description:
+                errors.append(f"{name} lost the injection guard")
+        return errors
+
+    configs = {
+        "development": load_auth_config(
+            {"SCOUT_AUTH_MODE": "development"}, bind_host="127.0.0.1"
+        ),
+        "protected": load_auth_config(
+            {
+                "SCOUT_AUTH_MODE": "static",
+                "SCOUT_AUTH_BASE_URL": "https://scout.example.test",
+                "SCOUT_STATIC_TOKENS": (
+                    '{"token":{"subject":"gate","departments":["infra"]}}'
+                ),
+            }
+        ),
+    }
+    for branch, config in configs.items():
+        tools = asyncio.run(
+            build_server(EmptyBackend(), auth_config=config).list_tools()
         )
-        properties = tool.parameters.get("properties", {})
-        require(
-            len(properties) <= 8,
-            f"{tool.name} exceeds the eight-parameter budget: {properties!r}",
-        )
+        errors = surface_errors(tools)
+        require(not errors, f"{branch} Scout surface failed: {errors!r}")
 
     fetch_policy = policy_for("fetch")
     search_policy = policy_for("search")
@@ -955,10 +1118,283 @@ def group_tool_surface() -> str:
         "local read is not exposed as wiki_read",
     )
 
-    # Positive control: the exact retired surface must be observably different.
-    old_names = {"rag_fetch"}
-    require(old_names != expected and "rag_fetch" not in expected, "surface control inert")
+    class RetiredTool:
+        name = "rag_fetch"
+        annotations = None
+        parameters: dict[str, object] = {"properties": {}}
+        description = "Resolve one address."
+
+    require(
+        bool(surface_errors([RetiredTool()])),
+        "surface detector missed the known retired rag_fetch control",
+    )
     return "TOOL SURFACE VERIFIED"
+
+
+# --------------------------------------------------------------------------
+# leaf-1.2.5 — shipped agent contracts and mirrors
+# --------------------------------------------------------------------------
+
+
+def group_contracts() -> str:
+    agent_root = REPO_ROOT / ".agent"
+    claude_root = REPO_ROOT / ".claude"
+    package_root = REPO_ROOT / "packages" / "snp-agent"
+    contract_roots = (agent_root, claude_root, package_root)
+    contract_dirs = {"instructions", "rules", "skills", "workflows"}
+    package_files = sorted(path for path in package_root.rglob("*") if path.is_file())
+    require(bool(package_files), "portable agent package is empty")
+
+    active_files = [REPO_ROOT / "AGENTS.md", REPO_ROOT / "CLAUDE.md"]
+    active_files.extend(
+        path for path in package_files if path.suffix in {".md", ".json"}
+    )
+    for root in (agent_root, claude_root):
+        active_files.extend(
+            path
+            for subdir in contract_dirs
+            for path in (root / subdir).rglob("*")
+            if path.is_file()
+            and path.suffix in {".md", ".json"}
+            and not any(part.startswith("superpowers") for part in path.parts)
+        )
+
+    retired_patterns = (
+        (
+            "sufficiency-stop",
+            re.compile(
+                r"\bif\b.{0,160}\bwiki(?:\s+page)?\b.{0,160}\banswers?\b"
+                r".{0,80}\bstop\b.{0,120}\b(?:do\s+not|don't|never)\b"
+                r".{0,60}\b(?:query|call|use)\b.{0,60}\b(?:rag|scout)\b",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        ),
+        ("R-5.1", re.compile(r"\bR-5\.1\b|sufficiency\s+stop", re.IGNORECASE)),
+        ("R-6.3", re.compile(r"\bR-6\.3\b", re.IGNORECASE)),
+        (
+            "address-minting",
+            re.compile(
+                r"sources\[\]\.hint|scripts/mint\.py|verify_addresses\.py|"
+                r"ci_address_gate\.py",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "old-golden-rule",
+            re.compile(
+                r"wiki\s+tells\s+you\s+where\s+to\s+go.{0,80}"
+                r"rag\s+gives\s+you\s+the\s+verbatim\s+source",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        ),
+        (
+            "retired-tool",
+            re.compile(
+                r"\b(?:rag_fetch|search_notes|read_note|write_note|list_notes)\b",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "retired-healer",
+            re.compile(r"snp-auto-heal-vault|snp-heal\.md", re.IGNORECASE),
+        ),
+    )
+
+    def retired_violations(paths: Sequence[Path]) -> list[str]:
+        violations: list[str] = []
+        for path in paths:
+            content = path.read_text(encoding="utf-8")
+            try:
+                display = path.relative_to(REPO_ROOT).as_posix()
+            except ValueError:
+                display = path.name
+            for label, pattern in retired_patterns:
+                if pattern.search(content):
+                    violations.append(f"{display}:{label}")
+        return violations
+
+    with tempfile.TemporaryDirectory(prefix="v3-contract-control-") as temporary:
+        control = Path(temporary) / "retired-rule.md"
+        control.write_text(
+            "If the wiki page answers the question, STOP. Do not query RAG.\n",
+            encoding="utf-8",
+        )
+        detected = retired_violations([control])
+        require(
+            any(item.endswith(":sufficiency-stop") for item in detected),
+            "contract detector missed the planted stop-before-RAG behavior",
+        )
+
+    violations = retired_violations(active_files)
+    require(
+        not violations,
+        "retired agent contracts remain: "
+        + repr(violations[:20])
+        + (f" (+{len(violations) - 20} more)" if len(violations) > 20 else ""),
+    )
+
+    ordered_contracts = (
+        REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / "CLAUDE.md",
+        package_root / "instructions" / "query_protocol.instructions.md",
+        package_root / "workflows" / "snp-query.md",
+        package_root / "skills" / "snp-rag-fetch" / "SKILL.md",
+    )
+    for path in ordered_contracts:
+        content = path.read_text(encoding="utf-8")
+        search_at = content.find("wiki_search")
+        read_at = content.find("wiki_read")
+        require(
+            0 <= search_at < read_at,
+            f"{path.relative_to(REPO_ROOT)} does not establish wiki_search -> wiki_read",
+        )
+
+    safety_contracts = (
+        REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / "CLAUDE.md",
+        *(root / "rules" / "snp-memory.md" for root in contract_roots),
+    )
+    injection_guard = re.compile(
+        r"(?:untrusted\s+)?data.{0,30}(?:not|never)\s+instructions",
+        re.IGNORECASE | re.DOTALL,
+    )
+    scope_guard = re.compile(
+        r"(?:narrow.{0,80}(?:cannot|never).{0,30}(?:add|expand)|"
+        r"(?:cannot|never).{0,30}(?:add|expand).{0,80}narrow)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for path in safety_contracts:
+        content = path.read_text(encoding="utf-8")
+        require(
+            bool(injection_guard.search(content)),
+            f"{path.relative_to(REPO_ROOT)} lost the injection boundary",
+        )
+        require(
+            bool(scope_guard.search(content)),
+            f"{path.relative_to(REPO_ROOT)} lost the request-scope boundary",
+        )
+
+    expected_tools = {
+        "scout": ["wiki_search", "wiki_read"],
+        "snpmemory": [
+            "verify",
+            "plan_articles",
+            "compile_plan",
+            "compile_status",
+            "wiki_search",
+            "wiki_read",
+        ],
+    }
+    expected_skills = {
+        "snp-bootstrap-system",
+        "snp-compile-wiki",
+        "snp-export-mcp",
+        "snp-ingest-raw-data",
+        "snp-rag-fetch",
+        "snp-search-wiki",
+        "snp-verify-vault",
+    }
+    expected_workflows = {
+        "snp-compile.md",
+        "snp-ingest.md",
+        "snp-query.md",
+        "snp-reload.md",
+        "snp-verify.md",
+    }
+    for root in (package_root, agent_root):
+        plugin_path = root / "plugin.json"
+        mcp_path = root / "mcp.json"
+        require(
+            plugin_path.is_file(),
+            f"missing mirror {plugin_path.relative_to(REPO_ROOT)}",
+        )
+        require(
+            mcp_path.is_file(),
+            f"missing mirror {mcp_path.relative_to(REPO_ROOT)}",
+        )
+        plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
+        extension = plugin["extensions"]["io.snp.memory"]
+        declared_tools = {
+            name: value
+            for name, value in extension["requiredTools"].items()
+            if name != "note"
+        }
+        require(
+            declared_tools == expected_tools,
+            f"{plugin_path.relative_to(REPO_ROOT)} tool manifest drifted",
+        )
+        ships = extension["ships"]
+        require(
+            set(ships["skills"]) == expected_skills,
+            f"{plugin_path.relative_to(REPO_ROOT)} skill inventory drifted",
+        )
+        require(
+            set(ships["workflows"]) == expected_workflows,
+            f"{plugin_path.relative_to(REPO_ROOT)} workflow inventory drifted",
+        )
+        mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+        require(
+            set(mcp["mcpServers"]) == set(expected_tools),
+            f"{mcp_path.relative_to(REPO_ROOT)} still declares a retired server",
+        )
+
+    for package_path in package_files:
+        relative = package_path.relative_to(package_root)
+        agent_path = agent_root / relative
+        require(
+            agent_path.is_file(),
+            f"missing mirror {agent_path.relative_to(REPO_ROOT)}",
+        )
+        require(
+            agent_path.read_bytes() == package_path.read_bytes(),
+            f"mirror drift: {agent_path.relative_to(REPO_ROOT)}",
+        )
+        if relative.parts[0] in contract_dirs:
+            claude_path = claude_root / relative
+            require(
+                claude_path.is_file(),
+                f"missing mirror {claude_path.relative_to(REPO_ROOT)}",
+            )
+            require(
+                claude_path.read_bytes() == package_path.read_bytes(),
+                f"mirror drift: {claude_path.relative_to(REPO_ROOT)}",
+            )
+
+    def mirrored_contract_files(root: Path) -> set[Path]:
+        return {
+            path.relative_to(root)
+            for subdir in contract_dirs
+            for path in (root / subdir).rglob("*")
+            if path.is_file()
+            and not any(part.startswith("superpowers") for part in path.parts)
+        }
+
+    agent_contracts = mirrored_contract_files(agent_root)
+    claude_contracts = mirrored_contract_files(claude_root)
+    require(
+        agent_contracts == claude_contracts,
+        "active .agent/.claude contract inventories differ: "
+        f"agent-only={sorted(map(str, agent_contracts - claude_contracts))!r}, "
+        f"claude-only={sorted(map(str, claude_contracts - agent_contracts))!r}",
+    )
+    for relative in agent_contracts:
+        require(
+            (agent_root / relative).read_bytes()
+            == (claude_root / relative).read_bytes(),
+            f"mirror drift: {relative}",
+        )
+
+    for root in contract_roots:
+        require(
+            not (root / "skills" / "snp-auto-heal-vault").exists(),
+            f"retired healer skill remains under {root.relative_to(REPO_ROOT)}",
+        )
+        require(
+            not (root / "workflows" / "snp-heal.md").exists(),
+            f"retired healer workflow remains under {root.relative_to(REPO_ROOT)}",
+        )
+
+    return "CONTRACTS VERIFIED"
 
 
 # --------------------------------------------------------------------------
@@ -968,7 +1404,6 @@ def group_tool_surface() -> str:
 _PENDING: dict[str, str] = {
     "rebuild": "leaf-1.3.1",
     "model-stamp": "leaf-1.1.1 plus a live index",
-    "contracts": "leaf-1.2.5",
     "index-preservation": "leaf-1.3.3 plus the reference corpus",
 }
 
@@ -995,8 +1430,10 @@ GROUPS: dict[str, Callable[[], str]] = {
     "class-rank": group_class_rank,
     "degradation": group_degradation,
     "scope": group_scope,
+    "workflow-scope": group_workflow_scope,
     "engine-local-index-absence": group_engine_local_index_absence,
     "tool-surface": group_tool_surface,
+    "contracts": group_contracts,
     "static-branch": group_static_branch,
     "static-repo": group_static_repo,
 }

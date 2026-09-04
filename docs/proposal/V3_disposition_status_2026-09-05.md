@@ -19,7 +19,79 @@ Nothing here is read from a report; every number has a command behind it.
 | **R-heavy** | Delete it, and a **kept** component has to be reworked to survive. |
 | **DONE** | Already removed. |
 
+**Substance** — what actually exists behind the name. This is the axis §8.2's
+glyphs conflated, and the one that decides what a fix costs:
+
+| Mark | Meaning | What it costs to resolve |
+|---|---|---|
+| **● REAL** | Implementation exists and meets its target. | nothing |
+| **◐ PARTIAL** | Real code, runs, does something — but not the V3 target. | rework existing code **and** whatever depends on its current behaviour |
+| **🔌 WIRED** | Real code **and** real config exist. It has never executed. | start it |
+| **📄 PAPER** | Exists only in a document. No code, no config, no config entry. | build it from nothing, or delete a sentence |
+
 **⚙️ ENGINE** marks the items the approved plan (`docs/superpowers/plans/2026-09-04-engine-completion.md`) closes. Everything unmarked stays as it is.
+
+---
+
+# The three kinds of zero
+
+Ten rows on this page read "0%". They are not the same problem, and treating
+them as one list is how `sync-job` sat undiscovered.
+
+## 📄 PAPER — 0% implemented, nothing exists but the words
+
+Verified: no file, no function, no config entry anywhere in `scout/`,
+`scripts/`, `config/` or the compose files.
+
+| Component | Where it is declared |
+|---|---|
+| Fetch + extract for `sources:` URLs | §8.6 — 727 declared URLs in the corpus, none fetchable |
+| Index inspector | §8.6 — *and it is what §8.6 says satisfies H-3* |
+| Content-addressed source cache | §8.6 |
+| Blue-green embedding migration | §8.6 |
+| `read_source` fallback tool | §8.6, §7.6 |
+| Similarity graph | §9.2 / leaf-1.4.3 |
+| scout MCP **server** description | §8.2 📄 — `FastMCP()` takes no `instructions=` |
+
+Seven items. Between them they have **zero lines of code**. Each is a decision,
+not a task: build it, or strike it from the blueprint. Nothing has to be
+un-wired first, and nothing depends on them — which is precisely why they are
+also the cheapest things on this page to *delete*.
+
+## 🔌 WIRED — 0% live, but the code is written and tested
+
+| Component | State |
+|---|---|
+| **`sync-job`** ⚙️ | Full service definition at `compose:207` with `restart: unless-stopped`. `scout/sync_job.py` is written, typed and unit-tested. **It has never had a container.** |
+| `gitea-runner` | Declared in compose. Never registered. |
+| CI `checks.yaml` · `security.yaml` | Both workflows written. **Zero runs on any commit**, because of the row above. |
+
+This is the category that should be alarming. `sync-job` is not unbuilt — it is
+finished software nobody started, and its absence is the entire reason W-2 is
+open. The distance between "0% PAPER" and "0% WIRED" is the distance between a
+paragraph and a `docker compose up`.
+
+## ◐ PARTIAL — more than 0%, and therefore more expensive
+
+Real code that runs and does the *old* job. Reworking it means changing
+behaviour something may already depend on — which makes these the costliest
+per item, not the cheapest.
+
+| Component | Now | Target |
+|---|---|---|
+| body structure | **8%** — TL;DR 12/433 · Provenance 91/433 · Cross-References 0/433 | all three on every page |
+| model stamp ⚙️ | **94%** — 2176 of 2303 chunks | universal, plus a startup guard |
+| frontmatter contract | **98%** — 425/433 carry a fence | full `SCHEMA.md` conformance |
+| `verify-vault` | **50%** — lints; address resolution still wired at `:153` | lint only |
+| `verify-groundedness` | runs, judges page-prose vs `rag_fetch` raw context | answer vs cited page |
+| `references.py` | parses bibliographies out of documents (V2 job) | populate `sources:` from fetched URLs |
+| `check` | runs 4 stages including `addresses` | 3 stages |
+| 3 eval scripts | measure a side engine | measure the production path |
+| `fetch` → `search` + `read` | replacements built; `fetch` never withdrawn | one surface, not two |
+
+**The cost order is the reverse of the percentage order.** A 0% PAPER item is a
+sentence. A 0% WIRED item is a command. A 50% PARTIAL item is a rework plus its
+blast radius. Percentage measures distance travelled, not distance remaining.
 
 ---
 
@@ -27,8 +99,8 @@ Nothing here is read from a report; every number has a command behind it.
 
 | Component | Verdict | Status | Evidence |
 |---|---|---|---|
-| frontmatter contract → `SCHEMA.md` | 🟨 | **98%** | 425 of 433 pages open with a frontmatter fence. Full per-field conformance not separately measured. |
-| body structure → TL;DR / Provenance / Cross-References | 🟨 | **8%** | TL;DR 12/433 · Provenance 91/433 · **Cross-References 0/433** |
+| frontmatter contract → `SCHEMA.md` | 🟨 | **◐ PARTIAL · 98%** | 425 of 433 pages open with a frontmatter fence. Full per-field conformance not separately measured. |
+| body structure → TL;DR / Provenance / Cross-References | 🟨 | **◐ PARTIAL · 8%** | TL;DR 12/433 · Provenance 91/433 · **Cross-References 0/433** |
 | `[[wikilink]]` graph | 🟩 | **works** | 369 of 433 pages carry links; `_WIKILINK_RE` reads the body, not the heading |
 | `gen_index.py` generate ⇒ verify | 🟨 | **100%** | coverage floor enforced at `scripts/gen_index.py:187` |
 | structured `supersedes:` | 🟥 | **DONE · R-clean** | absent from code |
@@ -49,7 +121,7 @@ Nothing here is read from a report; every number has a command behind it.
 | Row-Level Security, 2 roles, INSERT-only audit | 🟩 | **works** | `rag_app_role`, `rag_ingest_role`, 6 policies |
 | parsers: PDF · Markdown/text · CSV/TSV · source · images | 🟩 | **works** | markdown path in service |
 | figure/table extraction | 🟨 | **target met (parked)** | disabled by decision pending D-5; target *is* parked-intact |
-| bibliography lift (`references.py`) | 🟨 | **0%** | still parses bibliographies out of documents; target is populating `sources:` from fetched URLs. Not in the deployed image. |
+| bibliography lift (`references.py`) | 🟨 | **◐ PARTIAL · 0% toward target** | still parses bibliographies out of documents; target is populating `sources:` from fetched URLs. Not in the deployed image. |
 
 ## CLI — 27 commands (should be 23)
 
@@ -64,8 +136,8 @@ Nothing here is read from a report; every number has a command behind it.
 | addressing | `heal` | 🟥 | **R-clean** |
 | addressing | `gate` | 🟥 | **R-clean** |
 | verify | `verify-secrets` | 🟩 | **works** |
-| verify | `verify-vault` | 🟨 | **50%** — lints frontmatter; address resolution still wired at `verify.py:153` |
-| verify | `verify-groundedness` | 🟨 | **0%** — still judges page-prose vs `rag_fetch` raw context (`:524`), not answer vs cited page |
+| verify | `verify-vault` | 🟨 | **◐ PARTIAL · 50%** — lints frontmatter; address resolution still wired at `verify.py:153` |
+| verify | `verify-groundedness` | 🟨 | **◐ PARTIAL · 0% toward target** — still judges page-prose vs `rag_fetch` raw context (`:524`), not answer vs cited page |
 | verify | `check` | 🟨 | **blocked** — `DEFAULT_STAGES` at `verify.py:260` still runs the `addresses` stage |
 | verify | `verify-addresses` | 🟥 | **R-light** |
 | read/search | `read` | 🟩 | **works** |
@@ -79,7 +151,7 @@ Nothing here is read from a report; every number has a command behind it.
 | Component | Verdict | Status | Evidence |
 |---|---|---|---|
 | scout: `rag_fetch` → `wiki_search` + `wiki_read` | 🟨 | **100%** | both registered, authenticated, both auth branches |
-| scout: 📄 empty server description | 🟨 | **0%** | `FastMCP(name, auth=…, mask_error_details=…, lifespan=…)` at `mcp_server.py:120` — still no `instructions=`. The **tools** carry full R-8.5 descriptions; the **server** carries none. |
+| scout: 📄 empty server description | 🟨 | **📄 PAPER · 0%** | `FastMCP(name, auth=…, mask_error_details=…, lifespan=…)` at `mcp_server.py:120` — still no `instructions=`. The **tools** carry full R-8.5 descriptions; the **server** carries none. |
 | snpmemory: `verify` `plan_articles` `compile_plan` `compile_status` | 🟩 | **works** |
 | snp-wiki server, `search_notes`, `list_notes` | 🟥 | **DONE · R-clean** | gone, plus a guard (`export_mcp_config.py:30`) and a namespace test |
 | `read_note` / `write_note` (D-2 transitional) | 🟨 | **100% (retired)** | `wiki_read` is proven; the transitional retention is no longer needed |
@@ -97,10 +169,10 @@ Nothing here is read from a report; every number has a command behind it.
 | Service | Verdict | Status | Evidence |
 |---|---|---|---|
 | postgres · litellm · host-sync · git · postgres-migrate | 🟩 | **running, healthy** | `docker ps` |
-| **sync-job** | 🟩 | **0% — declared, never had a container** ⚙️ ENGINE | `compose:207` carries `restart: unless-stopped`; `docker ps -a` returns nothing. **This is why W-2 is open.** |
+| **sync-job** | 🟩 | **🔌 WIRED · 0% live — declared, never had a container** ⚙️ ENGINE | `compose:207` carries `restart: unless-stopped`; `docker ps -a` returns nothing. **This is why W-2 is open.** |
 | scout — tool surface changes, container does not | 🟨 | **100%** | live tool surface verified from inside the container |
 | basic-memory | 🟥 | **file DONE · runtime R-clean** ⚙️ ENGINE | gone from compose; an **orphan container from 2026-08-18 is still running**, still holding the FastEmbed@384 space |
-| gitea-runner | 🟨 | **0%** | declared, never started |
+| gitea-runner | 🟨 | **🔌 WIRED · 0% live** | declared, never started |
 
 ## Verification chain
 
@@ -119,7 +191,7 @@ Nothing here is read from a report; every number has a command behind it.
 
 | Component | Verdict | Status |
 |---|---|---|
-| `checks.yaml` · `security.yaml` | 🟩 | **present · never executed on any commit** — no runner, so `/data/gitea/actions_log` is empty |
+| `checks.yaml` · `security.yaml` | 🟩 | **🔌 WIRED · never executed on any commit** — no runner, so `/data/gitea/actions_log` is empty |
 | `auto-healer.yaml` | 🟥 | **R-clean** |
 
 ## Tests
@@ -127,14 +199,14 @@ Nothing here is read from a report; every number has a command behind it.
 | Component | Verdict | Status |
 |---|---|---|
 | offline suite | 🟩 | **green — 1387 passed, 29 deselected** |
-| 3 eval scripts → repoint at production path | 🟨 | **0%** — `eval_hard_negatives`, `eval_niah`, `eval_ragas` unchanged. `artifacts/v3/retrieval_quality.py` is a **new fourth**, not a repoint. |
+| 3 eval scripts → repoint at production path | 🟨 | **◐ PARTIAL · 0% toward target** — `eval_hard_negatives`, `eval_niah`, `eval_ragas` unchanged. `artifacts/v3/retrieval_quality.py` is a **new fourth**, not a repoint. |
 | `test_mint` (17) · `test_ci_address_gate` (28) · `test_healer` (16) | 🟥 | **go with their modules — 61 tests** |
 
 ## New components (§8.6) — 8 of 13 built
 
 **Built:** markdown chunking · snippet-bounded payload (40 words) · canonical read envelope + 4 modes · page-level grouping and rerank · per-class rank fusion · degradation path · session dedup (`seen`) · model/dimension stamp **94%** ⚙️ ENGINE *(2176 of 2303 chunks stamped; no startup guard)*
 
-**Absent:** fetch + extract for `sources:` URLs (727 declared URLs, none fetchable) · index inspector · content-addressed source cache · blue-green embedding migration · `read_source` fallback tool
+**📄 PAPER — zero lines of code:** fetch + extract for `sources:` URLs (727 declared URLs, none fetchable) · index inspector · content-addressed source cache · blue-green embedding migration · `read_source` fallback tool
 
 ---
 
@@ -195,18 +267,32 @@ The blueprint anticipated this in one clause — *"`snp-compile-wiki` 🟩 … O
 
 # Summary
 
+**By verdict**
+
 | | Count |
 |---|---|
 | 🟩 keep, working | 21 |
 | 🟩 keep, **not deployed** | 2 — `sync-job`, CI `checks`/`security` |
-| 🟨 rework at 100% | 8 |
-| 🟨 rework in progress | 3 — frontmatter 98% · model stamp 94% · `verify-vault` 50% |
-| 🟨 rework at 0% | 6 — body structure 8% · `references.py` · `verify-groundedness` · `check` · `gitea-runner` · eval scripts · server description |
+| 🟨 rework complete | 8 |
+| 🟨 rework partial | 9 |
 | 🟥 removed already | 6 |
 | 🟥 **R-clean** | 5 |
 | 🟥 **R-light** | 1 |
 | 🟥 **R-heavy** | 1 — `mint`, into the compile pipeline |
 | 🆕 built | 8 of 13 |
+
+**By substance — what actually exists**
+
+| Mark | Count | Cost to resolve |
+|---|---|---|
+| ● REAL | 29 | none |
+| ◐ PARTIAL | 9 | rework + blast radius — **most expensive per item** |
+| 🔌 WIRED, never run | 3 | `docker compose up` |
+| 📄 PAPER, zero lines of code | 7 | build from nothing, or strike from the blueprint |
+
+The two columns disagree, and that is the point. `sync-job` and the index
+inspector both read 0%. One is finished software nobody started; the other is a
+paragraph. `verify-vault` reads 50% and is harder than either.
 
 **Two blueprint corrections.** §8.5 lists `scout/backends/pgvector.py` and `scout/ingest.py` as *retained without change*; this branch changed them by +212/−56 and +17. §8.7's "Retained unchanged: 70%" pie is therefore wrong.
 

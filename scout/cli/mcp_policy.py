@@ -93,6 +93,15 @@ POLICIES: tuple[ToolPolicy, ...] = (
         ),
     ),
     ToolPolicy(
+        "ingest-wiki",
+        Exposure.HIDDEN,
+        reason=(
+            "the same reason as `ingest`, and more so: the sync-job's vault "
+            "watcher indexes the whole vault on every publication, and an "
+            "agent re-running it by hand re-embeds a corpus it does not own"
+        ),
+    ),
+    ToolPolicy(
         "gate",
         Exposure.HIDDEN,
         reason=(

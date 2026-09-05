@@ -273,6 +273,20 @@ class ParseCache:
         self._entries.clear()
 
 
+def embedder_model_stamp(embedder: Embedder) -> str:
+    """Name the vector space an embedder produces, for the chunk `model` stamp.
+
+    Shared with the ingest short-circuit in `wiki_ingest`, which decides whether
+    stored vectors can be reused. If that decision and this stamp were derived
+    differently they could disagree, and the index would quietly end up holding
+    two vector spaces -- the F-2 failure the stamp exists to make impossible.
+    """
+    model = getattr(embedder, "model", None)
+    if isinstance(model, str) and model.strip():
+        return model
+    return type(embedder).__name__
+
+
 async def ingest_document(
     file_path: Path,
     allowed_depts: list[str],
@@ -338,12 +352,7 @@ async def ingest_document(
         if len(emb) != 1024:
             raise EmbeddingError("embedding dimension mismatch during ingestion")
         c.embedding = emb
-        model = getattr(embedder, "model", None)
-        c.metadata["model"] = (
-            model
-            if isinstance(model, str) and model.strip()
-            else type(embedder).__name__
-        )
+        c.metadata["model"] = embedder_model_stamp(embedder)
         c.metadata["dim"] = len(emb)
 
     # 3. Transactional Upsert into PostgreSQL

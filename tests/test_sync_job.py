@@ -971,3 +971,29 @@ async def test_async_main_watches_only_raw_when_wiki_dir_is_absent(
         readiness_path=tmp_path / "ready",
     )
     assert supervised == [tmp_path / "raw"]
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_reports_what_it_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cycle that skipped everything and one that rebuilt everything cost
+    very different amounts; the status line is where that shows."""
+
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
+        return [
+            {"source_uri": "a.md", "status": "ingested_ok"},
+            {"source_uri": "b.md", "status": "unchanged"},
+            {"source_uri": "c.md", "status": "unchanged"},
+        ]
+
+    async def fake_reconcile(wiki_dir: Path, **kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", fake_ingest_wiki)
+    monkeypatch.setattr("scout.sync_job.reconcile_wiki_deletions", fake_reconcile)
+
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+    assert outcome.status == "1 indexed, 2 unchanged, 0 deleted"

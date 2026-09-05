@@ -15,13 +15,18 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 from urllib.parse import unquote
 
 import asyncpg
 
 from scout import vault
+from scout.capabilities import (
+    capability_fingerprint,
+    describe_fingerprint_difference,
+)
 from scout.chunker import ContextualChunker, Embedder, LiteLLMBatchEmbedder
-from scout.ingest import get_pg_connection, ingest_document
+from scout.ingest import embedder_model_stamp, get_pg_connection, ingest_document
 from scout.parsers import ParsedDocument, ParsedSection
 
 WIKI_ALLOWED_DEPARTMENTS = ("redteam", "blueteam", "ai_eng", "infra")
@@ -32,6 +37,11 @@ WIKI_ALLOWED_DEPARTMENTS = ("redteam", "blueteam", "ai_eng", "infra")
 WIKI_CORPUS = "wiki"
 WIKI_TARGET_CHUNK_TOKENS = 350
 WIKI_MAX_CHUNK_CHARS = 1400
+#: Stamped on every chunk so the ingest short-circuit can tell whether stored
+#: chunks were cut under the rules this process would use. Same bytes cut at
+#: different boundaries retrieve differently, and nothing else records it:
+#: `capability_fingerprint` covers the parser, not the chunker.
+WIKI_CHUNK_POLICY = f"chars={WIKI_MAX_CHUNK_CHARS};tokens={WIKI_TARGET_CHUNK_TOKENS}"
 
 _HEADING_LINE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -376,6 +386,7 @@ def prepare_wiki_document(
     metadata = dict(doc.metadata)
     metadata.update(
         {
+            "chunk_policy": WIKI_CHUNK_POLICY,
             "content_hash": content_hash or _content_hash(doc),
             "corpus": WIKI_CORPUS,
             "outline": _outline(doc),
@@ -401,6 +412,109 @@ def prepare_wiki_document(
         sections=[tldr_section, *body_sections],
         metadata=metadata,
     )
+
+
+#: What a previous ingest left behind, per document, for the corpus tier this
+#: module owns. Aggregated rather than per-chunk so that a document whose chunks
+#: disagree -- a half-written upsert -- is visibly inconsistent and is rebuilt
+#: instead of trusted.
+_INDEXED_SIGNATURE_SQL = """
+    SELECT d.source_uri,
+           d.capability_fingerprint,
+           count(*)                                        AS chunks,
+           count(DISTINCT c.metadata->>'content_hash')      AS hashes,
+           max(c.metadata->>'content_hash')                 AS content_hash,
+           count(DISTINCT c.metadata->>'model')             AS models,
+           max(c.metadata->>'model')                        AS model,
+           count(DISTINCT c.metadata->>'chunk_policy')      AS policies,
+           max(c.metadata->>'chunk_policy')                 AS chunk_policy
+    FROM rag_documents d
+    JOIN rag_chunks c ON c.doc_id = d.doc_id
+    WHERE c.metadata->>'corpus' = $1
+    GROUP BY d.source_uri, d.capability_fingerprint;
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexedSignature:
+    """What one document's stored chunks agree on, or fail to agree on.
+
+    The counts exist so that a document whose chunks disagree -- a half-written
+    upsert -- is visibly inconsistent rather than represented by whichever value
+    the aggregate happened to pick.
+    """
+
+    chunks: int
+    hashes: int
+    content_hash: str | None
+    models: int
+    model: str | None
+    policies: int
+    chunk_policy: str | None
+    capability_fingerprint: str | None
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> _IndexedSignature:
+        def text(key: str) -> str | None:
+            value = row[key]
+            return value if isinstance(value, str) else None
+
+        def count(key: str) -> int:
+            value = row[key]
+            return value if isinstance(value, int) else 0
+
+        return cls(
+            chunks=count("chunks"),
+            hashes=count("hashes"),
+            content_hash=text("content_hash"),
+            models=count("models"),
+            model=text("model"),
+            policies=count("policies"),
+            chunk_policy=text("chunk_policy"),
+            capability_fingerprint=text("capability_fingerprint"),
+        )
+
+    def matches(
+        self, *, content_hash: str, model: str, fingerprint: Mapping[str, Any]
+    ) -> bool:
+        """True when stored chunks were built from these bytes, this way.
+
+        Every input that changes what would be written has to be compared, or
+        the short-circuit silently serves stale vectors:
+
+        * `content_hash` -- the page's own bytes.
+        * `model` -- reusing vectors from another model puts two spaces in one
+          index, which is F-2, the failure that justified deleting
+          basic-memory.
+        * `chunk_policy` -- the same bytes cut at different boundaries retrieve
+          differently, and nothing else records the chunker's settings.
+        * `capability_fingerprint` -- a parser revision or a missing extractor
+          changes the sections the chunks are cut from.
+        """
+        if self.chunks == 0:
+            return False
+        if (self.hashes, self.models, self.policies) != (1, 1, 1):
+            return False
+        if self.content_hash != content_hash:
+            return False
+        if self.model != model:
+            return False
+        if self.chunk_policy != WIKI_CHUNK_POLICY:
+            return False
+        if self.capability_fingerprint is None:
+            return False
+        recorded = json.loads(self.capability_fingerprint)
+        if not isinstance(recorded, dict):
+            return False
+        return not describe_fingerprint_difference(recorded, dict(fingerprint))
+
+
+async def _indexed_signatures(
+    conn: asyncpg.Connection,
+) -> dict[str, _IndexedSignature]:
+    """Read back what the index already holds for each vault document."""
+    rows = await conn.fetch(_INDEXED_SIGNATURE_SQL, WIKI_CORPUS)
+    return {str(row["source_uri"]): _IndexedSignature.from_row(row) for row in rows}
 
 
 async def ingest_wiki(
@@ -451,8 +565,37 @@ async def ingest_wiki(
 
     results: list[dict[str, object]] = []
     try:
+        # What the index already holds. A dry run has no connection to ask, so
+        # it reports what a real run would consider rather than what it would
+        # skip.
+        signatures: dict[str, _IndexedSignature] = {}
+        if active_connection is not None:
+            signatures = await _indexed_signatures(active_connection)
+        model_stamp = embedder_model_stamp(selected_embedder)
+        fingerprint = capability_fingerprint()
+
         for page in pages:
             source_hash = hashlib.sha256(page.path.read_bytes()).hexdigest()
+            source_uri = page.path.relative_to(root).as_posix()
+            signature = signatures.get(source_uri)
+            if signature is not None and signature.matches(
+                content_hash=source_hash,
+                model=model_stamp,
+                fingerprint=fingerprint,
+            ):
+                # Nothing about this page or this pipeline has changed, so the
+                # stored chunks are exactly what a rebuild would produce. The
+                # watcher fires on every publication and re-embedding is the
+                # expensive half of a cycle.
+                results.append(
+                    {
+                        "source_uri": source_uri,
+                        "title": page.title,
+                        "chunks_count": signature.chunks,
+                        "status": "unchanged",
+                    }
+                )
+                continue
 
             def prepare(
                 document: ParsedDocument, digest: str = source_hash

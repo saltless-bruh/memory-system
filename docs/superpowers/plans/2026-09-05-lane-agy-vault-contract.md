@@ -51,7 +51,12 @@ Where a page offers nothing to derive from, **add it to the exception report and
 The vault linter currently requires four headings:
 
 ```python
-REQUIRED_HEADINGS = ("TL;DR", "Technical Specifications", "Provenance", "Cross-References")
+REQUIRED_HEADINGS = (
+    "TL;DR",
+    "Technical Specifications",
+    "Provenance",
+    "Cross-References",
+)
 ```
 
 Claude is changing this so that only `TL;DR` and `Cross-References` are required, and `Technical Specifications` / `Provenance` become optional. **Until that lands, every page you fix still fails the linter**, so your work cannot be verified.

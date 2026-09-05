@@ -237,7 +237,7 @@ Each is a closed loop: the module and its only caller are both on the removal li
 DEFAULT_STAGES = (
     ("vault", verify_vault),
     ("secrets", verify_secrets),
-    ("addresses", verify_addresses),   # ← delete this line
+    ("addresses", verify_addresses),  # ← delete this line
     ("groundedness", verify_groundedness),
 )
 ```

@@ -250,6 +250,10 @@ class _RecordingConnection:
     async def transaction(self) -> AsyncIterator[None]:
         yield
 
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        """Nothing is indexed yet, so nothing is skipped."""
+        return []
+
     async def fetchrow(self, query: str, *args: object) -> dict[str, int]:
         assert "ON CONFLICT (source_uri) DO UPDATE" in query
         self.document_writes.append(args)
@@ -408,3 +412,225 @@ async def test_source_uri_does_not_change_when_the_snapshot_does(
     )
 
     assert [r["source_uri"] for r in first] == [r["source_uri"] for r in second]
+
+
+# ── not re-embedding what has not changed ──────────────────────────────────
+
+
+class _CountingEmbedder:
+    """A `_NamedEmbedder` that records how much work it was asked to do."""
+
+    model = "gemini/gemini-embedding-001"
+    dim = 1024
+
+    def __init__(self) -> None:
+        self.embedded: list[str] = []
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        self.embedded.extend(texts)
+        return [[float(index == 0) for index in range(self.dim)] for _ in texts]
+
+
+class _ManifestConnection(_RecordingConnection):
+    """A recording connection that also answers the "what is indexed" query."""
+
+    def __init__(self, manifest: list[dict[str, object]] | None = None) -> None:
+        super().__init__()
+        self.manifest = manifest or []
+        self.manifest_queries = 0
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.manifest_queries += 1
+        return list(self.manifest)
+
+
+def _one_page_vault(
+    tmp_path: Path, body: str = "The page body drives retrieval."
+) -> Path:
+    wiki = tmp_path / "vault"
+    (wiki / "concepts").mkdir(parents=True)
+    (wiki / "concepts" / "indexed-page.md").write_text(
+        "---\ntitle: Indexed Page\ntype: concept\nupdated: 2026-08-28\n---\n\n"
+        f"# Indexed Page\n\n## TL;DR\n\n{body}\n\n## Cross-References\n\n[[other]]\n",
+        encoding="utf-8",
+    )
+    return wiki
+
+
+def _manifest_row(wiki: Path, **overrides: object) -> dict[str, object]:
+    """The manifest row a previous ingest of `_one_page_vault` would have left."""
+    from scout.capabilities import capability_fingerprint
+    from scout.wiki_ingest import WIKI_CHUNK_POLICY
+
+    page = wiki / "concepts" / "indexed-page.md"
+    row: dict[str, object] = {
+        "source_uri": "concepts/indexed-page.md",
+        "capability_fingerprint": json.dumps(capability_fingerprint()),
+        "chunks": 2,
+        "hashes": 1,
+        "content_hash": hashlib.sha256(page.read_bytes()).hexdigest(),
+        "models": 1,
+        "model": "gemini/gemini-embedding-001",
+        "policies": 1,
+        "chunk_policy": WIKI_CHUNK_POLICY,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_page_is_not_re_embedded(tmp_path: Path) -> None:
+    """Every cycle re-embedded the whole vault: 2303 chunks at gateway rates.
+
+    The watcher fires on every publication, so an edit to one page paid to
+    rebuild all 431. Nothing read `content_hash` back, though it has been
+    written on every chunk since leaf-1.2.1.
+    """
+    wiki = _one_page_vault(tmp_path)
+    embedder = _CountingEmbedder()
+    connection = _ManifestConnection([_manifest_row(wiki)])
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, connection),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["unchanged"]
+    assert embedder.embedded == []
+    assert connection.chunk_writes == []
+    assert connection.chunk_deletes == 0
+
+
+@pytest.mark.asyncio
+async def test_an_edited_page_is_re_embedded(tmp_path: Path) -> None:
+    """The control: the short-circuit must not swallow a real edit."""
+    wiki = _one_page_vault(tmp_path)
+    stale = _manifest_row(wiki, content_hash="0" * 64)
+    embedder = _CountingEmbedder()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, _ManifestConnection([stale])),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+    assert embedder.embedded != []
+
+
+@pytest.mark.asyncio
+async def test_a_page_embedded_by_another_model_is_re_embedded(
+    tmp_path: Path,
+) -> None:
+    """Skipping here would leave two vector spaces in one index -- the F-2
+    failure the model stamp exists to prevent."""
+    wiki = _one_page_vault(tmp_path)
+    other = _manifest_row(wiki, model="fastembed/bge-small-en-v1.5")
+    embedder = _CountingEmbedder()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, _ManifestConnection([other])),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+    assert embedder.embedded != []
+
+
+@pytest.mark.asyncio
+async def test_a_page_chunked_under_another_policy_is_re_embedded(
+    tmp_path: Path,
+) -> None:
+    """Same bytes, different chunk boundaries, different retrieval."""
+    wiki = _one_page_vault(tmp_path)
+    embedder = _CountingEmbedder()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(
+            asyncpg.Connection,
+            _ManifestConnection(
+                [_manifest_row(wiki, chunk_policy="chars=800;tokens=200")]
+            ),
+        ),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_whose_parser_has_changed_is_re_embedded(
+    tmp_path: Path,
+) -> None:
+    """A parser revision change means the stored sections are not what this
+    process would produce, which is what `capability_fingerprint` records."""
+    wiki = _one_page_vault(tmp_path)
+    fingerprint = json.dumps({"schema_version": 1, "parser_revision": 1})
+    embedder = _CountingEmbedder()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(
+            asyncpg.Connection,
+            _ManifestConnection(
+                [_manifest_row(wiki, capability_fingerprint=fingerprint)]
+            ),
+        ),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_disagreeing_chunks_is_re_embedded(tmp_path: Path) -> None:
+    """A half-written document must be rebuilt, not trusted."""
+    wiki = _one_page_vault(tmp_path)
+    embedder = _CountingEmbedder()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(
+            asyncpg.Connection, _ManifestConnection([_manifest_row(wiki, hashes=2)])
+        ),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_absent_from_the_index_is_embedded(tmp_path: Path) -> None:
+    wiki = _one_page_vault(tmp_path)
+    embedder = _CountingEmbedder()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, _ManifestConnection([])),
+        embedder=embedder,
+        env={},
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+    assert embedder.embedded != []
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_reports_every_page_and_consults_nothing(
+    tmp_path: Path,
+) -> None:
+    """A dry run has no connection, so it cannot and must not short-circuit."""
+    wiki = _one_page_vault(tmp_path)
+
+    results = await ingest_wiki(wiki, dry_run=True, env={})
+
+    assert [r["status"] for r in results] == ["dry_run_ok"]

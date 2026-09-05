@@ -66,12 +66,24 @@ async def test_wiki_indexer_ingests_then_reconciles(
     """The vault indexer must ingest pages and purge rows for deleted files."""
     calls: list[str] = []
 
-    async def fake_ingest_wiki(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
         calls.append("ingest")
         assert wiki_dir == tmp_path
         return [
-            {"source_uri": "a.md", "title": "A", "chunks_count": 3, "status": "indexed"},
-            {"source_uri": "b.md", "title": "B", "chunks_count": 0, "status": "skipped_no_body"},
+            {
+                "source_uri": "a.md",
+                "title": "A",
+                "chunks_count": 3,
+                "status": "indexed",
+            },
+            {
+                "source_uri": "b.md",
+                "title": "B",
+                "chunks_count": 0,
+                "status": "skipped_no_body",
+            },
         ]
 
     async def fake_reconcile(dir_path: Path, **kwargs: object) -> list[str]:
@@ -592,10 +604,22 @@ def test_ingest_wiki_reports_per_page_outcomes(monkeypatch: pytest.MonkeyPatch) 
     """The command must report what it indexed, not merely exit zero."""
     from scout.cli.commands.wiki import ingest_wiki_command
 
-    async def fake_ingest_wiki(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
         return [
-            {"source_uri": "a.md", "title": "A", "chunks_count": 3, "status": "indexed"},
-            {"source_uri": "b.md", "title": "B", "chunks_count": 0, "status": "skipped_no_body"},
+            {
+                "source_uri": "a.md",
+                "title": "A",
+                "chunks_count": 3,
+                "status": "indexed",
+            },
+            {
+                "source_uri": "b.md",
+                "title": "B",
+                "chunks_count": 0,
+                "status": "skipped_no_body",
+            },
         ]
 
     monkeypatch.setattr("scout.wiki_ingest.ingest_wiki", fake_ingest_wiki)
@@ -803,7 +827,9 @@ async def test_startup_guard_rejects_a_mixed_index() -> None:
             ]
 
     with pytest.raises(RuntimeError, match="unstamped"):
-        await assert_single_embedding_model(Conn(), expected_model="gemini/gemini-embedding-001")
+        await assert_single_embedding_model(
+            Conn(), expected_model="gemini/gemini-embedding-001"
+        )
 
 
 @pytest.mark.asyncio
@@ -816,7 +842,9 @@ async def test_startup_guard_rejects_a_model_the_process_cannot_query_with() -> 
             return [{"model": "some/other-model", "n": 2303}]
 
     with pytest.raises(RuntimeError, match="some/other-model"):
-        await assert_single_embedding_model(Conn(), expected_model="gemini/gemini-embedding-001")
+        await assert_single_embedding_model(
+            Conn(), expected_model="gemini/gemini-embedding-001"
+        )
 
 
 @pytest.mark.asyncio
@@ -827,7 +855,9 @@ async def test_startup_guard_accepts_a_single_matching_model() -> None:
         async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
             return [{"model": "gemini/gemini-embedding-001", "n": 2303}]
 
-    await assert_single_embedding_model(Conn(), expected_model="gemini/gemini-embedding-001")
+    await assert_single_embedding_model(
+        Conn(), expected_model="gemini/gemini-embedding-001"
+    )
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -851,9 +881,7 @@ ORDER BY 2 DESC;
 """
 
 
-async def assert_single_embedding_model(
-    conn: Any, *, expected_model: str
-) -> None:
+async def assert_single_embedding_model(conn: Any, *, expected_model: str) -> None:
     """Refuse to serve an index built by more than one embedding model.
 
     Cross-space retrieval is the F-2 failure: a query embedded at 1024

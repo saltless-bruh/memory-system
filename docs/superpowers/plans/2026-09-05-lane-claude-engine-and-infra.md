@@ -70,8 +70,13 @@ def test_a_page_with_every_optional_section_still_lints() -> None:
     from scout.vault import _headings_are_ordered
 
     assert _headings_are_ordered(
-        ("TL;DR", "Technical Specifications", "Provenance", "Works Cited",
-         "Cross-References")
+        (
+            "TL;DR",
+            "Technical Specifications",
+            "Provenance",
+            "Works Cited",
+            "Cross-References",
+        )
     )
 
 

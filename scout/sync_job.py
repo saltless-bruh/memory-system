@@ -247,9 +247,16 @@ class WikiIndexer:
         # "ingested_ok" is the status `ingest_document` returns on a successful
         # upsert. Counting any other token here reports zero for every cycle.
         indexed = sum(1 for r in results if r.get("status") == "ingested_ok")
+        # Reported separately rather than folded into `indexed`: a cycle that
+        # skipped everything and a cycle that rebuilt everything cost very
+        # different amounts, and the log line is where an operator sees which
+        # one happened.
+        unchanged = sum(1 for r in results if r.get("status") == "unchanged")
         return IndexOutcome(
             ok=True,
-            status=f"{indexed} indexed, {len(deleted)} deleted",
+            status=(
+                f"{indexed} indexed, {unchanged} unchanged, {len(deleted)} deleted"
+            ),
         )
 
 

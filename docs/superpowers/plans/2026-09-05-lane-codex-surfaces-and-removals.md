@@ -95,11 +95,23 @@ def test_ingest_wiki_reports_per_page_outcomes(monkeypatch: pytest.MonkeyPatch) 
     """The command must report what it indexed, not merely exit zero."""
     from scout.cli.commands.wiki import ingest_wiki_command
 
-    async def fake_ingest_wiki(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
         assert kwargs.get("dry_run") is True
         return [
-            {"source_uri": "a.md", "title": "A", "chunks_count": 3, "status": "indexed"},
-            {"source_uri": "b.md", "title": "B", "chunks_count": 0, "status": "skipped_no_body"},
+            {
+                "source_uri": "a.md",
+                "title": "A",
+                "chunks_count": 3,
+                "status": "indexed",
+            },
+            {
+                "source_uri": "b.md",
+                "title": "B",
+                "chunks_count": 0,
+                "status": "skipped_no_body",
+            },
         ]
 
     monkeypatch.setattr("scout.wiki_ingest.ingest_wiki", fake_ingest_wiki)
@@ -113,6 +125,7 @@ def test_ingest_wiki_reports_per_page_outcomes(monkeypatch: pytest.MonkeyPatch) 
 def test_ingest_wiki_is_a_declared_shipped_command() -> None:
     """A command absent from the manifest is not a shipped surface."""
     import re, pathlib
+
     src = pathlib.Path("scout/cli/declarations.py").read_text()
     assert '"ingest-wiki"' in src
     assert "scout.cli.commands.wiki:ingest_wiki_command" in src
@@ -349,6 +362,7 @@ def test_check_no_longer_runs_address_verification() -> None:
 
 def test_verify_addresses_is_no_longer_a_shipped_command() -> None:
     import pathlib
+
     src = pathlib.Path("scout/cli/declarations.py").read_text()
     assert '"verify-addresses"' not in src
 ```
@@ -427,7 +441,7 @@ def test_scout_server_describes_itself_and_its_retrieval_order() -> None:
     server = build_server(_a_backend(), auth_config=_static_auth_config())
     text = (server.instructions or "").lower()
     assert "wiki_search" in text and "wiki_read" in text
-    assert "untrusted" in text          # R-8.5 must survive at server level
+    assert "untrusted" in text  # R-8.5 must survive at server level
 ```
 
 Build `_a_backend()` and `_static_auth_config()` the way the existing tests in that file already do — reuse their helpers rather than inventing new ones.

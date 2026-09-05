@@ -202,6 +202,14 @@ def test_build_server_wires_native_auth_provider() -> None:
     assert server.auth is config.provider
 
 
+def test_scout_server_describes_itself_and_its_retrieval_order() -> None:
+    """A client listing servers must learn what this one is for."""
+    server = build_server(RecordingBackend(), auth_config=_development_config())
+    text = (server.instructions or "").lower()
+    assert "wiki_search" in text and "wiki_read" in text
+    assert "untrusted" in text
+
+
 @pytest.mark.parametrize("protected", [False, True])
 async def test_both_auth_branches_register_only_v3_tools(protected: bool) -> None:
     if protected:

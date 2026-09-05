@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import urllib.error
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from email.message import Message
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx
 import pytest
@@ -19,8 +22,11 @@ from scout.sync_job import (
     PgVectorDirectIndexer,
     RagIndexer,
     SyncFailure,
+    WikiIndexer,
+    _aggregate_readiness,
     _async_main,
     _is_transient,
+    _supervise,
     sync_once,
     watch,
 )
@@ -271,8 +277,11 @@ async def test_watch_with_raw_dir_uses_the_file_watch_adapter(
     """raw_dir (no explicit stream) routes through the watchfiles adapter."""
     seen: dict[str, Any] = {}
 
-    def fake_awatch(raw_dir: Any, stop: Any) -> AsyncIterator[object]:
+    def fake_awatch(
+        raw_dir: Any, stop: Any, *, recursive: bool = True
+    ) -> AsyncIterator[object]:
         seen["raw_dir"] = raw_dir
+        seen["recursive"] = recursive
         return _batches(2)
 
     monkeypatch.setattr("scout.sync_job._awatch_raw", fake_awatch)
@@ -280,6 +289,7 @@ async def test_watch_with_raw_dir_uses_the_file_watch_adapter(
     handled = await watch(indexer, raw_dir=Path("raw"))
     assert handled == 2 and indexer.calls == 2
     assert seen["raw_dir"] == Path("raw")
+    assert seen["recursive"] is True
 
 
 async def test_watch_initial_sync_triggers_reindex_before_changes() -> None:
@@ -333,6 +343,7 @@ async def test_async_main_executes_cold_start_sync(
         raw_dir: Any = None,
         stop: Any = None,
         initial_sync: bool = False,
+        recursive: bool = True,
     ) -> int:
         order.append(f"watch(initial_sync={initial_sync})")
         return 1
@@ -365,7 +376,9 @@ async def test_async_main_clears_readiness_on_watched_failure(
     marker = tmp_path / "ready"
 
     async def failing_watch(*args: object, **kwargs: object) -> int:
-        assert marker.exists()
+        # Each watcher publishes its own marker; the service-level one is the
+        # conjunction of them, maintained separately by `_aggregate_readiness`.
+        assert marker.with_name(f"{marker.name}.raw").exists()
         raise SyncFailure("watched synchronization failed")
 
     monkeypatch.setattr("scout.sync_job.watch", failing_watch)
@@ -491,10 +504,14 @@ async def test_a_retryable_watched_failure_is_retried_not_fatal(
     delays: list[float] = []
     watches: list[int] = []
 
+    raw_marker = marker.with_name(f"{marker.name}.raw")
+
     async def flaky_watch(*args: object, **kwargs: object) -> int:
         watches.append(1)
         if len(watches) == 1:
-            assert marker.exists()
+            # This watcher's own marker; the service-level one is the
+            # conjunction of every watcher's, maintained separately.
+            assert raw_marker.exists()
             raise SyncFailure("watched synchronization failed", retryable=True)
         return 0
 
@@ -631,3 +648,326 @@ def test_a_successful_index_clears_the_cache(tmp_path: Path) -> None:
 
     assert outcome.ok
     assert cache._entries == {}, "a successful cycle must not retain parses"
+
+
+# ── WikiIndexer: the vault at the existing RagIndexer seam ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_ingests_then_reconciles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The vault indexer must ingest pages and purge rows for deleted files."""
+    calls: list[str] = []
+
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
+        calls.append("ingest")
+        assert wiki_dir == tmp_path
+        # These are the statuses the real pipeline emits -- `ingest_document`
+        # returns "ingested_ok", and `ingest_wiki` returns "skipped_no_body"
+        # for a page it cannot read a body from.
+        return [
+            {"source_uri": "a.md", "chunks_count": 3, "status": "ingested_ok"},
+            {"source_uri": "b.md", "chunks_count": 0, "status": "skipped_no_body"},
+        ]
+
+    async def fake_reconcile(wiki_dir: Path, **kwargs: object) -> list[str]:
+        calls.append("reconcile")
+        return ["gone.md"]
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", fake_ingest_wiki)
+    monkeypatch.setattr("scout.sync_job.reconcile_wiki_deletions", fake_reconcile)
+
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+
+    assert outcome.ok is True
+    # Ingest must precede reconciliation: reconciling first would delete rows
+    # for pages this very cycle is about to re-add.
+    assert calls == ["ingest", "reconcile"]
+    assert "1 indexed" in outcome.status
+    assert "1 deleted" in outcome.status
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_counts_the_status_the_pipeline_actually_emits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A count keyed to a status nothing emits reports zero forever."""
+    from scout import ingest as ingest_module
+
+    source = Path(ingest_module.__file__).read_text(encoding="utf-8")
+    assert '"status": "ingested_ok"' in source
+
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
+        return [{"source_uri": f"p{i}.md", "status": "ingested_ok"} for i in range(4)]
+
+    async def fake_reconcile(wiki_dir: Path, **kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", fake_ingest_wiki)
+    monkeypatch.setattr("scout.sync_job.reconcile_wiki_deletions", fake_reconcile)
+
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+    assert "4 indexed" in outcome.status
+
+
+def test_wiki_indexer_is_a_rag_indexer() -> None:
+    assert isinstance(WikiIndexer(wiki_dir=Path("wiki")), RagIndexer)
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_reports_a_transient_fault_as_retryable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dependency outage must be retryable, not fatal (the 238-restart lesson)."""
+
+    async def boom(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+        raise urllib.error.HTTPError(
+            url="https://gateway.invalid/embeddings",
+            code=503,
+            msg="synthetic",
+            hdrs=Message(),
+            fp=None,
+        )
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", boom)
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+    assert outcome.ok is False
+    assert outcome.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_reports_a_config_fault_as_permanent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A missing vault is a configuration fault; waiting cannot fix it."""
+
+    async def boom(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+        raise FileNotFoundError("no such vault")
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", boom)
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+    assert outcome.ok is False
+    assert outcome.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_does_not_reconcile_after_a_failed_ingest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Purging after a failed rebuild empties the corpus it could not rebuild."""
+    reconciled: list[str] = []
+
+    async def boom(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+        raise OSError("connection refused")
+
+    async def fake_reconcile(wiki_dir: Path, **kwargs: object) -> list[str]:
+        reconciled.append("ran")
+        return []
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", boom)
+    monkeypatch.setattr("scout.sync_job.reconcile_wiki_deletions", fake_reconcile)
+
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+    assert outcome.ok is False
+    assert reconciled == []
+
+
+# ── two watchers, isolated failures ────────────────────────────────────────
+
+
+class _StopSupervision(Exception):
+    """Ends a supervision loop inside a test without killing the process."""
+
+
+@pytest.mark.asyncio
+async def test_one_watcher_failing_does_not_stop_the_other(tmp_path: Path) -> None:
+    """A vault fault must not stall raw ingest, nor the reverse.
+
+    Both corpora are independent; coupling their failures would mean one bad
+    page in the vault silently stops the raw pipeline the compile tools read.
+    """
+    raw_marker = tmp_path / "raw.ready"
+    wiki_marker = tmp_path / "wiki.ready"
+
+    class AlwaysFails:
+        async def index(self) -> IndexOutcome:
+            return IndexOutcome(ok=False, status="down", retryable=True)
+
+    healthy = FakeIndexer()
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+        if len(slept) >= 2:
+            raise _StopSupervision
+
+    async def forever_watch(*args: object, **kwargs: object) -> int:
+        await asyncio.Event().wait()
+        return 0
+
+    with (
+        mock.patch("scout.sync_job.watch", forever_watch),
+        contextlib.suppress(_StopSupervision),
+    ):
+        await asyncio.gather(
+            _supervise(AlwaysFails(), tmp_path, wiki_marker, sleep=fake_sleep),
+            _supervise(healthy, tmp_path, raw_marker, sleep=fake_sleep),
+        )
+
+    # The healthy watcher reached readiness even though its sibling never did.
+    assert raw_marker.exists()
+    assert not wiki_marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_async_main_supervises_both_corpora_when_wiki_dir_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    supervised: list[Path] = []
+
+    async def fake_supervise(
+        indexer: object, source_dir: Path, marker: Path, **kwargs: object
+    ) -> None:
+        supervised.append(source_dir)
+
+    async def no_aggregate(marker: Path, children: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("scout.sync_job._supervise", fake_supervise)
+    monkeypatch.setattr("scout.sync_job._aggregate_readiness", no_aggregate)
+    await _async_main(
+        FakeIndexer(),
+        raw_dir=tmp_path / "raw",
+        wiki_dir=tmp_path / "wiki",
+        readiness_path=tmp_path / "ready",
+    )
+    assert supervised == [tmp_path / "raw", tmp_path / "wiki"]
+
+
+@pytest.mark.asyncio
+async def test_the_vault_watcher_follows_the_publication_pointer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The replica publishes by swapping a symlink, not by editing pages.
+
+    `host-sync` materialises `snapshots/<commit>/` and then atomically retargets
+    `current`. An inotify watch on `current/wiki` is bound to the *old*
+    snapshot's inode and receives nothing -- measured: 0 batches through a full
+    republish. The directory holding the pointer does see it, so the vault
+    watcher must watch that instead, and non-recursively, or every file of every
+    materialised snapshot re-triggers the whole corpus.
+    """
+    watched: list[tuple[Path, bool]] = []
+
+    async def fake_supervise(
+        indexer: object,
+        source_dir: Path,
+        marker: Path,
+        *,
+        recursive: bool = True,
+        **kwargs: object,
+    ) -> None:
+        watched.append((source_dir, recursive))
+
+    async def no_aggregate(marker: Path, children: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("scout.sync_job._supervise", fake_supervise)
+    monkeypatch.setattr("scout.sync_job._aggregate_readiness", no_aggregate)
+    await _async_main(
+        FakeIndexer(),
+        raw_dir=tmp_path / "raw",
+        wiki_dir=tmp_path / "replica" / "current" / "wiki",
+        wiki_watch_dir=tmp_path / "replica",
+        readiness_path=tmp_path / "ready",
+    )
+    assert watched == [
+        (tmp_path / "raw", True),
+        (tmp_path / "replica", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_vault_indexer_still_reads_through_the_pointer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Watching the pointer must not change *what* gets indexed."""
+    built: list[Path] = []
+
+    async def fake_supervise(
+        indexer: object, source_dir: Path, marker: Path, **kwargs: object
+    ) -> None:
+        if isinstance(indexer, WikiIndexer):
+            built.append(indexer.wiki_dir)
+
+    async def no_aggregate(marker: Path, children: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("scout.sync_job._supervise", fake_supervise)
+    monkeypatch.setattr("scout.sync_job._aggregate_readiness", no_aggregate)
+    wiki = tmp_path / "replica" / "current" / "wiki"
+    await _async_main(
+        FakeIndexer(),
+        raw_dir=tmp_path / "raw",
+        wiki_dir=wiki,
+        wiki_watch_dir=tmp_path / "replica",
+        readiness_path=tmp_path / "ready",
+    )
+    assert built == [wiki]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_readiness_is_the_conjunction_of_its_watchers(
+    tmp_path: Path,
+) -> None:
+    """A half-working sync must report unhealthy, not ready."""
+    marker = tmp_path / "ready"
+    raw = tmp_path / "ready.raw"
+    wiki = tmp_path / "ready.wiki"
+    raw.write_text("1", encoding="utf-8")  # raw ready, wiki not
+    ticks = 0
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 1:
+            assert not marker.exists()  # not ready while wiki is missing
+            wiki.write_text("1", encoding="utf-8")  # both ready on the next pass
+        elif ticks >= 2:
+            raise _StopSupervision
+
+    with contextlib.suppress(_StopSupervision):
+        await _aggregate_readiness(marker, [raw, wiki], sleep=fake_sleep)
+
+    assert marker.exists()  # set only once BOTH children were ready
+
+
+@pytest.mark.asyncio
+async def test_async_main_watches_only_raw_when_wiki_dir_is_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """WIKI_DIR unset must behave exactly as before this change."""
+    supervised: list[Path] = []
+
+    async def fake_supervise(
+        indexer: object, source_dir: Path, marker: Path, **kwargs: object
+    ) -> None:
+        supervised.append(source_dir)
+
+    async def no_aggregate(marker: Path, children: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("scout.sync_job._supervise", fake_supervise)
+    monkeypatch.setattr("scout.sync_job._aggregate_readiness", no_aggregate)
+    await _async_main(
+        FakeIndexer(),
+        raw_dir=tmp_path / "raw",
+        wiki_dir=None,
+        readiness_path=tmp_path / "ready",
+    )
+    assert supervised == [tmp_path / "raw"]

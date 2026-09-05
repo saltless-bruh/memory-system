@@ -24,13 +24,15 @@ import asyncio
 import os
 import sys
 import urllib.error
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import asyncpg
 import httpx
+
+from scout.wiki_ingest import ingest_wiki, reconcile_wiki_deletions
 
 if TYPE_CHECKING:
     from scout.chunker import LiteLLMBatchEmbedder
@@ -202,6 +204,55 @@ class PgVectorDirectIndexer:
             )
 
 
+@dataclass(slots=True)
+class WikiIndexer:
+    """`RagIndexer` that ingests the knowledge vault into PostgreSQL.
+
+    Unlike `PgVectorDirectIndexer` there is no ACL map: vault pages carry all
+    four canonical departments (`WIKI_ALLOWED_DEPARTMENTS`), because the corpus
+    has no editorial `department:` field to derive one from and inventing one
+    would be fabricated metadata.
+
+    Ingest runs before reconciliation, and reconciliation is skipped entirely
+    when ingest fails. Either reversal empties the served corpus: reconciling
+    first deletes rows for pages this cycle is about to re-add, and reconciling
+    after a failure deletes rows for a corpus this process has just said it
+    could not rebuild.
+
+    Attributes:
+        wiki_dir: The vault root to index.
+        embedder: Optional injected embedder; `ingest_wiki` builds one otherwise.
+    """
+
+    wiki_dir: Path = Path("wiki")
+    embedder: LiteLLMBatchEmbedder | None = None
+
+    async def index(self) -> IndexOutcome:
+        """Ingest every page, then purge rows whose file is gone."""
+        try:
+            results = await ingest_wiki(self.wiki_dir, embedder=self.embedder)
+            deleted = await reconcile_wiki_deletions(self.wiki_dir)
+        except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
+            # A vault that is absent or unreadable is a configuration fault.
+            # Waiting cannot fix it, so it must not be retried forever.
+            return IndexOutcome(
+                ok=False, status=f"vault unreadable: {exc}", retryable=False
+            )
+        except Exception as exc:  # noqa: BLE001 - classified, then re-reported
+            return IndexOutcome(
+                ok=False,
+                status=f"vault ingest failed: {type(exc).__name__}: {exc}",
+                retryable=_is_transient(exc),
+            )
+        # "ingested_ok" is the status `ingest_document` returns on a successful
+        # upsert. Counting any other token here reports zero for every cycle.
+        indexed = sum(1 for r in results if r.get("status") == "ingested_ok")
+        return IndexOutcome(
+            ok=True,
+            status=f"{indexed} indexed, {len(deleted)} deleted",
+        )
+
+
 def _is_transient(exc: BaseException) -> bool:
     """Classify only transport/database connectivity failures for retry."""
     current: BaseException | None = exc
@@ -273,6 +324,7 @@ async def watch(
     raw_dir: Path | None = None,
     stop: object | None = None,
     initial_sync: bool = False,
+    recursive: bool = True,
 ) -> int:
     """Reindex once per change batch until the stream ends (R-6.1).
 
@@ -285,6 +337,9 @@ async def watch(
         stop: Optional stop event forwarded to the filesystem watcher so the
             loop can be shut down cleanly.
         initial_sync: When True, runs an initial sync before awaiting changes.
+        recursive: Whether the filesystem watch descends into subdirectories.
+            False is for a directory that holds a *publication pointer* rather
+            than the corpus itself -- see `_supervise`.
 
     Returns:
         The number of change batches handled (useful for tests; a live watch
@@ -296,7 +351,7 @@ async def watch(
     if changes is None:
         if raw_dir is None:
             raise ValueError("watch() needs either `changes` or `raw_dir`")
-        changes = _awatch_raw(raw_dir, stop)
+        changes = _awatch_raw(raw_dir, stop, recursive=recursive)
 
     handled = 0
     if initial_sync:
@@ -318,12 +373,12 @@ async def watch(
 
 
 def _awatch_raw(  # pragma: no cover - thin watchfiles adapter
-    raw_dir: Path, stop: object | None
+    raw_dir: Path, stop: object | None, *, recursive: bool = True
 ) -> AsyncIterator[object]:
     """Yield change batches for `raw_dir` via watchfiles (debounced)."""
     from watchfiles import awatch
 
-    return awatch(raw_dir, stop_event=stop)
+    return awatch(raw_dir, stop_event=stop, recursive=recursive)
 
 
 def _set_readiness(path: Path, ready: bool) -> None:
@@ -343,18 +398,40 @@ COLD_START_BASE_DELAY = 5.0
 COLD_START_MAX_DELAY = 300.0
 
 
-async def _async_main(
+class _PermanentSyncFailure(Exception):
+    """A fault no amount of waiting can fix; the process must exit.
+
+    Raised instead of `SystemExit` because a supervisor runs inside a Task, and
+    `SystemExit` raised in a Task is re-raised into the event loop rather than
+    delivered to whoever is awaiting it -- it tears down the loop instead of the
+    service. `_async_main` translates this into the `SystemExit(1)` the process
+    entry point expects.
+    """
+
+
+async def _supervise(
     indexer: RagIndexer,
-    raw_dir: Path,
-    readiness_path: Path | None = None,
+    source_dir: Path,
+    readiness_path: Path,
     *,
+    recursive: bool = True,
     base_delay: float = COLD_START_BASE_DELAY,
     max_delay: float = COLD_START_MAX_DELAY,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
-    """Index `raw_dir`, then watch it, surviving a dependency outage.
+    """Index this watcher's corpus, then watch `source_dir`, surviving an outage.
 
-    Exiting on a transient failure looks like the disciplined thing to do —
+    `source_dir` is what is *watched*; the corpus that is *indexed* is whatever
+    `indexer` was configured with. Those are the same directory for `raw/`, and
+    deliberately different for the vault: `host-sync` publishes by materialising
+    `snapshots/<commit>/` and atomically retargeting a `current` symlink, so an
+    inotify watch on `current/wiki` is bound to the previous snapshot's inode
+    and sees nothing at all through a republish (measured: 0 batches). The
+    directory that holds the pointer does see it, which is why that directory is
+    watched, and why it is watched with `recursive=False` -- recursing would
+    re-trigger on every file of every snapshot as it materialises.
+
+    Exiting on a transient failure looks like the disciplined thing to do --
     crash, let the orchestrator restart. It is not, here. Docker's restart
     backoff resets once a container survives 10 seconds, and this container
     always does (a DNS timeout alone takes longer), so the backoff never
@@ -364,20 +441,19 @@ async def _async_main(
     because every restart reset its start period.
 
     So the wait lives here instead. While a retryable failure persists the
-    process stays up with readiness **cleared**, which is what lets the health
-    check say `unhealthy` — alive and honestly reporting failure, rather than
-    absent. A permanent failure (a corpus whose ACL policy cannot be read) still
-    exits immediately: waiting cannot fix a configuration fault.
+    watcher stays up with its readiness marker **cleared**, which is what lets
+    the health check say `unhealthy` -- alive and honestly reporting failure,
+    rather than absent. A permanent failure (a corpus whose ACL policy cannot be
+    read, a vault directory that does not exist) still exits immediately:
+    waiting cannot fix a configuration fault, and a crash-looping container is
+    the signal an operator needs to see.
 
     The attempt counter is never reset within a process lifetime. Resetting it
     on a successful cycle is exactly the mistake Docker makes, and it is how a
     slow failure loop reappears; the cost is that a later, unrelated blip waits
     at the ceiling rather than at `base_delay`.
     """
-    marker = readiness_path or Path(
-        os.environ.get("SYNC_READY_FILE", "/tmp/snp-sync-job/ready")
-    )
-    _set_readiness(marker, False)
+    _set_readiness(readiness_path, False)
     attempt = 0
 
     async def back_off(reason: str) -> None:
@@ -385,8 +461,8 @@ async def _async_main(
         delay = min(max_delay, base_delay * (2**attempt))
         attempt += 1
         print(
-            f"[sync-job] {reason}; dependency looks transient, retrying in {delay:.0f}s "
-            f"(attempt {attempt}, readiness cleared)",
+            f"[sync-job] {source_dir}: {reason}; dependency looks transient, "
+            f"retrying in {delay:.0f}s (attempt {attempt}, readiness cleared)",
             file=sys.stderr,
         )
         await sleep(delay)
@@ -396,24 +472,136 @@ async def _async_main(
         if not outcome.ok:
             if not outcome.retryable:
                 print(
-                    f"[sync-job] FATAL: Initial cold-start sync failed: {outcome.status}",
+                    f"[sync-job] FATAL: {source_dir}: cold-start sync failed: "
+                    f"{outcome.status}",
                     file=sys.stderr,
                 )
-                raise SystemExit(1)
+                raise _PermanentSyncFailure(str(source_dir))
             await back_off(f"cold-start sync failed: {outcome.status}")
             continue
 
-        _set_readiness(marker, True)
+        _set_readiness(readiness_path, True)
         try:
-            await watch(indexer, raw_dir=raw_dir, initial_sync=False)
+            await watch(
+                indexer,
+                raw_dir=source_dir,
+                initial_sync=False,
+                recursive=recursive,
+            )
         except SyncFailure as exc:
-            _set_readiness(marker, False)
+            _set_readiness(readiness_path, False)
             if not exc.retryable:
-                print("[sync-job] FATAL: watched sync failed", file=sys.stderr)
-                raise SystemExit(1) from exc
+                print(
+                    f"[sync-job] FATAL: {source_dir}: watched sync failed",
+                    file=sys.stderr,
+                )
+                raise _PermanentSyncFailure(str(source_dir)) from exc
             await back_off(f"watched sync failed: {exc}")
             continue
         return
+
+
+async def _aggregate_readiness(
+    marker: Path,
+    children: Sequence[Path],
+    *,
+    interval: float = 2.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Hold the service-level marker at the conjunction of its watchers.
+
+    The health check reads one path. A half-working sync -- vault indexing, raw
+    stalled -- must report unhealthy, so the marker is set only while *every*
+    configured watcher is ready, and cleared the moment one is not.
+
+    This cannot be done after `asyncio.gather` returns: in a live run no
+    supervisor ever returns, because `watch()` runs until the process stops.
+    """
+    while True:
+        _set_readiness(marker, all(child.exists() for child in children))
+        await sleep(interval)
+
+
+async def _async_main(
+    indexer: RagIndexer,
+    raw_dir: Path,
+    readiness_path: Path | None = None,
+    *,
+    wiki_dir: Path | None = None,
+    wiki_watch_dir: Path | None = None,
+    wiki_indexer: RagIndexer | None = None,
+    base_delay: float = COLD_START_BASE_DELAY,
+    max_delay: float = COLD_START_MAX_DELAY,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Supervise the raw watcher, and the vault watcher when one is configured.
+
+    The two corpora fail independently. A vault page that cannot be embedded
+    must not stall raw ingest, which the compile pipeline reads, and a raw
+    outage must not stop the vault reaching the index -- that second direction
+    is W-2, the loop the whole retrieval inversion rests on.
+
+    `wiki_watch_dir` names the directory whose changes *signal* a new vault
+    publication, when that is not the vault directory itself. Setting it selects
+    a non-recursive watch, because such a directory holds a pointer rather than
+    a corpus.
+
+    Readiness is the conjunction: the service is ready only when every
+    configured watcher has completed a cycle, so a half-working sync reports
+    unhealthy rather than ready.
+    """
+    marker = readiness_path or Path(
+        os.environ.get("SYNC_READY_FILE", "/tmp/snp-sync-job/ready")
+    )
+    # The service is not ready until a watcher says so, and this must not wait
+    # on the aggregator's first tick: a permanent cold-start failure exits
+    # before that tick would ever run.
+    _set_readiness(marker, False)
+
+    markers = [marker.with_name(f"{marker.name}.raw")]
+    supervisors = [
+        _supervise(
+            indexer,
+            raw_dir,
+            markers[0],
+            base_delay=base_delay,
+            max_delay=max_delay,
+            sleep=sleep,
+        )
+    ]
+    if wiki_dir is not None:
+        markers.append(marker.with_name(f"{marker.name}.wiki"))
+        supervisors.append(
+            _supervise(
+                wiki_indexer or WikiIndexer(wiki_dir=wiki_dir),
+                wiki_watch_dir or wiki_dir,
+                markers[1],
+                recursive=wiki_watch_dir is None,
+                base_delay=base_delay,
+                max_delay=max_delay,
+                sleep=sleep,
+            )
+        )
+    watchers = [asyncio.ensure_future(coroutine) for coroutine in supervisors]
+    # The aggregator keeps its own clock. `sleep` is the *backoff* clock a
+    # caller injects to script retry timing, and feeding a polling loop from it
+    # would both distort those timings and never terminate.
+    aggregator = asyncio.ensure_future(_aggregate_readiness(marker, markers))
+    try:
+        await asyncio.gather(*watchers)
+    except _PermanentSyncFailure as exc:
+        raise SystemExit(1) from exc
+    finally:
+        # In a live run no watcher ever returns, so this only runs on shutdown
+        # or on a permanent failure -- where the siblings must not be left
+        # running against a service that is on its way out.
+        for pending in (*watchers, aggregator):
+            pending.cancel()
+        await asyncio.gather(*watchers, aggregator, return_exceptions=True)
+        # The aggregator polls, so its last observation may predate the
+        # watchers' final state. Recompute once here so the marker a health
+        # check reads is never left describing a moment that has passed.
+        _set_readiness(marker, all(child.exists() for child in markers))
 
 
 def main() -> int:  # pragma: no cover - process entry point
@@ -436,7 +624,19 @@ def main() -> int:  # pragma: no cover - process entry point
     else:
         indexer = HttpRagIndexer(base_url=os.environ.get("RAG_URL", "http://rag:8000"))
         print(f"[sync-job] watching {raw_dir} -> {indexer.base_url}/index (Nhịp A)")
-    asyncio.run(_async_main(indexer, raw_dir))
+    configured_wiki = os.environ.get("WIKI_DIR", "").strip()
+    wiki_dir = Path(configured_wiki) if configured_wiki else None
+    configured_watch = os.environ.get("WIKI_WATCH_DIR", "").strip()
+    wiki_watch_dir = Path(configured_watch) if configured_watch else None
+    if wiki_dir is not None:
+        watched = wiki_watch_dir or wiki_dir
+        print(
+            f"[sync-job] also watching {watched} -> PostgreSQL pgvector "
+            f"(vault at {wiki_dir})"
+        )
+    asyncio.run(
+        _async_main(indexer, raw_dir, wiki_dir=wiki_dir, wiki_watch_dir=wiki_watch_dir)
+    )
     return 0
 
 

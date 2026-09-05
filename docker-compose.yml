@@ -224,8 +224,19 @@ services:
       # nothing rather than publishing everything as the public `all` ACL.
       RAW_ACL_FILE: ${RAW_ACL_FILE:-/data/raw/.acl.yaml}
       SYNC_READY_FILE: /tmp/snp-sync-job/ready
+      # The vault the second watcher indexes. `current` is a symlink host-sync
+      # retargets atomically on every publication.
+      WIKI_DIR: /vault-replica/current/wiki
+      # ...and the directory that is *watched*, which is deliberately not the
+      # same path. inotify binds to the inode behind `current`, so a watch on
+      # the vault itself is left holding the previous snapshot and sees nothing
+      # through a republish (measured: 0 change batches). The directory holding
+      # the pointer does see it, and is watched non-recursively so materialising
+      # a snapshot does not re-trigger the whole corpus.
+      WIKI_WATCH_DIR: /vault-replica
     volumes:
       - ./raw:/data/raw:ro           # watch raw/ ONLY, read-only (R-3.1)
+      - vault-replica:/vault-replica:ro   # the vault, read-only, as scout has it
     secrets:
       - postgres_ingest_password
     depends_on:

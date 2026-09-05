@@ -1,5 +1,7 @@
 # V3 Component Disposition — Measured Status
 
+> **DOMAIN REFERENCE, NOT SNP DEPLOYMENT AUTHORITY** — a measured status snapshot. The deployed contract remains the code and `AGENTS.md`.
+
 **Supersedes the status glyphs in** `Technical_Blueprint_V3_Reworked_Architecture.md` §8.2.
 **Measured:** 2026-09-04 / 2026-09-05, against the live stack and the 433-page served corpus.
 Nothing here is read from a report; every number has a command behind it.

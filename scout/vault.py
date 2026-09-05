@@ -47,27 +47,39 @@ REQUIRED_TREE = (
 _FM_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _SENTENCE_TERMINATOR_RE = re.compile(r"[.!?](?=\s|$)")
+#: Headings every page **must** carry, in this order. Only headings a page can
+#: honestly supply from its own material are required: `TL;DR` summarises the
+#: page's own text, and `Cross-References` gathers links the body already holds.
+#: `Technical Specifications` and `Provenance` are optional for the same reason
+#: `Works Cited` is — a concept page has no specifications, and Provenance is a
+#: dated sourcing changelog that cannot be written retroactively without
+#: inventing the dates. Requiring either would make fabrication the only route
+#: to a green lint.
 REQUIRED_HEADINGS = (
     "TL;DR",
-    "Technical Specifications",
-    "Provenance",
     "Cross-References",
 )
 
-#: Headings a page **may** carry, at a fixed position, without being required
-#: to. `Works Cited` (T4.2) lists the works the page's own source passages cite.
-#: It is optional rather than required so that pages compiled before it existed
-#: stay valid — making it mandatory would fail every page already in the vault
-#: and turn a new feature into a vault-wide lint error.
-OPTIONAL_HEADINGS: dict[str, str] = {"Works Cited": "Cross-References"}
+#: Headings a page **may** carry, each at a fixed position immediately before
+#: the required heading it is anchored to. Several may stack before the same
+#: anchor; they are emitted in this dict's order, so this mapping defines the
+#: canonical sequence between `TL;DR` and `Cross-References`. `Works Cited`
+#: (T4.2) lists the works the page's own source passages cite.
+OPTIONAL_HEADINGS: dict[str, str] = {
+    "Technical Specifications": "Cross-References",
+    "Provenance": "Cross-References",
+    "Works Cited": "Cross-References",
+}
 
 
 def _headings_are_ordered(actual: tuple[str, ...]) -> bool:
     """True when `actual` is the required sequence, optionally interleaved.
 
-    An optional heading may appear at most once, and only immediately before
-    the required heading it is anchored to — so the order stays a contract
-    rather than a suggestion.
+    Every optional heading present in `actual` is expected in front of the
+    required heading it is anchored to, in `OPTIONAL_HEADINGS` order — so
+    several may stack before the same anchor, but an optional that appears
+    twice, or ahead of a different anchor, breaks the sequence. The order stays
+    a contract rather than a suggestion.
     """
     expected: list[str] = []
     for heading in REQUIRED_HEADINGS:

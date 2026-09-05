@@ -244,7 +244,7 @@ def test_related_frontmatter_is_forbidden(tmp_path: Path, raw_dir: Path) -> None
 @pytest.mark.parametrize(
     "body",
     [
-        VALID_BODY.replace("## Provenance\n", ""),
+        VALID_BODY.replace("## TL;DR\n", ""),
         VALID_BODY + "\n## Provenance\n\nDuplicate.\n",
         VALID_BODY.replace(
             "## Technical Specifications\n\nTechnical detail.\n\n## Provenance",
@@ -384,3 +384,57 @@ def test_a_duplicated_section_is_still_an_error() -> None:
             "Cross-References",
         )
     )
+
+
+# ── H2: only headings a page can honestly supply are required ──────────────
+
+
+def test_only_derivable_headings_are_required() -> None:
+    """Provenance is dated sourcing; requiring it would require inventing it."""
+    from scout.vault import OPTIONAL_HEADINGS, REQUIRED_HEADINGS
+
+    assert REQUIRED_HEADINGS == ("TL;DR", "Cross-References")
+    assert "Provenance" in OPTIONAL_HEADINGS
+    assert "Technical Specifications" in OPTIONAL_HEADINGS
+
+
+def test_a_page_with_every_optional_section_still_lints() -> None:
+    """Three optionals anchored to one required heading must all be accepted."""
+    from scout.vault import _headings_are_ordered
+
+    assert _headings_are_ordered(
+        (
+            "TL;DR",
+            "Technical Specifications",
+            "Provenance",
+            "Works Cited",
+            "Cross-References",
+        )
+    )
+
+
+def test_a_minimal_page_lints() -> None:
+    from scout.vault import _headings_are_ordered
+
+    assert _headings_are_ordered(("TL;DR", "Cross-References"))
+
+
+def test_order_is_still_a_contract_not_a_suggestion() -> None:
+    from scout.vault import _headings_are_ordered
+
+    assert not _headings_are_ordered(("Cross-References", "TL;DR"))
+    assert not _headings_are_ordered(("TL;DR", "Cross-References", "Provenance"))
+
+
+def test_a_page_without_the_unauthorable_sections_lints_clean(
+    tmp_path: Path, raw_dir: Path
+) -> None:
+    """The whole point of H2: a page with only derivable sections is valid.
+
+    Technical Specifications is on 0 of 432 vault pages and Provenance on 91.
+    A page carrying neither must pass the heading check.
+    """
+    page = _page(tmp_path)
+    page.body = "## TL;DR\n\nDense summary.\n\n## Cross-References\n\n[[other-page]]\n"
+
+    assert not any("section headings" in error for error in _errors(page, raw_dir))

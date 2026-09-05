@@ -421,11 +421,33 @@ async def ingest_document(
             await conn.close()
 
 
+#: Selects the documents belonging to one corpus tier. A document qualifies
+#: only when **every** chunk it owns carries the tier's `corpus` stamp, so a
+#: document is never claimed by two tiers and a cross-tier purge is impossible.
+#: `$1` is the stamp: `'wiki'` for the vault, SQL `NULL` for the untiered raw
+#: corpus, which is written without a `corpus` key at all.
+_CORPUS_TIER_SQL = """
+    SELECT d.doc_id, d.source_uri
+    FROM rag_documents d
+    WHERE EXISTS (
+            SELECT 1 FROM rag_chunks c
+            WHERE c.doc_id = d.doc_id
+              AND c.metadata->>'corpus' IS NOT DISTINCT FROM $1::text
+          )
+      AND NOT EXISTS (
+            SELECT 1 FROM rag_chunks c
+            WHERE c.doc_id = d.doc_id
+              AND c.metadata->>'corpus' IS DISTINCT FROM $1::text
+          );
+"""
+
+
 async def reconcile_deletions(
     dir_path: Path,
     conn: asyncpg.Connection | None = None,
     dry_run: bool = False,
     acl: DocumentAclMap | None = None,
+    corpus: str | None = None,
 ) -> list[str]:
     """Finds and deletes database documents no longer part of the authorized corpus.
 
@@ -433,6 +455,14 @@ async def reconcile_deletions(
     governs the tree — when the file is still present but no longer matches any
     rule. Revoking a rule must actually revoke access, so a stale row from an
     earlier, broader policy is purged rather than left readable.
+
+    `corpus` scopes the sweep to one tier and defaults to the untiered raw
+    corpus. Without it this function claimed every row whose `source_uri`
+    happened to start with the watched directory's name, and the vault has its
+    own top-level `raw/` folder: reconciling the repository's `raw/` flagged
+    **101 vault pages** for deletion because no file backed them *there*. The
+    two corpora share one flat `source_uri` namespace, so directory name alone
+    cannot say who owns a row; the corpus stamp can.
     """
     close_conn = False
     if conn is None:
@@ -441,7 +471,7 @@ async def reconcile_deletions(
 
     deleted_uris: list[str] = []
     try:
-        rows = await conn.fetch("SELECT doc_id, source_uri FROM rag_documents;")
+        rows = await conn.fetch(_CORPUS_TIER_SQL, corpus)
         dir_path_resolved = dir_path.resolve()  # noqa: ASYNC240
         base_parent = dir_path_resolved.parent
         dir_name = dir_path_resolved.name
@@ -736,7 +766,14 @@ async def ingest_directory(
 
             if reconcile and conn is not None:
                 deleted = await reconcile_deletions(
-                    dir_path=dir_path, conn=conn, dry_run=dry_run, acl=acl
+                    dir_path=dir_path,
+                    conn=conn,
+                    dry_run=dry_run,
+                    acl=acl,
+                    # This pipeline never stamps a corpus, so the rows it owns
+                    # are the untiered ones. Naming the tier explicitly keeps a
+                    # raw sweep off vault rows that share the `raw/` prefix.
+                    corpus=None,
                 )
                 for d in deleted:
                     results.append({"source_uri": d, "status": "purged_deleted"})

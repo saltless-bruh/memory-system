@@ -25,6 +25,11 @@ from scout.ingest import get_pg_connection, ingest_document
 from scout.parsers import ParsedDocument, ParsedSection
 
 WIKI_ALLOWED_DEPARTMENTS = ("redteam", "blueteam", "ai_eng", "infra")
+#: The corpus tier stamped on every chunk this module writes. It is the only
+#: thing that distinguishes a vault row from a raw-corpus row: both live in one
+#: flat `source_uri` namespace and the vault has its own top-level `raw/`
+#: folder, so the path prefix cannot say who owns a row.
+WIKI_CORPUS = "wiki"
 WIKI_TARGET_CHUNK_TOKENS = 350
 WIKI_MAX_CHUNK_CHARS = 1400
 
@@ -372,7 +377,7 @@ def prepare_wiki_document(
     metadata.update(
         {
             "content_hash": content_hash or _content_hash(doc),
-            "corpus": "wiki",
+            "corpus": WIKI_CORPUS,
             "outline": _outline(doc),
             "tldr": tldr,
             "tldr_source": tldr_source,
@@ -411,9 +416,16 @@ async def ingest_wiki(
     Excludes control documents (index.md, log.md) from chunk ingestion, though they
     remain readable through wiki_read for direct queries.
     """
-    # Resolve wiki_dir to absolute path to match vault.load_pages behavior
+    # Resolve wiki_dir to absolute path to match vault.load_pages behavior.
+    # `root` is then the only vault path used from here on. It has to be: the
+    # replica publishes through `current -> snapshots/<commit>`, so the
+    # configured `wiki_dir` is a path *through* a symlink while `load_pages`
+    # returns resolved page paths. `Path.is_relative_to` is lexical, so an
+    # unresolved base is never a prefix of them and `parse_file` falls back to
+    # storing each page's absolute snapshot path as its `source_uri` -- an
+    # identity that changes on every push.
     root = wiki_dir.resolve()  # noqa: ASYNC240
-    pages = vault.load_pages(wiki_dir)
+    pages = vault.load_pages(root)
     # Exclude control documents from chunk ingestion (index.md is already excluded
     # by vault.load_pages, but log.md is authored and must stay readable for wiki_read).
     # Match against the root-level control document only, not any file with that name.
@@ -458,7 +470,7 @@ async def ingest_wiki(
                     conn=active_connection,
                     chunker=chunker,
                     embedder=selected_embedder,
-                    base_dir=wiki_dir,
+                    base_dir=root,
                     dry_run=dry_run,
                     document_transform=prepare,
                 )
@@ -470,7 +482,7 @@ async def ingest_wiki(
                 # vocabulary for sources that yield no text.
                 results.append(
                     {
-                        "source_uri": str(page.path.relative_to(wiki_dir)),
+                        "source_uri": str(page.path.relative_to(root)),
                         "title": page.title,
                         "chunks_count": 0,
                         "status": "skipped_no_body",
@@ -483,3 +495,59 @@ async def ingest_wiki(
         if owns_connection and active_connection is not None:
             await active_connection.close()
     return results
+
+
+async def reconcile_wiki_deletions(
+    wiki_dir: Path,
+    *,
+    conn: asyncpg.Connection | None = None,
+    dry_run: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Purge index rows for vault pages whose file is gone from `wiki_dir`.
+
+    `ingest.reconcile_deletions` cannot do this job. It scopes a sweep by the
+    watched directory's own *name*, expecting every row it owns to carry that
+    name as a `source_uri` prefix. Vault rows carry no prefix at all —
+    `ingest_wiki` passes `base_dir=wiki_dir`, so a page is stored as
+    `Entities/OpenMontage.md`, not `wiki/Entities/OpenMontage.md`. Pointed at
+    the vault, that function matches nothing and reports a clean sweep it never
+    performed.
+
+    Scoping here is by corpus tier: a candidate is a document every chunk of
+    which is stamped `corpus = WIKI_CORPUS`, and its file is looked for at
+    `wiki_dir / source_uri`. The raw corpus is never stamped, so a vault sweep
+    cannot reach it.
+
+    Returns the `source_uri` of every purged document, in sorted order.
+    """
+    from scout.ingest import _CORPUS_TIER_SQL
+
+    root = wiki_dir.resolve()  # noqa: ASYNC240
+    active = conn
+    owns_connection = conn is None
+    if active is None:
+        active = await get_pg_connection(env)
+    deleted: list[str] = []
+    try:
+        on_disk = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")  # noqa: ASYNC240
+            if path.is_file()
+        }
+        rows = await active.fetch(_CORPUS_TIER_SQL, WIKI_CORPUS)
+        for row in rows:
+            uri = str(row["source_uri"])
+            if uri in on_disk or (root / uri).exists():
+                continue
+            deleted.append(uri)
+            if not dry_run:
+                async with active.transaction():
+                    await active.execute(
+                        "DELETE FROM rag_documents WHERE doc_id = $1;",
+                        row["doc_id"],
+                    )
+    finally:
+        if owns_connection and active is not None:
+            await active.close()
+    return sorted(deleted)

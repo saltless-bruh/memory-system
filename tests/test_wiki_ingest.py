@@ -358,3 +358,53 @@ Prose about [[retained-link]] stays searchable.
         row["wikilinks"] == ["metadata-only-link", "retained-link"]
         for row in metadata_rows
     )
+
+
+# ── the replica publishes through a symlink ────────────────────────────────
+
+
+def _snapshot_vault(root: Path, commit: str = "deadbeef") -> Path:
+    """Build the replica's real shape: immutable snapshot + `current` symlink."""
+    snapshot = root / "snapshots" / commit / "wiki"
+    (snapshot / "concepts").mkdir(parents=True)
+    (snapshot / "concepts" / "alpha.md").write_text(
+        "---\ntitle: Alpha\ntype: concept\n---\n\n"
+        "## TL;DR\n\nAlpha is a worked example.\n\n"
+        "## Cross-References\n\n[[beta]]\n",
+        encoding="utf-8",
+    )
+    (root / "current").symlink_to(Path("snapshots") / commit, target_is_directory=True)
+    return root / "current" / "wiki"
+
+
+@pytest.mark.asyncio
+async def test_source_uri_is_relative_to_the_vault_even_behind_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """`host-sync` publishes `current -> snapshots/<commit>`, so WIKI_DIR is a
+    path *through* a symlink. `vault.load_pages` returns resolved page paths, so
+    a `base_dir` left unresolved is never a lexical prefix of them and every
+    page is stored under its absolute snapshot path instead. That identity
+    changes on every push: the corpus is duplicated, none of it is readable by
+    `wiki_read`, and the whole vault is re-embedded each time.
+    """
+    wiki_dir = _snapshot_vault(tmp_path)
+
+    results = await ingest_wiki(wiki_dir, dry_run=True, env={})
+
+    assert [r["source_uri"] for r in results] == ["concepts/alpha.md"]
+
+
+@pytest.mark.asyncio
+async def test_source_uri_does_not_change_when_the_snapshot_does(
+    tmp_path: Path,
+) -> None:
+    """A second push must update rows, not create a parallel corpus."""
+    first = await ingest_wiki(
+        _snapshot_vault(tmp_path / "a", "c1"), dry_run=True, env={}
+    )
+    second = await ingest_wiki(
+        _snapshot_vault(tmp_path / "b", "c2"), dry_run=True, env={}
+    )
+
+    assert [r["source_uri"] for r in first] == [r["source_uri"] for r in second]

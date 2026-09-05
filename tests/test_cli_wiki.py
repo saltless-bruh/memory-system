@@ -400,3 +400,44 @@ def test_cli_search_engine_is_built_on_the_wiki_tier(tmp_path: Path) -> None:
     ):
         _build_search_engine(cfg, _vault(tmp_path))
     assert constructed.call_args.kwargs.get("corpus") == "wiki"
+
+
+def test_ingest_wiki_reports_per_page_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command must report what it indexed, not merely exit zero."""
+    from scout.cli.commands.wiki import ingest_wiki_command
+
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
+        assert wiki_dir == Path("wiki")
+        assert kwargs.get("dry_run") is True
+        return [
+            {
+                "source_uri": "a.md",
+                "title": "A",
+                "chunks_count": 3,
+                "status": "indexed",
+            },
+            {
+                "source_uri": "b.md",
+                "title": "B",
+                "chunks_count": 0,
+                "status": "skipped_no_body",
+            },
+        ]
+
+    monkeypatch.setattr("scout.wiki_ingest.ingest_wiki", fake_ingest_wiki)
+    result = ingest_wiki_command(dir="wiki", dry_run=True)
+
+    assert result.data["pages"] == 2
+    assert result.data["indexed"] == 1
+    assert result.data["skipped"] == 1
+
+
+def test_ingest_wiki_is_a_declared_shipped_command() -> None:
+    """A command absent from the manifest is not a shipped surface."""
+    source = Path("scout/cli/declarations.py").read_text()
+    assert '"ingest-wiki"' in source
+    assert "scout.cli.commands.wiki:ingest_wiki_command" in source

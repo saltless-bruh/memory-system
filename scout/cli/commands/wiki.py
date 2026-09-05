@@ -271,3 +271,29 @@ def search(
             config=config,
         )
     )
+
+
+def ingest_wiki_command(
+    *,
+    dir: str = "wiki",  # noqa: A002 - matches the `ingest` command's flag name
+    dry_run: bool = False,
+    config: Injected = None,
+) -> CommandResult:
+    """Index every vault page into pgvector under the wiki corpus tier."""
+    import asyncio
+
+    from scout.wiki_ingest import ingest_wiki
+
+    del config
+    results = asyncio.run(ingest_wiki(Path(dir), dry_run=dry_run))
+    indexed = sum(1 for result in results if result.get("status") == "indexed")
+    skipped = len(results) - indexed
+    return CommandResult(
+        data={
+            "pages": len(results),
+            "indexed": indexed,
+            "skipped": skipped,
+            "results": results,
+        },
+        summary=f"{indexed} pages indexed, {skipped} skipped from {dir}",
+    )

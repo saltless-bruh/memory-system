@@ -553,6 +553,35 @@ command(
     ),
 )
 command(
+    "ingest-wiki",
+    "Index every vault page into pgvector under the wiki corpus tier.",
+    "scout.cli.commands.wiki:ingest_wiki_command",
+    effect=Effect.WRITE,
+    args=(
+        ArgSpec(
+            "--dir",
+            "path",
+            default="wiki",
+            description="Vault directory to index.",
+        ),
+        ArgSpec(
+            "--dry-run",
+            "boolean",
+            default=False,
+            description="Parse and report; write nothing.",
+        ),
+    ),
+    outcomes=_SEMANTIC,
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
+    example=("--dir", "wiki", "--dry-run", "-o", "json"),
+    output_fields=(
+        FieldSpec("pages", "integer"),
+        FieldSpec("indexed", "integer"),
+        FieldSpec("skipped", "integer"),
+        FieldSpec("results", "array", items=FieldSpec("result", "object")),
+    ),
+)
+command(
     "gate",
     "Run the closed-loop address gate.",
     "scout.cli.commands.ci:gate",

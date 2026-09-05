@@ -211,6 +211,7 @@ engine and canonical envelope.*
 | `snpmemory compile-plan <plan> --confirm [--background] [--dry-run] [--no-resume] [--allow-uncertain]` | compile every article in an approved plan; writes nothing unless all pass | `1` an article cannot mint or ground · `5` no `--confirm` |
 | `snpmemory propose --page` | PR-first commit | `7` pre-staged work |
 | `snpmemory ingest --path │ --dir` | index into pgvector | |
+| `snpmemory ingest-wiki [--dir] [--dry-run]` | index every vault page into the wiki corpus tier | `2` database or embedding route unavailable |
 | `snpmemory extract --path │ --dir` | figures + tables → `derived/` | `3` path outside `raw/` |
 | `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started / failed / cancelled |
 | `snpmemory compile-cancel <handle>` | ask a running batch to stop at its next article boundary | `3` unknown handle |

@@ -10,4 +10,6 @@ fastmcp==3.3.1      # scout.serve — agent-facing MCP server (rag_fetch; pinned
 watchfiles>=0.21    # scout.sync_job — raw/ file-watch (Nhịp A, T-3.2)
 asyncpg>=0.29.0     # scout.backends.pgvector — Postgres 16 async client
 pypdf>=4.0.0        # scout.parsers — PDF document extraction
+pdfplumber>=0.11    # scout.pdf_structure — table geometry; probed by capability_fingerprint
+pillow>=10.0.0      # scout.parsers — figure extraction; probed by capability_fingerprint
 pyyaml>=6.0         # scout.parsers — YAML frontmatter parsing

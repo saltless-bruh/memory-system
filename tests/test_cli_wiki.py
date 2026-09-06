@@ -341,11 +341,6 @@ def test_shared_embedder_accepts_configured_v1_root_without_rewriting(
 
     seen: dict[str, object] = {}
 
-    class CapturingEmbedder(FakeEmbedder):
-        def __init__(self, **kwargs: object) -> None:
-            super().__init__()
-            seen.update(kwargs)
-
     class CapturingBackend(RecordingBackend):
         def __init__(self, **kwargs: object) -> None:
             super().__init__()
@@ -359,20 +354,24 @@ def test_shared_embedder_accepts_configured_v1_root_without_rewriting(
         password="secret",
     )
     monkeypatch.setattr(config, "postgres_settings", lambda *_a, **_k: settings)
-    monkeypatch.setattr(chunker, "LiteLLMBatchEmbedder", CapturingEmbedder)
     monkeypatch.setattr(pgvector, "PgVectorRlsBackend", CapturingBackend)
+    monkeypatch.delenv("SCOUT_EMBED_MODEL", raising=False)
 
-    engine = _build_search_engine(
-        _config(
-            tmp_path,
-            LITELLM_BASE_URL="http://gateway:4000/v1",
-            LITELLM_MASTER_KEY="token",
-            LITELLM_EMBED_MODEL="pinned-model-001",
-        ),
-        _vault(tmp_path),
+    cfg = _config(
+        tmp_path,
+        LITELLM_BASE_URL="http://gateway:4000/v1",
+        LITELLM_MASTER_KEY="token",
+        LITELLM_EMBED_MODEL="pinned-model-001",
     )
-    assert seen["base_url"] == "http://gateway:4000/v1"
-    assert seen["model"] == "pinned-model-001"
+    engine = _build_search_engine(cfg, _vault(tmp_path))
+
+    backend = seen["backend"]
+    assert isinstance(backend, dict)
+    embedder = backend["embedder"]
+    assert isinstance(embedder, chunker.LiteLLMBatchEmbedder)
+    assert embedder.base_url == "http://gateway:4000/v1"
+    assert embedder.api_key == "token"
+    assert embedder.model == chunker.configured_embedding_model(cfg.values)
     assert engine.rag_backend is not None
 
 

@@ -82,7 +82,6 @@ def _build_search_engine(cfg: Config, wiki_dir: Path) -> ScoutDiyEngine:
         # Missing/unreachable embeddings are intentionally handled by the
         # backend's sparse degradation arm; they are not configuration failure.
         api_key=cfg.get("LITELLM_MASTER_KEY"),
-        model=cfg.get("LITELLM_EMBED_MODEL"),
     )
     backend = PgVectorRlsBackend(
         host=settings.host,

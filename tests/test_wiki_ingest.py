@@ -634,3 +634,53 @@ async def test_a_dry_run_reports_every_page_and_consults_nothing(
     results = await ingest_wiki(wiki, dry_run=True, env={})
 
     assert [r["status"] for r in results] == ["dry_run_ok"]
+
+
+# ── control documents must not survive in the index ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_purges_control_documents(tmp_path: Path) -> None:
+    """`ingest_wiki` refuses to chunk index.md and log.md; the index must agree.
+
+    Measured on the live corpus: `log.md` held 208 chunks, 9.6% of everything
+    searchable, left behind by an ingest that predates the exclusion. Seven of
+    them matched one of the benchmark questions, so a changelog was competing
+    with the page that actually answers it. The file is on disk, so a
+    missing-file sweep never touches it.
+    """
+    purged: list[object] = []
+
+    class _Connection:
+        @asynccontextmanager
+        async def transaction(self) -> AsyncIterator[None]:
+            yield
+
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            return [
+                {"source_uri": "log.md", "doc_id": 1},
+                {"source_uri": "index.md", "doc_id": 2},
+                {"source_uri": "concepts/real-page.md", "doc_id": 3},
+                {"source_uri": "concepts/deleted.md", "doc_id": 4},
+            ]
+
+        async def execute(self, query: str, *args: object) -> str:
+            assert query.startswith("DELETE FROM rag_documents")
+            purged.append(args[0])
+            return "DELETE 1"
+
+    from scout.wiki_ingest import reconcile_wiki_deletions
+
+    wiki = tmp_path / "vault"
+    (wiki / "concepts").mkdir(parents=True)
+    for name in ("log.md", "index.md"):
+        (wiki / name).write_text("# control\n", encoding="utf-8")
+    (wiki / "concepts" / "real-page.md").write_text("# real\n", encoding="utf-8")
+
+    deleted = await reconcile_wiki_deletions(
+        wiki, conn=cast(asyncpg.Connection, _Connection())
+    )
+
+    assert deleted == ["concepts/deleted.md", "index.md", "log.md"]
+    assert "concepts/real-page.md" not in deleted
+    assert purged == [1, 2, 4]

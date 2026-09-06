@@ -528,14 +528,45 @@ def _scanned_uri(file_path: Path, base_dir: Path) -> str:
     return str(file_path)
 
 
+#: The fingerprint of every document in one corpus tier under one path prefix.
+#: The tier predicate is not optional: the two corpora share one flat
+#: `source_uri` namespace and the vault has its own top-level `raw/` folder, so
+#: a prefix match alone answers this question with 101 rows belonging to the
+#: other corpus.
+_TIER_FINGERPRINT_SQL = """
+    SELECT d.source_uri, d.capability_fingerprint
+    FROM rag_documents d
+    WHERE d.capability_fingerprint IS NOT NULL
+      AND d.source_uri LIKE $1
+      AND EXISTS (
+            SELECT 1 FROM rag_chunks c
+            WHERE c.doc_id = d.doc_id
+              AND c.metadata->>'corpus' IS NOT DISTINCT FROM $2::text
+          )
+      AND NOT EXISTS (
+            SELECT 1 FROM rag_chunks c
+            WHERE c.doc_id = d.doc_id
+              AND c.metadata->>'corpus' IS DISTINCT FROM $2::text
+          );
+"""
+
+
 async def corpus_fingerprint_mismatch(
-    conn: asyncpg.Connection, dir_path: Path, base_dir: Path
+    conn: asyncpg.Connection,
+    dir_path: Path,
+    base_dir: Path,
+    corpus: str | None = None,
 ) -> str:
     """Describe how this process differs from what the corpus was built with.
 
     Returns `""` when they agree **or when nothing recorded one** — a corpus
     indexed before fingerprints existed must not be un-ingestable, or an upgrade
     bricks a working deployment.
+
+    `corpus` scopes the question to one tier, and defaults to the untiered raw
+    corpus. Without it, checking `raw/` reported a difference against a vault
+    page: the vault's own `raw/articles/` pages carry the same prefix, were
+    ingested by a different process, and are not this pipeline's to reproduce.
     """
     from scout.capabilities import (
         capability_fingerprint,
@@ -543,11 +574,7 @@ async def corpus_fingerprint_mismatch(
     )
 
     prefix = _scanned_uri(dir_path, base_dir)
-    rows = await conn.fetch(
-        "SELECT source_uri, capability_fingerprint FROM rag_documents "
-        "WHERE capability_fingerprint IS NOT NULL AND source_uri LIKE $1;",
-        f"{prefix}%",
-    )
+    rows = await conn.fetch(_TIER_FINGERPRINT_SQL, f"{prefix}%", corpus)
     if not rows:
         return ""
 
@@ -718,7 +745,12 @@ async def ingest_directory(
             # this specific difference*, so it cannot be evaluated before the
             # difference is known.
             mismatch = await corpus_fingerprint_mismatch(
-                conn, dir_path, dir_path.parent
+                # This pipeline stamps no corpus, so the rows it must be able
+                # to reproduce are the untiered ones.
+                conn,
+                dir_path,
+                dir_path.parent,
+                corpus=None,
             )
             if mismatch and not allow_capability_change:
                 # Strict refusal, not a compatibility matrix. Silent churn is

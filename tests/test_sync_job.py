@@ -26,6 +26,7 @@ from scout.sync_job import (
     _aggregate_readiness,
     _async_main,
     _is_transient,
+    _PermanentSyncFailure,
     _supervise,
     sync_once,
     watch,
@@ -997,3 +998,72 @@ async def test_wiki_indexer_reports_what_it_skipped(
 
     outcome = await WikiIndexer(wiki_dir=tmp_path).index()
     assert outcome.status == "1 indexed, 2 unchanged, 0 deleted"
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_fault_in_one_corpus_leaves_the_other_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The raw corpus can be unbuildable while the vault is perfectly fine.
+
+    Measured on the first real deployment: the raw pipeline refused to start
+    because this image cannot reproduce a PDF-derived corpus, and it took the
+    vault watcher down with it -- nine container restarts, and W-2 never ran.
+    A configuration fault in one corpus is not a reason to stop indexing the
+    other.
+    """
+    marker = tmp_path / "ready"
+    still_running = asyncio.Event()
+
+    async def one_fails_one_runs(
+        indexer: object, source_dir: Path, readiness: Path, **kwargs: object
+    ) -> None:
+        if source_dir.name == "raw":
+            raise _PermanentSyncFailure(str(source_dir))
+        readiness.write_text("ready\n", encoding="utf-8")
+        still_running.set()
+        await asyncio.Event().wait()  # a live watcher never returns
+
+    monkeypatch.setattr("scout.sync_job._supervise", one_fails_one_runs)
+    service = asyncio.ensure_future(
+        _async_main(
+            FakeIndexer(),
+            raw_dir=tmp_path / "raw",
+            wiki_dir=tmp_path / "wiki",
+            readiness_path=marker,
+        )
+    )
+    await asyncio.wait_for(still_running.wait(), timeout=5)
+    # Long enough for a propagating exception to unwind gather, its finally
+    # block and the cancellation of the siblings -- a single sleep(0) is not,
+    # and would let this pass against the very behaviour it exists to catch.
+    await asyncio.sleep(0.1)
+
+    assert not service.done(), "the surviving watcher was cancelled with its sibling"
+    service.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await service
+    # Half a service is not a ready service.
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_process_exits_once_every_watcher_has_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Staying up with nothing left to watch would be a lie to the orchestrator."""
+
+    async def all_fail(
+        indexer: object, source_dir: Path, readiness: Path, **kwargs: object
+    ) -> None:
+        raise _PermanentSyncFailure(str(source_dir))
+
+    monkeypatch.setattr("scout.sync_job._supervise", all_fail)
+    with pytest.raises(SystemExit) as caught:
+        await _async_main(
+            FakeIndexer(),
+            raw_dir=tmp_path / "raw",
+            wiki_dir=tmp_path / "wiki",
+            readiness_path=tmp_path / "ready",
+        )
+    assert caught.value.code == 1

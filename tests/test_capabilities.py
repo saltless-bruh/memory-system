@@ -134,7 +134,9 @@ def test_a_corpus_with_no_recorded_fingerprint_is_not_refused() -> None:
     from scout.ingest import corpus_fingerprint_mismatch
 
     class _Conn:
-        async def fetch(self, _sql: str, _prefix: str) -> list[dict[str, object]]:
+        async def fetch(
+            self, _sql: str, _prefix: str, _corpus: str | None
+        ) -> list[dict[str, object]]:
             return []  # nothing recorded a fingerprint
 
     mismatch = asyncio.run(
@@ -150,7 +152,9 @@ def test_a_differing_environment_is_named_not_merely_flagged() -> None:
     from scout.ingest import corpus_fingerprint_mismatch
 
     class _Conn:
-        async def fetch(self, _sql: str, _prefix: str) -> list[dict[str, object]]:
+        async def fetch(
+            self, _sql: str, _prefix: str, _corpus: str | None
+        ) -> list[dict[str, object]]:
             return [
                 {
                     "source_uri": "raw/papers/x.pdf",
@@ -182,7 +186,9 @@ def test_a_matching_environment_passes() -> None:
     from scout.ingest import corpus_fingerprint_mismatch
 
     class _Conn:
-        async def fetch(self, _sql: str, _prefix: str) -> list[dict[str, object]]:
+        async def fetch(
+            self, _sql: str, _prefix: str, _corpus: str | None
+        ) -> list[dict[str, object]]:
             # Stored as JSON text, the way asyncpg may hand a jsonb column back.
             return [
                 {

@@ -35,6 +35,14 @@ WIKI_ALLOWED_DEPARTMENTS = ("redteam", "blueteam", "ai_eng", "infra")
 #: flat `source_uri` namespace and the vault has its own top-level `raw/`
 #: folder, so the path prefix cannot say who owns a row.
 WIKI_CORPUS = "wiki"
+#: Vault files that are authored for people, not for retrieval. `index.md` is
+#: the hand-written catalogue this module reads descriptions from, and `log.md`
+#: is the vault's changelog: chunking either puts a table of contents and a
+#: diary into the corpus, competing with the pages that actually answer a
+#: question. `load_pages` already drops `index.md`; `ingest_wiki` drops
+#: `log.md`. Reconciliation removes both, because a file that is present on
+#: disk is never reached by a missing-file sweep.
+WIKI_CONTROL_DOCUMENTS = ("index.md", "log.md")
 WIKI_TARGET_CHUNK_TOKENS = 350
 WIKI_MAX_CHUNK_CHARS = 1400
 #: Stamped on every chunk so the ingest short-circuit can tell whether stored
@@ -544,8 +552,8 @@ async def ingest_wiki(
     # by vault.load_pages, but log.md is authored and must stay readable for wiki_read).
     # Match against the root-level control document only, not any file with that name.
     # Use resolved path to match vault.load_pages which returns absolute paths.
-    control_log = root / "log.md"
-    pages = [p for p in pages if p.path != control_log]
+    control_documents = {root / name for name in WIKI_CONTROL_DOCUMENTS}
+    pages = [p for p in pages if p.path not in control_documents]
     catalog = load_index_catalog(root / "index.md")
     settings = os.environ if env is None else env
     selected_embedder = embedder or LiteLLMBatchEmbedder(
@@ -681,7 +689,8 @@ async def reconcile_wiki_deletions(
         rows = await active.fetch(_CORPUS_TIER_SQL, WIKI_CORPUS)
         for row in rows:
             uri = str(row["source_uri"])
-            if uri in on_disk or (root / uri).exists():
+            present = uri in on_disk or (root / uri).exists()
+            if present and uri not in WIKI_CONTROL_DOCUMENTS:
                 continue
             deleted.append(uri)
             if not dry_run:

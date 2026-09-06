@@ -566,6 +566,7 @@ async def _async_main(
     _set_readiness(marker, False)
 
     markers = [marker.with_name(f"{marker.name}.raw")]
+    watched_dirs = [raw_dir]
     supervisors = [
         _supervise(
             indexer,
@@ -578,6 +579,7 @@ async def _async_main(
     ]
     if wiki_dir is not None:
         markers.append(marker.with_name(f"{marker.name}.wiki"))
+        watched_dirs.append(wiki_watch_dir or wiki_dir)
         supervisors.append(
             _supervise(
                 wiki_indexer or WikiIndexer(wiki_dir=wiki_dir),
@@ -589,15 +591,45 @@ async def _async_main(
                 sleep=sleep,
             )
         )
-    watchers = [asyncio.ensure_future(coroutine) for coroutine in supervisors]
+
+    async def watch_corpus(supervisor: Awaitable[None], source: Path) -> bool:
+        """Run one watcher, reporting whether it stopped for good.
+
+        A permanent fault is contained here rather than propagated. The two
+        corpora are independent, and on the first real deployment the raw
+        pipeline refused to start -- this image cannot reproduce a PDF-derived
+        corpus -- and took the vault watcher down with it. Nine container
+        restarts, and the vault never indexed once. The corpus that can be
+        served must keep being served; its sibling's readiness stays cleared,
+        so the service still reports unhealthy rather than pretending.
+        """
+        try:
+            await supervisor
+        except _PermanentSyncFailure:
+            print(
+                f"[sync-job] {source}: stopped permanently; other corpora "
+                f"continue and this service will read unhealthy",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    watchers = [
+        asyncio.ensure_future(watch_corpus(coroutine, source))
+        for coroutine, source in zip(supervisors, watched_dirs, strict=True)
+    ]
     # The aggregator keeps its own clock. `sleep` is the *backoff* clock a
     # caller injects to script retry timing, and feeding a polling loop from it
     # would both distort those timings and never terminate.
     aggregator = asyncio.ensure_future(_aggregate_readiness(marker, markers))
     try:
-        await asyncio.gather(*watchers)
-    except _PermanentSyncFailure as exc:
-        raise SystemExit(1) from exc
+        # In a live run this never returns: a healthy watcher runs until the
+        # process is stopped. Reaching here means every watcher has ended, and
+        # a service with nothing left to watch must not keep reporting itself
+        # alive to the orchestrator.
+        outcomes = await asyncio.gather(*watchers)
+        if not all(outcomes):
+            raise SystemExit(1)
     finally:
         # In a live run no watcher ever returns, so this only runs on shutdown
         # or on a permanent failure -- where the siblings must not be left

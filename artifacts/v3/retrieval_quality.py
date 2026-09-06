@@ -65,12 +65,25 @@ class Outcome:
 
 
 def load_questions(path: Path) -> list[Question]:
+    """Read the measurable questions, leaving the acceptance controls behind.
+
+    The set also carries controls for `checks/engine_acceptance.py` -- an
+    `"absent"` one names a page that deliberately does not exist, to prove that
+    oracle can tell present from absent. Recall is meaningless for it, and the
+    on-disk check below would reject it outright, so it is dropped here rather
+    than measured. An unrecognised control kind is an error and not a silent
+    exclusion, or a typo would quietly shrink the benchmark.
+    """
     raw: Any = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list) or not raw:
         raise SystemExit(f"{path}: expected a non-empty JSON list")
+    unknown = sorted({str(e["control"]) for e in raw if "control" in e} - {"absent"})
+    if unknown:
+        raise SystemExit(f"{path}: unrecognised control kinds: {unknown}")
     questions = [
         Question(lang=str(e["lang"]), query=str(e["query"]), expect=str(e["expect"]))
         for e in raw
+        if "control" not in e
     ]
     missing = [q.expect for q in questions if not (VAULT / q.expect).exists()]
     if missing:

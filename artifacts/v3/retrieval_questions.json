@@ -9,6 +9,16 @@
   {"lang":"en","query":"reducing the number of tokens an agent spends on input and output","expect":"concepts/Agent I/O Token Optimization.md"},
   {"lang":"en","query":"fine tuning a Gemma model with Unsloth on a laptop","expect":"queries/Fine-tuning Gemma 4 with Unsloth on Laptop.md"},
   {"lang":"en","query":"an OCR server that runs on iOS devices","expect":"Entities/iOS-OCR-Server.md"},
+  {"lang":"en","query":"a proxy that gives one OpenAI compatible API across many model providers","expect":"Tools/LiteLLM.md"},
+  {"lang":"en","query":"parsing PDFs with layout coordinates and bounding boxes for retrieval","expect":"Concepts/Open-Source PDF Parser.md"},
+  {"lang":"en","query":"indexing documents as page screenshots instead of extracted text","expect":"Concepts/Pixel-Native Visual RAG.md"},
+  {"lang":"en","query":"giving an agent the meaning of warehouse tables, metrics and joins","expect":"concepts/Semantic Context Layer for AI Agents.md"},
+  {"lang":"en","query":"adapting one backend so several different client protocols can talk to it","expect":"concepts/Protocol Compatibility Middleware.md"},
+  {"lang":"en","query":"header injection vulnerabilities reported in Apache Camel","expect":"Security/apache-camel-cve-2026-33453-40453.md"},
+  {"lang":"en","query":"side by side table of Homeric heroes with their epithets and fates","expect":"comparisons/Greek Heroes of the Trojan War.md"},
+  {"lang":"en","query":"drawing an entity relationship diagram in the browser and exporting SQL","expect":"concepts/Online ERD & SQL Generator.md"},
+  {"lang":"en","query":"an illustrated data structures and algorithms book with runnable code in many languages","expect":"queries/Hello Algo GitHub Analysis.md"},
+  {"lang":"en","query":"turning an Obsidian vault into a red team and bug bounty knowledge base","expect":"Entities/ClaudeBrain.md"},
 
   {"lang":"vi","query":"thư viện điều khiển trình duyệt Chrome tự động","expect":"Entities/Puppeteer.md"},
   {"lang":"vi","query":"máy chủ điều khiển mạng riêng ảo tự host kiểu Tailscale","expect":"Entities/Headscale.md"},
@@ -19,5 +29,17 @@
   {"lang":"vi","query":"cách bảo mật và tăng cường an ninh cho máy chủ Linux","expect":"Entities/How To Secure A Linux Server.md"},
   {"lang":"vi","query":"giảm số lượng token mà agent tiêu tốn khi vào và ra","expect":"concepts/Agent I/O Token Optimization.md"},
   {"lang":"vi","query":"tinh chỉnh mô hình Gemma bằng Unsloth trên laptop","expect":"queries/Fine-tuning Gemma 4 with Unsloth on Laptop.md"},
-  {"lang":"vi","query":"máy chủ nhận dạng ký tự cho thiết bị iOS","expect":"Entities/iOS-OCR-Server.md"}
+  {"lang":"vi","query":"máy chủ nhận dạng ký tự cho thiết bị iOS","expect":"Entities/iOS-OCR-Server.md"},
+  {"lang":"vi","query":"cổng proxy hợp nhất API của nhiều nhà cung cấp mô hình về một chuẩn duy nhất","expect":"Tools/LiteLLM.md"},
+  {"lang":"vi","query":"phân tích tài liệu PDF kèm toạ độ bố cục và khung bao để phục vụ truy hồi","expect":"Concepts/Open-Source PDF Parser.md"},
+  {"lang":"vi","query":"lập chỉ mục tài liệu bằng ảnh chụp trang thay vì trích xuất văn bản","expect":"Concepts/Pixel-Native Visual RAG.md"},
+  {"lang":"vi","query":"lớp ngữ nghĩa mô tả bảng, chỉ số và mối nối dữ liệu cho tác nhân AI","expect":"concepts/Semantic Context Layer for AI Agents.md"},
+  {"lang":"vi","query":"lớp trung gian giúp một backend phục vụ nhiều giao thức client khác nhau","expect":"concepts/Protocol Compatibility Middleware.md"},
+  {"lang":"vi","query":"lỗ hổng tiêm header được báo cáo trong Apache Camel","expect":"Security/apache-camel-cve-2026-33453-40453.md"},
+  {"lang":"vi","query":"bảng so sánh các anh hùng Hy Lạp trong sử thi Homer cùng biệt danh và kết cục","expect":"comparisons/Greek Heroes of the Trojan War.md"},
+  {"lang":"vi","query":"vẽ sơ đồ quan hệ thực thể trên trình duyệt rồi xuất ra câu lệnh SQL","expect":"concepts/Online ERD & SQL Generator.md"},
+  {"lang":"vi","query":"sách minh hoạ về cấu trúc dữ liệu và giải thuật kèm mã chạy được bằng nhiều ngôn ngữ","expect":"queries/Hello Algo GitHub Analysis.md"},
+  {"lang":"vi","query":"biến kho Obsidian thành cơ sở tri thức cho red team và săn lỗi bảo mật","expect":"Entities/ClaudeBrain.md"},
+
+  {"lang":"en","query":"quantum error correction with surface codes on superconducting qubits","expect":"__ABSENT__/no-such-page.md","control":"absent"}
 ]

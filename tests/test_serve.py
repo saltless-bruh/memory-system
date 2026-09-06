@@ -54,9 +54,7 @@ async def test_startup_guard_rejects_a_mixed_index() -> None:
     """Two vector spaces in one index is F-2; it must be fatal, not silent."""
     from scout.serve import assert_single_embedding_model
 
-    conn = _Census(
-        [{"model": "snp-embed", "n": 2176}, {"model": None, "n": 127}]
-    )
+    conn = _Census([{"model": "snp-embed", "n": 2176}, {"model": None, "n": 127}])
     with pytest.raises(RuntimeError, match="unstamped"):
         await assert_single_embedding_model(conn, expected_model="snp-embed")
 

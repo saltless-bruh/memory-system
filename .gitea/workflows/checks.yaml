@@ -1,9 +1,10 @@
 # .gitea/workflows/checks.yaml
 # Offline correctness gate for code and configuration changes.
 #
-# This is the workflow that was missing. `auto-healer.yaml` checks the vault and
-# `security.yaml` scans for secrets; nothing ran the test suite, the linter, the
-# formatter or the type checker on a code or Compose change.
+# This is the workflow that was missing. `security.yaml` scans for secrets, and
+# `auto-healer.yaml` used to check the vault before the auto-heal subsystem was
+# removed; nothing ran the test suite, the linter, the formatter or the type
+# checker on a code or Compose change.
 #
 # **Offline by construction.** No LiteLLM, no PostgreSQL, no judge, no secret.
 # It can only fail on this repository's own code, which is the only thing it
@@ -37,9 +38,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # Pinned here rather than assumed from the runner image. `auto-healer.yaml`
-      # assuming a capable self-hosted runner is an assumption, not a
-      # reproducibility guarantee, and a new workflow should not inherit it.
+      # Pinned here rather than assumed from the runner image. The removed
+      # auto-healer workflow assumed a capable self-hosted runner; that is an
+      # assumption, not a reproducibility guarantee, and this one does not
+      # inherit it.
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with:

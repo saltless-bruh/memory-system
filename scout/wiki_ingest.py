@@ -559,7 +559,7 @@ async def ingest_wiki(
     selected_embedder = embedder or LiteLLMBatchEmbedder(
         base_url=settings.get("LITELLM_BASE_URL"),
         api_key=settings.get("LITELLM_MASTER_KEY"),
-        model=settings.get("LITELLM_EMBED_MODEL"),
+        # See `scout.ingest`: the route, not the provider model behind it.
     )
     chunker = ContextualChunker(
         max_chunk_chars=WIKI_MAX_CHUNK_CHARS,

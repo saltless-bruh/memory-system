@@ -735,7 +735,13 @@ async def ingest_directory(
         embedder = LiteLLMBatchEmbedder(
             base_url=settings.get("LITELLM_BASE_URL"),
             api_key=settings.get("LITELLM_MASTER_KEY"),
-            model=settings.get("LITELLM_EMBED_MODEL"),
+            # Deliberately not `LITELLM_EMBED_MODEL`. That variable configures
+            # the *gateway* -- `config/litellm/config.yaml` resolves the
+            # `snp-embed` route through it -- and sending its value as the
+            # client's model name bypasses the route, and with it the
+            # `dimensions: 1024` the route pins. It also stamps chunks with a
+            # second name for one vector space, which is exactly what the
+            # startup guard reads to decide whether the index is coherent.
         )
 
     conn = None if dry_run else await get_pg_connection(env)

@@ -91,7 +91,8 @@ async def measure(questions: list[Question], k: int) -> list[Outcome]:
     embedder = LiteLLMBatchEmbedder(
         base_url=os.environ.get("LITELLM_BASE_URL"),
         api_key=os.environ.get("LITELLM_MASTER_KEY"),
-        model=os.environ.get("LITELLM_EMBED_MODEL"),
+        # No model override: the benchmark has to embed its queries the way
+        # the served backend does, or it is measuring a route nobody uses.
     )
     engine = ScoutDiyEngine.from_vault(embedder, wiki_dir=VAULT)
     scope = Scope(departments=CANONICAL_DEPARTMENTS)

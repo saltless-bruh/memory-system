@@ -11,6 +11,7 @@ import math
 import os
 import re
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -334,6 +335,33 @@ class EmbeddingError(RuntimeError):
     """Raised when an embedding request to LiteLLM fails."""
 
 
+#: The LiteLLM route this process embeds with, when nothing overrides it.
+#: It is a *route group* declared in `config/litellm/config.yaml`, not a
+#: provider model: the route is what pins `dimensions: 1024`, and naming the
+#: provider model directly bypasses that pin.
+DEFAULT_EMBED_ROUTE = "snp-embed"
+
+
+def configured_embedding_model(env: Mapping[str, str] | None = None) -> str:
+    """Name the route this process embeds with.
+
+    One definition, because two would drift and the drift is invisible. The
+    chunk `model` stamp records this name, and `scout.serve` refuses to serve an
+    index stamped with a different one -- so if the query path and the ingest
+    path resolved it differently, a correctly built index would look like two
+    vector spaces.
+
+    Note what this does and does not identify. It names the *route*, so it
+    catches a second client embedding through a different one -- which is
+    exactly F-2, where basic-memory's in-process FastEmbed wrote 384-dimension
+    vectors beside 1024-dimension ones. It does not catch the same route being
+    repointed at another provider model in the gateway's own config; nothing
+    visible to a client does.
+    """
+    settings = os.environ if env is None else env
+    return settings.get("SCOUT_EMBED_MODEL") or DEFAULT_EMBED_ROUTE
+
+
 class LiteLLMBatchEmbedder:
     """Production batch embedder routing through LiteLLM Gateway."""
 
@@ -350,7 +378,7 @@ class LiteLLMBatchEmbedder:
         self.api_key = (
             api_key if api_key is not None else os.environ.get("LITELLM_MASTER_KEY")
         )
-        self.model = model or os.environ.get("SCOUT_EMBED_MODEL", "snp-embed")
+        self.model = model or configured_embedding_model()
         self.dim = dim
 
     def _request_parts(self, texts: list[str]) -> tuple[str, bytes, dict[str, str]]:

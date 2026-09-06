@@ -21,7 +21,12 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +41,23 @@ from scout.policy import CANONICAL_DEPARTMENTS  # noqa: E402
 from scout.types import Scope  # noqa: E402
 
 QUESTIONS = REPO_ROOT / "artifacts" / "v3" / "retrieval_questions.json"
+
+#: The served surface. W-2's claim is about *the next answer*, and answers come
+#: from the scout container, which reads the replica -- not from this machine's
+#: copy of the vault. Speaking only MCP here is also what makes the measurement
+#: honest about H-1: the probe page never exists on the disk this process can
+#: see, so a passing result cannot have come from a local read.
+SCOUT_URL = os.environ.get("SNP_SCOUT_URL", "http://127.0.0.1:8080/mcp")
+SCOUT_TOKENS = REPO_ROOT / ".secrets" / "scout_static_tokens.json"
+VAULT_REMOTE = os.environ.get(
+    "SNP_VAULT_REMOTE", "http://127.0.0.1:3000/snp-admin/snp-memory.git"
+)
+VAULT_BRANCH = os.environ.get("GIT_BRANCH", "main")
+#: Where the vault lives inside the repository that holds it.
+VAULT_SUBDIR = "wiki"
+#: How long a change may take to travel push -> webhook -> replica -> index.
+PROPAGATION_TIMEOUT_SECONDS = 180.0
+PROPAGATION_POLL_SECONDS = 5.0
 VAULT = Path(
     os.environ.get("SNP_REFERENCE_VAULT")
     or Path.home() / "Documents" / "memo-project" / "Obsidian Vault"
@@ -228,8 +250,219 @@ def group_find_read_cite() -> str:
     return asyncio.run(_find_read_cite())
 
 
+# --------------------------------------------------------------------------
+# W-2 -- a change in the vault reaches the index
+# --------------------------------------------------------------------------
+
+
+def _scout_token() -> str:
+    """The widest-scoped static token, read at run time and never printed."""
+    require(SCOUT_TOKENS.is_file(), f"no scout tokens at {SCOUT_TOKENS}")
+    tokens = json.loads(SCOUT_TOKENS.read_text(encoding="utf-8"))
+    require(bool(tokens), f"{SCOUT_TOKENS}: no tokens configured")
+    widest = max(tokens.items(), key=lambda kv: len(kv[1].get("departments", ())))
+    return str(widest[0])
+
+
+class _Scout:
+    """The agent-facing MCP surface, spoken to exactly as an agent would."""
+
+    def __init__(self) -> None:
+        self._token = _scout_token()
+
+    async def _call(self, tool: str, arguments: dict[str, object]) -> object:
+        from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
+
+        transport = StreamableHttpTransport(
+            SCOUT_URL, headers={"Authorization": f"Bearer {self._token}"}
+        )
+        async with Client(transport) as client:
+            result = await client.call_tool(tool, arguments)
+        payload = result.structured_content or result.data
+        if isinstance(payload, dict) and "result" in payload:
+            return payload["result"]
+        return payload
+
+    async def search(self, query: str, k: int = 5) -> list[dict[str, object]]:
+        hits = await self._call("wiki_search", {"query": query, "k": k})
+        return list(hits) if isinstance(hits, list) else []
+
+    async def read(self, path: str) -> dict[str, object]:
+        page = await self._call("wiki_read", {"path": path, "mode": "full"})
+        return page if isinstance(page, dict) else {}
+
+
+def _git(*args: str, cwd: Path) -> str:
+    """Run one git command, failing the gate rather than the process."""
+    completed = subprocess.run(
+        ["git", "-c", "core.quotePath=false", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    require(
+        completed.returncode == 0,
+        f"git {' '.join(args)} failed: {completed.stderr.strip()[:300]}",
+    )
+    return completed.stdout
+
+
+def _probe_page(sentinel: str) -> tuple[str, str]:
+    """A self-contained page carrying the sentinel, and its vault-relative path."""
+    body = (
+        "---\n"
+        f"title: {sentinel}\n"
+        "type: concept\n"
+        "---\n\n"
+        "## TL;DR\n\n"
+        f"Propagation probe {sentinel}. This page is written by the W-2\n"
+        "acceptance oracle and removed by it in the same run.\n\n"
+        "## Cross-References\n\n"
+        "[[index]]\n"
+    )
+    return f"{sentinel}.md", body
+
+
+def _publish(clone: Path, relative: str, body: str | None, message: str) -> None:
+    """Write or delete one vault page and push it to the vault branch."""
+    target = clone / VAULT_SUBDIR / relative
+    if body is None:
+        target.unlink(missing_ok=True)
+    else:
+        target.write_text(body, encoding="utf-8")
+    _git("add", "-A", f"{VAULT_SUBDIR}/{relative}", cwd=clone)
+    _git(
+        "-c",
+        "user.name=snp-engine-acceptance",
+        "-c",
+        "user.email=xanx404@gmail.com",
+        "commit",
+        "-m",
+        message,
+        cwd=clone,
+    )
+    _git("push", "origin", f"HEAD:{VAULT_BRANCH}", cwd=clone)
+
+
+async def _await_sentinel(scout: _Scout, sentinel: str, budget: float) -> str | None:
+    """Poll the served surface for the sentinel, running no other command.
+
+    Running anything else here -- an ingest, a compose restart, a manual sync --
+    would make the result say nothing about whether the loop closes on its own.
+    """
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        for hit in await scout.search(sentinel, k=5):
+            path = str(hit.get("path", ""))
+            if sentinel in path or sentinel in str(hit.get("snippet", "")):
+                return path
+        await asyncio.sleep(PROPAGATION_POLL_SECONDS)
+    return None
+
+
+def _compose(*args: str) -> None:
+    completed = subprocess.run(
+        ["docker", "compose", *args], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    require(
+        completed.returncode == 0,
+        f"docker compose {' '.join(args)} failed: {completed.stderr.strip()[:300]}",
+    )
+
+
+async def _vault_change_propagates() -> str:
+    scout = _Scout()
+    clone = Path(tempfile.mkdtemp(prefix="v3-vault-probe-"))
+    watcher_stopped = False
+    try:
+        _git(
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            VAULT_BRANCH,
+            VAULT_REMOTE,
+            ".",
+            cwd=clone,
+        )
+
+        # ---- positive: an edit reaches the index with no command run ----
+        sentinel = f"V3-PROP-{uuid.uuid4().hex}"
+        relative, body = _probe_page(sentinel)
+        require(
+            await _await_sentinel(scout, sentinel, budget=0.0) is None,
+            f"{sentinel} was already findable before it was written; this gate "
+            "would prove nothing",
+        )
+        _publish(clone, relative, body, f"test(w2): propagation probe {sentinel}")
+        started = time.monotonic()
+        found = await _await_sentinel(scout, sentinel, PROPAGATION_TIMEOUT_SECONDS)
+        elapsed = time.monotonic() - started
+        require(
+            found is not None,
+            f"{sentinel} never became findable within "
+            f"{PROPAGATION_TIMEOUT_SECONDS:.0f}s of the push",
+        )
+        page = await scout.read(str(found))
+        rendered = json.dumps(page, ensure_ascii=False)
+        require(
+            sentinel in rendered,
+            f"search returned {found} but reading it did not contain {sentinel}: "
+            "find and read disagree about what the vault holds",
+        )
+        _publish(
+            clone, relative, None, f"test(w2): remove propagation probe {sentinel}"
+        )
+
+        # ---- negative: with the watcher stopped, the same push must NOT arrive ----
+        # Without this the gate cannot tell "the loop works" from "the loop
+        # happened to already be in the right state". Same timeout as the
+        # positive leg, or a miss would only mean it was not given long enough.
+        _compose("stop", "sync-job")
+        watcher_stopped = True
+        blocked = f"V3-PROP-{uuid.uuid4().hex}"
+        blocked_rel, blocked_body = _probe_page(blocked)
+        _publish(
+            clone,
+            blocked_rel,
+            blocked_body,
+            f"test(w2): negative control probe {blocked}",
+        )
+        leaked = await _await_sentinel(scout, blocked, PROPAGATION_TIMEOUT_SECONDS)
+        _publish(
+            clone,
+            blocked_rel,
+            None,
+            f"test(w2): remove negative control probe {blocked}",
+        )
+        require(
+            leaked is None,
+            f"{blocked} became findable at {leaked} while the vault watcher was "
+            "stopped; something other than sync-job is indexing, so the positive "
+            "leg proves nothing about this loop",
+        )
+    finally:
+        if watcher_stopped:
+            _compose("start", "sync-job")
+        shutil.rmtree(clone, ignore_errors=True)
+
+    print(
+        f"  probe reached the served surface {elapsed:.0f}s after the push, and "
+        f"did not arrive at all in {PROPAGATION_TIMEOUT_SECONDS:.0f}s with the "
+        "watcher stopped"
+    )
+    return "VAULT CHANGE PROPAGATES"
+
+
+def group_vault_change_propagates() -> str:
+    """An edit pushed to the vault repository reaches the served index."""
+    return asyncio.run(_vault_change_propagates())
+
+
 GROUPS: dict[str, Callable[[], str]] = {
     "find-read-cite": group_find_read_cite,
+    "vault-change-propagates": group_vault_change_propagates,
 }
 
 

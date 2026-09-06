@@ -65,10 +65,9 @@ _KIND_TO_CODE: dict[ErrorKind, ExitCode] = {
     ErrorKind.CONFLICT: ExitCode.CONFLICT,
 }
 
-#: Codes that must never be followed by a mutating action. `2` is an inherited
-#: guarantee -- `README.md` and `ci_address_gate.py` already promise that an
-#: infrastructure failure heals nothing -- and the rest are errors, so a command
-#: that could not run has no business writing.
+#: Codes that must never be followed by a mutating action. `2` preserves the
+#: inherited guarantee that an infrastructure failure authorizes no write, and
+#: the rest are errors, so a command that could not run has no business writing.
 NON_MUTATING_CODES: frozenset[ExitCode] = frozenset(
     code for code in ExitCode if code >= ExitCode.INFRASTRUCTURE
 )

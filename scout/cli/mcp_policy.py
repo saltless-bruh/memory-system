@@ -102,23 +102,6 @@ POLICIES: tuple[ToolPolicy, ...] = (
         ),
     ),
     ToolPolicy(
-        "gate",
-        Exposure.HIDDEN,
-        reason=(
-            "the gate branches, commits and pushes on a schedule; it is CI's "
-            "entry point, and an agent triggering it would bypass the review "
-            "the gate exists to feed"
-        ),
-    ),
-    ToolPolicy(
-        "heal",
-        Exposure.HIDDEN,
-        reason=(
-            "rewriting sources[] on a live vault is the gate's job under human "
-            "review (R-6.4); direct healer use is explicitly not the CI gate"
-        ),
-    ),
-    ToolPolicy(
         "status",
         Exposure.HIDDEN,
         reason=(

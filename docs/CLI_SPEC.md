@@ -19,8 +19,8 @@ consequences:
 * Every MCP tool must delegate to the same command implementation as the CLI,
   or the two surfaces are free to drift.
 
-`snpmemory` is one dispatcher with three surfaces: a human CLI, a CI gate, and
-local MCP tools. The surfaces render differently; the logic is shared.
+`snpmemory` is one dispatcher with three surfaces: a human CLI, CI automation,
+and local MCP tools. The surfaces render differently; the logic is shared.
 
 ## Audiences, and what each one needs
 
@@ -60,12 +60,12 @@ and no two outcomes share a code.
 | `6` | error | **tty required** — interactive input needed with no TTY attached |
 | `7` | error | **conflict** — page already exists, protected branch, pre-staged work |
 
-**`0` / `1` / `2` are inherited, not invented.** Seven scripts, `ci_address_gate.py`,
-`AGENTS.md` and `README.md:201` already depend on them — notably *"Exit `2` never
-triggers mutation"*, which is a safety property, not a formatting choice. The
-prevailing external convention assigns `2` to auth; this repo cannot adopt that
-without breaking a working merge gate, so **auth is `4`** and the existing
-contract is preserved. Codes `3`–`7` are new and collide with nothing.
+**`0` / `1` / `2` are inherited, not invented.** Existing verification and
+authoring paths depend on them — notably *"Exit `2` never triggers mutation"*,
+which is a safety property, not a formatting choice. The prevailing external
+convention assigns `2` to auth; this repo cannot adopt that without breaking
+existing automation, so **auth is `4`** and the existing contract is preserved.
+Codes `3`–`7` are new and collide with nothing.
 
 **`2` must never trigger mutation.** Any command that heals, writes, or commits
 treats `2` as a full stop.
@@ -221,8 +221,6 @@ engine and canonical envelope.*
 | `snpmemory verify-groundedness` | faithfulness gate | `1` unsupported claims |
 | `snpmemory verify-secrets` | secret scan | `1` findings |
 | `snpmemory check` | all four verifies, in order, first failure wins | |
-| `snpmemory heal` | apply scoped address heals | |
-| `snpmemory gate --mode pr│scheduled` | closed-loop CI state machine | |
 | `snpmemory up │ down │ status │ logs [service]` | stack lifecycle | `2` docker unavailable |
 | `snpmemory init` | bootstrap secrets and `.env` | |
 | `snpmemory install-agent [dir] [--dry-run] [--confirm]` | install the agent package | `3` target is not a directory · `5` target already has `.agent/` |

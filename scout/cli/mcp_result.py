@@ -7,9 +7,9 @@ One distinction decides this whole module, and getting it wrong is dangerous:
   tool call carrying `status: "fail"`. Raising here would tell the agent the
   tool is broken when in fact the vault is.
 * **Exit 2-7 mean the command could not run.** They come back as tool *errors*.
-  Exit 2 in particular must never look like a result: `ci_address_gate.py`'s
-  contract is that infrastructure failure never authorises mutation, and an
-  agent that read a database outage as "no problems found" would heal on it.
+  Exit 2 in particular must never look like a result: infrastructure failure
+  never authorises mutation, and an agent that read a database outage as "no
+  problems found" could act on evidence it never received.
 
 Payloads are summary-first. A tool that returns every field fills an agent's
 context; detail is available on request instead of by default.

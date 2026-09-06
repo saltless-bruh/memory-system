@@ -1,9 +1,9 @@
 """Tests for the verification command family.
 
-The distinction these exist to protect is the one `ci_address_gate.py` depends
-on: a **finding** (the vault has a problem — exit 1) is not a **failure** (the
-check could not run — exit 2). Confusing them either blocks a merge for a
-database outage or heals a vault on the strength of a check that never ran.
+The distinction these exist to protect is part of the public result contract: a
+**finding** (the vault has a problem — exit 1) is not a **failure** (the check
+could not run — exit 2). Confusing them can authorize action on the strength of
+a check that never ran.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def test_lint_errors_are_a_finding_not_a_failure(
     )
     result = verify_vault(config=_cfg())
     assert result.exit_code is ExitCode.SEMANTIC_FAILURE
-    assert result.mutating_is_allowed, "a finding must not block the healer"
+    assert result.mutating_is_allowed, "a finding must permit caller follow-up"
     assert result.error is None, "a finding is not an error envelope"
 
 

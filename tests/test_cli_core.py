@@ -56,7 +56,7 @@ def test_every_error_kind_maps_to_its_own_code() -> None:
 def test_auth_is_four_not_two() -> None:
     """`2` is reserved for infrastructure by an inherited, load-bearing promise.
 
-    README and ci_address_gate guarantee that exit 2 never triggers mutation.
+    The CLI contract guarantees that exit 2 never triggers mutation.
     The prevailing external convention puts auth at 2; adopting it would break
     that guarantee, so auth lives at 4.
     """

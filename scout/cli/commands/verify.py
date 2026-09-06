@@ -3,9 +3,8 @@
 
 These are the first real consumers of `Config`, and they exercise the whole
 contract: each one distinguishes a **finding** (the check ran and the vault has
-a problem — exit 1) from a **failure** (the check could not run — exit 2), which
-is the distinction `ci_address_gate.py` depends on when it decides whether
-healing is permitted.
+a problem — exit 1) from a **failure** (the check could not run — exit 2). A
+finding can authorize a caller's follow-up; a failure never authorizes mutation.
 
 Every heavy import happens inside a function. Importing this module must not
 read an environment, open a database, or resolve a credential.

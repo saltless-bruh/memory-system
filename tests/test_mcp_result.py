@@ -50,10 +50,10 @@ def test_every_error_code_raises_rather_than_returning(code: ExitCode) -> None:
 
 
 def test_infrastructure_failure_never_appears_as_a_successful_result() -> None:
-    """ci_address_gate's contract: exit 2 never authorises mutation.
+    """The CLI contract says exit 2 never authorises mutation.
 
-    An agent that read a database outage as "no problems found" would heal on
-    it, which is the specific accident this mapping exists to prevent.
+    An agent that read a database outage as "no problems found" could act on
+    evidence it never received, which this mapping exists to prevent.
     """
     with pytest.raises(ToolFailure) as caught:
         to_tool_result(_error_result(ExitCode.INFRASTRUCTURE))

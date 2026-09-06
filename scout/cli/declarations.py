@@ -577,6 +577,7 @@ command(
     output_fields=(
         FieldSpec("pages", "integer"),
         FieldSpec("indexed", "integer"),
+        FieldSpec("unchanged", "integer"),
         FieldSpec("skipped", "integer"),
         FieldSpec("results", "array", items=FieldSpec("result", "object")),
     ),

@@ -286,14 +286,19 @@ def ingest_wiki_command(
 
     del config
     results = asyncio.run(ingest_wiki(Path(dir), dry_run=dry_run))
-    indexed = sum(1 for result in results if result.get("status") == "indexed")
-    skipped = len(results) - indexed
+    indexed = sum(1 for result in results if result.get("status") == "ingested_ok")
+    unchanged = sum(1 for result in results if result.get("status") == "unchanged")
+    skipped = len(results) - indexed - unchanged
     return CommandResult(
         data={
             "pages": len(results),
             "indexed": indexed,
+            "unchanged": unchanged,
             "skipped": skipped,
             "results": results,
         },
-        summary=f"{indexed} pages indexed, {skipped} skipped from {dir}",
+        summary=(
+            f"{indexed} pages indexed, {unchanged} unchanged, "
+            f"{skipped} skipped from {dir}"
+        ),
     )

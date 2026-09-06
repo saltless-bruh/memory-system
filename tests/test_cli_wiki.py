@@ -415,25 +415,30 @@ def test_ingest_wiki_reports_per_page_outcomes(
         assert kwargs.get("dry_run") is True
         return [
             {
-                "source_uri": "a.md",
-                "title": "A",
-                "chunks_count": 3,
-                "status": "indexed",
-            },
-            {
-                "source_uri": "b.md",
-                "title": "B",
-                "chunks_count": 0,
-                "status": "skipped_no_body",
-            },
+                "source_uri": f"{status}.md",
+                "title": status,
+                "chunks_count": 3 if status == "ingested_ok" else 0,
+                "status": status,
+            }
+            for status in (
+                "dry_run_ok",
+                "ingested_ok",
+                "purged_deleted",
+                "purged_empty",
+                "skipped_no_body",
+                "skipped_unmapped_acl",
+                "unchanged",
+            )
         ]
 
     monkeypatch.setattr("scout.wiki_ingest.ingest_wiki", fake_ingest_wiki)
     result = ingest_wiki_command(dir="wiki", dry_run=True)
 
-    assert result.data["pages"] == 2
+    assert result.data["pages"] == 7
     assert result.data["indexed"] == 1
-    assert result.data["skipped"] == 1
+    assert result.data["unchanged"] == 1
+    assert result.data["skipped"] == 5
+    assert result.summary == "1 pages indexed, 1 unchanged, 5 skipped from wiki"
 
 
 def test_ingest_wiki_is_a_declared_shipped_command() -> None:

@@ -145,7 +145,7 @@ def test_local_wiki_read_returns_bare_canonical_envelope(
     assert "summary" not in result.structured_content
 
 
-def test_local_wiki_search_returns_same_logical_list_shape(
+def test_local_wiki_search_returns_the_same_envelope_shape_as_authenticated_scout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from scout.cli.commands import wiki as wiki_commands
@@ -187,7 +187,7 @@ def test_local_wiki_search_returns_same_logical_list_shape(
     tool = {item.name: item for item in _tools()}["wiki_search"]
     result = asyncio.run(tool.run({"query": "local", "department": "ai_eng", "k": 5}))
     assert result.structured_content == {
-        "result": [
+        "results": [
             {
                 "path": "concepts/page.md",
                 "type": "concept",
@@ -196,7 +196,10 @@ def test_local_wiki_search_returns_same_logical_list_shape(
                 "seen": False,
                 "degraded": False,
             }
-        ]
+        ],
+        "returned": 1,
+        "suppressed_as_seen": 0,
+        "has_more": False,
     }
 
 

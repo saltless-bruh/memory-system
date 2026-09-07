@@ -304,12 +304,21 @@ def test_manifest_repository_matches_the_real_remote() -> None:
     manifest = json.loads((PACKAGE_DIR / "plugin.json").read_text())
     declared = manifest["repository"].rstrip("/").removesuffix(".git")
 
-    remote = subprocess.run(
-        ["git", "remote", "get-url", "origin"],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
-    ).stdout.strip().rstrip("/").removesuffix(".git")
+    remote = (
+        subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        .stdout.strip()
+        .rstrip("/")
+        .removesuffix(".git")
+    )
     if not remote:
         import pytest
+
         pytest.skip("no origin remote configured in this checkout")
 
     assert declared == remote, (

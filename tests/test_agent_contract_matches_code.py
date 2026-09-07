@@ -16,8 +16,7 @@ from scout.vault import OPTIONAL_HEADINGS, REQUIRED_HEADINGS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRAME_DOC = (
-    REPO_ROOT
-    / "packages/snp-agent/instructions/frontmatter_schema.instructions.md"
+    REPO_ROOT / "packages/snp-agent/instructions/frontmatter_schema.instructions.md"
 )
 
 

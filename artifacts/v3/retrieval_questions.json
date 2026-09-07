@@ -16,7 +16,7 @@
   {"lang":"en","query":"adapting one backend so several different client protocols can talk to it","expect":"concepts/Protocol Compatibility Middleware.md"},
   {"lang":"en","query":"header injection vulnerabilities reported in Apache Camel","expect":"Security/apache-camel-cve-2026-33453-40453.md"},
   {"lang":"en","query":"side by side table of Homeric heroes with their epithets and fates","expect":"comparisons/Greek Heroes of the Trojan War.md"},
-  {"lang":"en","query":"drawing an entity relationship diagram in the browser and exporting SQL","expect":"concepts/Online ERD & SQL Generator.md"},
+  {"lang":"en","query":"drawing an entity relationship diagram in the browser and exporting SQL","expect":"Entities/DrawDB.md"},
   {"lang":"en","query":"an illustrated data structures and algorithms book with runnable code in many languages","expect":"queries/Hello Algo GitHub Analysis.md"},
   {"lang":"en","query":"turning an Obsidian vault into a red team and bug bounty knowledge base","expect":"Entities/ClaudeBrain.md"},
 
@@ -37,7 +37,7 @@
   {"lang":"vi","query":"lớp trung gian giúp một backend phục vụ nhiều giao thức client khác nhau","expect":"concepts/Protocol Compatibility Middleware.md"},
   {"lang":"vi","query":"lỗ hổng tiêm header được báo cáo trong Apache Camel","expect":"Security/apache-camel-cve-2026-33453-40453.md"},
   {"lang":"vi","query":"bảng so sánh các anh hùng Hy Lạp trong sử thi Homer cùng biệt danh và kết cục","expect":"comparisons/Greek Heroes of the Trojan War.md"},
-  {"lang":"vi","query":"vẽ sơ đồ quan hệ thực thể trên trình duyệt rồi xuất ra câu lệnh SQL","expect":"concepts/Online ERD & SQL Generator.md"},
+  {"lang":"vi","query":"vẽ sơ đồ quan hệ thực thể trên trình duyệt rồi xuất ra câu lệnh SQL","expect":"Entities/DrawDB.md"},
   {"lang":"vi","query":"sách minh hoạ về cấu trúc dữ liệu và giải thuật kèm mã chạy được bằng nhiều ngôn ngữ","expect":"queries/Hello Algo GitHub Analysis.md"},
   {"lang":"vi","query":"biến kho Obsidian thành cơ sở tri thức cho red team và săn lỗi bảo mật","expect":"Entities/ClaudeBrain.md"},
 

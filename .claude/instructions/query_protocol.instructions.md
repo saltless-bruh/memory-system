@@ -5,8 +5,11 @@ Use the production retrieval path in this order.
 ## Step 1 — Find distinct pages
 
 Call `wiki_search(query, department, k=5, seen=[])`. The service performs
-hybrid retrieval and returns one row per page. Each result contains a bounded
-snippet for routing, not enough page content to answer from.
+hybrid retrieval and returns an envelope: `results` (one entry per page, each
+with a bounded snippet for routing, not enough page content to answer from),
+`returned`, `suppressed_as_seen` (results redacted to a stub because `seen`
+already named them), and `has_more` (true when more distinct pages probably
+exist beyond `k`).
 
 The authenticated identity supplies the allowed department set. The optional
 request value may narrow it but can never add or expand authority. The value

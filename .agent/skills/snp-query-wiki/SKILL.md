@@ -18,8 +18,12 @@ Use the two Scout tools in order.
 }
 ```
 
-The result contains one row per page with a bounded routing snippet. It never
-returns full chunk bodies. `degraded: true` identifies sparse-only fallback.
+The result is an envelope: `results` (one entry per page with a bounded
+routing snippet — never a full chunk body), `returned` (how many pages came
+back), `suppressed_as_seen` (how many of those were redacted to a stub because
+`seen` already named them), and `has_more` (true when the search hit its `k`
+ceiling, so more distinct pages probably exist). `degraded: true` on a result
+identifies sparse-only fallback.
 
 ## 2. Read a page with `wiki_read`
 

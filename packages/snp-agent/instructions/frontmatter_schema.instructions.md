@@ -52,6 +52,24 @@ Interior sections are free-form under the authored frame (see below). Add at
 least two outbound `[[wikilinks]]`, introduce lists with a context sentence,
 and keep one primary subject per page.
 
+### Which frame applies
+
+`lint_page` judges a page as one of two document classes, and they are not
+interchangeable.
+
+**authored** — a page a person wrote. The two required headings must be
+present, in order, once each; every other section is the author's business.
+This is the frame for anything in the knowledge vault, and it is what
+`verify-vault` uses.
+
+**compiled** — a page `scripts/compile_note.py` generated. Its headings must be
+*exactly* the frame with nothing else, because that is how drift in the
+generator is caught. Do not hand-edit a compiled page toward the authored
+frame; regenerate it.
+
+If you are writing or revising a page yourself, you are working in the authored
+frame. Reach for the compiled frame only when checking a generator's output.
+
 The current automated checker does not yet certify this complete V3 contract.
 Review these requirements explicitly and report the verifier limitation rather
 than presenting a narrower check as full conformance.

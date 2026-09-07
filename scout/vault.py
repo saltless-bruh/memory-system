@@ -11,6 +11,7 @@ import datetime
 import os
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,56 @@ OPTIONAL_HEADINGS: dict[str, str] = {
     "Provenance": "Cross-References",
     "Works Cited": "Cross-References",
 }
+
+
+class HeadingFrame(StrEnum):
+    """Which document class a page's headings are being judged as.
+
+    One predicate cannot serve both. `scripts/compile_note.py` emits a fixed
+    five-heading frame, and checking it exactly is how generator drift is
+    caught. The reference vault is hand-authored: measured 2026-09-07, **0 of
+    its 430 content pages** satisfy that exact frame and **1006 distinct
+    non-contract `##` headings** are in use, because a page carries the
+    sections its subject needs — `## Trade-offs`, `## Liên quan`,
+    `## Why it matters`. Judging those by the compiled frame does not report a
+    contract anyone agreed to; it reports that they are a different kind of
+    document.
+
+    `AGENTS.md` already says so: "Read-time normalization handles older pages;
+    do not rewrite a page merely to make its stored shape resemble the
+    envelope." And the vault's own `SCHEMA.md` imposes no heading requirement
+    at all — it governs frontmatter, filenames, wikilinks and tags.
+    """
+
+    #: Exactly the required sequence, optional headings interleaved at their
+    #: anchors, and nothing else. What `compile_note.py` generates.
+    COMPILED = "compiled"
+    #: Every required heading present, in order, exactly once. Any other
+    #: section is the author's business.
+    AUTHORED = "authored"
+
+
+def headings_are_valid(
+    actual: tuple[str, ...], *, frame: HeadingFrame = HeadingFrame.COMPILED
+) -> bool:
+    """True when `actual` satisfies `frame`.
+
+    The default is the stricter frame on purpose: a caller that does not name
+    one keeps the behaviour it had before frames existed, so relaxing a check
+    is always a deliberate edit at a call site and never a side effect here.
+    """
+    if frame is HeadingFrame.COMPILED:
+        return _headings_are_ordered(actual)
+
+    # Required headings, in order, exactly once each. Duplication is rejected
+    # explicitly rather than falling out of the arithmetic: two `## TL;DR`
+    # sections is precisely the defect an automated pass introduces, and a
+    # plain "is it present" test would wave it through.
+    for heading in REQUIRED_HEADINGS:
+        if actual.count(heading) != 1:
+            return False
+    positions = [actual.index(heading) for heading in REQUIRED_HEADINGS]
+    return positions == sorted(positions)
 
 
 def _headings_are_ordered(actual: tuple[str, ...]) -> bool:
@@ -229,7 +280,11 @@ def check_tree(wiki_dir: Path = WIKI_DIR) -> LintResult:
 
 
 def lint_page(
-    page: Page, *, raw_dir: Path | None = None, known_slugs: set[str] | None = None
+    page: Page,
+    *,
+    raw_dir: Path | None = None,
+    known_slugs: set[str] | None = None,
+    frame: HeadingFrame = HeadingFrame.COMPILED,
 ) -> LintResult:
     """Comprehensive structural and canonical contract lint for one page.
 
@@ -240,7 +295,7 @@ def lint_page(
       - Exactly 1 single-line summary sentence
       - Valid ISO date format (YYYY-MM-DD)
       - sources[] element shape and disk presence
-      - Ordered body section headings
+      - Body section headings, judged as `frame` (see `HeadingFrame`)
       - Wikilink resolution
     """
     res = LintResult()
@@ -368,7 +423,7 @@ def lint_page(
         match.group(1).strip()
         for match in re.finditer(r"^##[ \t]+(.+?)[ \t]*$", page.body, re.MULTILINE)
     )
-    if not _headings_are_ordered(actual_headings):
+    if not headings_are_valid(actual_headings, frame=frame):
         optional = ", ".join(
             f"{name} (before {before})" for name, before in OPTIONAL_HEADINGS.items()
         )

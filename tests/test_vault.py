@@ -438,3 +438,108 @@ def test_a_page_without_the_unauthorable_sections_lints_clean(
     page.body = "## TL;DR\n\nDense summary.\n\n## Cross-References\n\n[[other-page]]\n"
 
     assert not any("section headings" in error for error in _errors(page, raw_dir))
+
+
+# ── two heading frames: generated pages and authored ones ──────────────────
+
+
+def test_the_compiled_frame_still_demands_the_exact_sequence() -> None:
+    """`compile_note.py` emits a fixed frame; drift in the generator is a bug.
+
+    This is the rule that has always been enforced, and relaxing it for the
+    vault's sake would silently stop checking the one document class it
+    describes correctly.
+    """
+    from scout.vault import HeadingFrame, headings_are_valid
+
+    assert headings_are_valid(
+        ("TL;DR", "Technical Specifications", "Provenance", "Cross-References"),
+        frame=HeadingFrame.COMPILED,
+    )
+    assert not headings_are_valid(
+        ("TL;DR", "Trade-offs", "Cross-References"), frame=HeadingFrame.COMPILED
+    )
+
+
+def test_the_authored_frame_permits_a_page_to_have_its_own_sections() -> None:
+    """A hand-authored page carries whatever headings its subject needs.
+
+    Measured on the reference vault: 0 of 430 pages satisfy the compiled frame,
+    and 1006 distinct non-contract H2 headings are in use. Requiring the exact
+    sequence there does not describe a contract anyone agreed to; it describes
+    a different document class.
+    """
+    from scout.vault import HeadingFrame, headings_are_valid
+
+    assert headings_are_valid(
+        ("TL;DR", "Trade-offs", "Why it matters", "Cross-References"),
+        frame=HeadingFrame.AUTHORED,
+    )
+    assert headings_are_valid(
+        ("TL;DR", "Cluster position", "Provenance", "Cross-References"),
+        frame=HeadingFrame.AUTHORED,
+    )
+
+
+def test_the_authored_frame_still_requires_both_headings_in_order() -> None:
+    """Relaxed is not absent. The two required headings carry machine meaning:
+    TL;DR becomes chunk 0 of the indexed page, and Cross-References is where
+    wikilinks are gathered."""
+    from scout.vault import HeadingFrame, headings_are_valid
+
+    assert not headings_are_valid(
+        ("Trade-offs", "Cross-References"), frame=HeadingFrame.AUTHORED
+    )
+    assert not headings_are_valid(("TL;DR", "Trade-offs"), frame=HeadingFrame.AUTHORED)
+    assert not headings_are_valid(
+        ("Cross-References", "Notes", "TL;DR"), frame=HeadingFrame.AUTHORED
+    )
+
+
+def test_the_authored_frame_still_rejects_a_duplicated_required_heading() -> None:
+    """Two TL;DRs is the defect a loose 'is it present' check would wave through
+    -- and the one an automated pass is most likely to create."""
+    from scout.vault import HeadingFrame, headings_are_valid
+
+    assert not headings_are_valid(
+        ("TL;DR", "TL;DR", "Cross-References"), frame=HeadingFrame.AUTHORED
+    )
+    assert not headings_are_valid(
+        ("TL;DR", "Cross-References", "Cross-References"), frame=HeadingFrame.AUTHORED
+    )
+
+
+def test_lint_page_defaults_to_the_compiled_frame() -> None:
+    """The default must never be the weaker rule.
+
+    A caller that omits the argument keeps exactly the behaviour it had before
+    the frames existed, so relaxing a check is always a visible, deliberate
+    edit at the call site rather than a side effect of this change.
+    """
+    import inspect
+
+    from scout.vault import HeadingFrame, lint_page
+
+    assert (
+        inspect.signature(lint_page).parameters["frame"].default
+        is HeadingFrame.COMPILED
+    )
+
+
+def test_an_authored_page_lints_clean_under_the_authored_frame(
+    tmp_path: Path, raw_dir: Path
+) -> None:
+    """End to end through `lint_page`, not just the predicate."""
+    page = _page(tmp_path)
+    page.body = (
+        "## TL;DR\n\nDense summary.\n\n"
+        "## Trade-offs\n\nWhat this costs.\n\n"
+        "## Cross-References\n\n[[other-page]]\n"
+    )
+    from scout.vault import HeadingFrame
+
+    assert any("section headings" in error for error in _errors(page, raw_dir)), (
+        "the compiled frame should still reject this page"
+    )
+    relaxed = vault.lint_page(page, raw_dir=raw_dir, frame=HeadingFrame.AUTHORED)
+    assert not any("section headings" in error for error in relaxed.errors)

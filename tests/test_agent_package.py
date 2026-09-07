@@ -345,3 +345,67 @@ def test_manifest_repository_matches_the_real_remote() -> None:
     assert declared == remote, (
         f"plugin.json points at {declared} but origin is {remote}"
     )
+
+
+#: The three departures from the MCP server guide, each named by the substance
+#: that identifies it rather than by the prose either side happens to use. Both
+#: records must express all of these, or the two have drifted apart.
+DELIBERATE_DEPARTURES: dict[str, tuple[str, ...]] = {
+    "no server prefix on tool names": (
+        "wiki_search",
+        "scout_wiki_search",
+        "namespace",
+    ),
+    "one response format, not two": ("json", "prose"),
+    "has_more but no total_count and no cursor": (
+        "has_more",
+        "total_count",
+        "offset paging",
+        "similarity ranking",
+    ),
+}
+
+
+def test_manifest_conventions_match_the_served_module_docstring() -> None:
+    """The manifest and the server must record the same three departures.
+
+    Two copies of one decision in two files is the drift class this branch
+    spent its length removing; reintroducing it unwatched for the departures
+    themselves would be the same mistake in miniature. The assertion is on
+    substance, not on byte-equal prose: each side may word a departure however
+    suits it, but neither may drop one or add one the other does not have.
+    """
+    import json
+
+    from scout import mcp_server
+
+    def flatten(text: str) -> str:
+        """Casefold and collapse whitespace so line wrapping is not drift."""
+        return " ".join(text.split()).casefold()
+
+    manifest = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))
+    conventions = manifest["extensions"]["io.snp.memory"]["conventions"]
+    assert isinstance(conventions, dict) and conventions
+    manifest_text = flatten(json.dumps(conventions))
+
+    raw_docstring = mcp_server.__doc__ or ""
+    assert raw_docstring, "scout/mcp_server.py lost its module docstring"
+    docstring = flatten(raw_docstring)
+
+    for departure, markers in DELIBERATE_DEPARTURES.items():
+        missing_manifest = [m for m in markers if m not in manifest_text]
+        assert not missing_manifest, (
+            f"plugin.json conventions no longer express {departure!r}: "
+            f"missing {missing_manifest}"
+        )
+        missing_docstring = [m for m in markers if m not in docstring]
+        assert not missing_docstring, (
+            f"scout/mcp_server.py docstring no longer expresses {departure!r}: "
+            f"missing {missing_docstring}"
+        )
+
+    # A fourth departure recorded on either side must be added here too, so the
+    # table cannot quietly fall behind the thing it is checking.
+    assert raw_docstring.count("* **") == len(DELIBERATE_DEPARTURES), (
+        "scout/mcp_server.py lists a number of departures this table does not"
+    )

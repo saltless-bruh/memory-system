@@ -29,6 +29,15 @@ Every pair was solved through this same surface before it was written down, so
 a failure here is a regression in the system, not a question that was always
 wrong. Four pairs are Vietnamese because a dense-timeout regression once
 silenced every Vietnamese query while every mechanical gate stayed green.
+
+**What this gate does not cover: department breadth.** `_scout_token()` picks
+the widest static token in `.secrets/scout_static_tokens.json`, which today is
+the `ai_eng` + `infra` identity. Every question is therefore asked from one
+scope, and a pass says nothing about whether `redteam` or `blueteam` callers
+can answer the same questions, nor about whether a narrower caller is correctly
+refused. Scope enforcement is measured elsewhere -- `e2e_retrieval.py` exercises
+the request-scope boundary directly. A reader should learn that ceiling here
+rather than infer it from the contents of `.secrets/`.
 """
 
 from __future__ import annotations
@@ -102,8 +111,16 @@ class QaPair:
         return any(mark in lowered for mark in _VIETNAMESE_MARKS)
 
 
-def load_pairs(path: Path = EVAL_XML) -> list[QaPair]:
-    """Read the eval file, failing the gate rather than the parser."""
+def load_pairs(path: Path | None = None) -> list[QaPair]:
+    """Read the eval file, failing the gate rather than the parser.
+
+    ``path`` resolves to :data:`EVAL_XML` at call time, not at import. Binding
+    the module constant as a default value froze it at import, so a control
+    that rebound ``mcp_eval.EVAL_XML`` to a deliberately broken file silently
+    kept parsing the real one and passed -- a false green in the machinery that
+    exists to catch false greens.
+    """
+    path = EVAL_XML if path is None else path
     require(path.is_file(), f"no eval set at {path}")
     try:
         root = ElementTree.parse(path).getroot()
@@ -146,7 +163,11 @@ def load_pairs(path: Path = EVAL_XML) -> list[QaPair]:
 
 
 def _scout_token() -> str:
-    """The widest-scoped static token, read at run time and never printed."""
+    """The widest-scoped static token, read at run time and never printed.
+
+    "Widest" is still one identity, not every department -- see the module
+    docstring on what this gate does not cover.
+    """
     require(SCOUT_TOKENS.is_file(), f"no scout tokens at {SCOUT_TOKENS}")
     tokens = json.loads(SCOUT_TOKENS.read_text(encoding="utf-8"))
     require(bool(tokens), f"{SCOUT_TOKENS}: no tokens configured")

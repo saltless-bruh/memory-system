@@ -1,4 +1,32 @@
-"""Authenticated FastMCP boundary for V3 wiki retrieval."""
+"""Authenticated FastMCP boundary for V3 wiki retrieval.
+
+Three deliberate departures from the MCP server guide, recorded so they are not
+re-litigated:
+
+* **No server prefix on tool names.** The guide suggests `{service}_{action}`,
+  which would make these `scout_wiki_search` and `scout_wiki_read`. `wiki_` is
+  already the namespace, the V3 blueprint fixes these two names, and renaming
+  would touch the served contract, every agent contract mirror and the whole
+  skill set. The collision risk the convention guards against is real but small
+  here: `wiki_search` is specific enough that a second server offering the same
+  name would be offering the same thing.
+
+* **One response format, not two.** The guide asks for a JSON and a Markdown
+  rendering. Both tools return structured data an agent quotes and cites, never
+  prose a human reads directly, so a Markdown variant would be a second way to
+  say the same thing and a second thing to keep correct. If a human-facing
+  surface appears later, add it then.
+
+* **`has_more` but no `total_count`, and no cursor.** The guide asks for both.
+  `wiki_search` asks the backend for exactly `k` chunks and stops at `k`
+  distinct pages, so a total computed from the result would only ever restate
+  `returned`. A real corpus-wide total would need an over-fetch or a second
+  query and would still be a threshold artefact, because in a similarity ranking
+  every page matches a little and "how many match" has no defined answer. Offset
+  paging is likewise not meaningful here -- results 20 to 40 of "closest by
+  meaning" is not a question anyone asks. `has_more` is reported because hitting
+  the k ceiling is a fact the search actually knows.
+"""
 
 from __future__ import annotations
 

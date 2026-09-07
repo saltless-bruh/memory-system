@@ -77,6 +77,12 @@
           "task_completion_workflow.instructions.md",
           "testing_strategy.instructions.md"
         ]
+      },
+      "conventions": {
+        "toolNamePrefix": "none",
+        "note": "Tools are wiki_search and wiki_read rather than scout_wiki_search and scout_wiki_read. `wiki_` is the namespace; the V3 blueprint fixes both names. Recorded so the deviation from the MCP naming convention reads as a decision rather than an oversight.",
+        "responseFormats": "structured JSON only; these tools return evidence an agent cites, not prose a human reads",
+        "pagination": "has_more only. wiki_search retrieves exactly k chunks, so a total_count would restate returned; a corpus-wide total is undefined for a similarity ranking, and offset paging over one is not a question anyone asks."
       }
     }
   }

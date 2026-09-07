@@ -460,9 +460,288 @@ def group_vault_change_propagates() -> str:
     return asyncio.run(_vault_change_propagates())
 
 
+# --------------------------------------------------------------------------
+# The shipped SQL, against real PostgreSQL
+# --------------------------------------------------------------------------
+
+
+def _app_role_connection_settings() -> object:
+    from scout.config import postgres_settings
+
+    return postgres_settings("query", env=os.environ)
+
+
+async def _live_sql() -> str:
+    import asyncpg
+
+    from scout.backends.pgvector import PgVectorRlsBackend
+
+    embedder = LiteLLMBatchEmbedder(
+        base_url=os.environ.get("LITELLM_BASE_URL"),
+        api_key=os.environ.get("LITELLM_MASTER_KEY"),
+    )
+    cleared = Scope(departments=frozenset(CANONICAL_DEPARTMENTS))
+    # Two hints, because they answer different questions. Ranking and dedup
+    # need a query the *vault* answers richly. The tier check needs one only
+    # the raw corpus answers: the single raw-tier document is a deep-learning
+    # paper and the vault has nothing on that subject, so a leak shows up as
+    # the paper appearing where it must not.
+    hint = "headless browser automation"
+    raw_hint = "convolutional neural networks for recognising objects in images"
+
+    wiki = PgVectorRlsBackend(embedder=embedder, corpus="wiki")
+    unfiltered = PgVectorRlsBackend(embedder=embedder, corpus=None)
+    try:
+        rows = list(await wiki.retrieve(hint, scope=cleared, k=10))
+        require(bool(rows), "the wiki-tier query returned nothing at all")
+
+        # 1. page_best is really deduplicating by document, in SQL.
+        paths = [row.file_path for row in rows]
+        require(
+            len(paths) == len(set(paths)),
+            f"the same page came back more than once: "
+            f"{sorted({p for p in paths if paths.count(p) > 1})}",
+        )
+
+        # 2. Real fusion, not the constant the Python double returned.
+        scores = {round(row.score, 12) for row in rows}
+        require(
+            len(scores) > 1,
+            f"every rrf_score was identical ({scores}); this is the constant the "
+            "hermetic double produced, not a fused ranking",
+        )
+        require(
+            all(row.score > 0 for row in rows),
+            "a returned row scored zero, so ranking cannot have ordered it",
+        )
+
+        # 3. The corpus tier holds, and the check can tell -- because the same
+        #    query through an unfiltered backend, in this same process, does
+        #    reach the raw document. Without that half, "the wiki tier returned
+        #    no raw pages" would also be true of a backend returning nothing.
+        loose = [
+            row.file_path
+            for row in await unfiltered.retrieve(raw_hint, scope=cleared, k=10)
+        ]
+        require(
+            any(p.startswith("raw/papers/") for p in loose),
+            "an unfiltered backend could not reach the raw corpus either, so the "
+            f"tier check proves nothing; it returned {loose[:3]}",
+        )
+        tiered = [
+            row.file_path for row in await wiki.retrieve(raw_hint, scope=cleared, k=10)
+        ]
+        leaked = [p for p in (*paths, *tiered) if p.startswith("raw/papers/")]
+        require(
+            not leaked,
+            f"the wiki tier reached raw-corpus documents: {sorted(set(leaked))}",
+        )
+
+        # 4. The shipped surface is fail-closed without a scope.
+        unscoped = list(await wiki.retrieve(hint, scope=None, k=10))
+        require(
+            not unscoped,
+            f"a scope-less query returned {len(unscoped)} rows; RLS is not "
+            "fail-closed at the shipped surface",
+        )
+    finally:
+        await wiki.close()
+        await unfiltered.close()
+
+    # 5. And the gate can *observe* fail-closed rather than be blinded by it.
+    #    Zero rows means nothing on its own -- that reading produced two
+    #    confident "the database is empty" diagnoses against a full index. So
+    #    the same connection must be shown returning rows once cleared.
+    settings = _app_role_connection_settings()
+    conn = await asyncpg.connect(
+        host=settings.host,  # type: ignore[attr-defined]
+        port=settings.port,  # type: ignore[attr-defined]
+        database=settings.database,  # type: ignore[attr-defined]
+        user=settings.user,  # type: ignore[attr-defined]
+        password=settings.password,  # type: ignore[attr-defined]
+    )
+    try:
+        blind = await conn.fetchval("SELECT count(*) FROM rag_chunks;")
+        await conn.execute(
+            "SELECT set_config('scout.current_depts', $1, false);",
+            ",".join(sorted(CANONICAL_DEPARTMENTS)),
+        )
+        visible = await conn.fetchval("SELECT count(*) FROM rag_chunks;")
+    finally:
+        await conn.close()
+
+    require(
+        blind == 0,
+        f"an uncleared app-role connection read {blind} chunks; RLS is not fail-closed",
+    )
+    require(
+        visible > 0,
+        "the same connection read nothing after clearance either, so this gate "
+        "cannot tell fail-closed RLS from an empty database",
+    )
+
+    print(
+        f"  {len(rows)} distinct pages, {len(scores)} distinct rrf scores; the "
+        f"raw paper is reachable unfiltered and not through the wiki tier; "
+        f"uncleared read {blind} chunks and cleared read {visible}"
+    )
+    return "LIVE SQL VERIFIED"
+
+
+def group_live_sql() -> str:
+    """The shipped retrieval SQL runs on real PostgreSQL under real RLS."""
+    return asyncio.run(_live_sql())
+
+
+# --------------------------------------------------------------------------
+# Deployment and index coherence
+# --------------------------------------------------------------------------
+
+
+def _docker(*args: str) -> str:
+    completed = subprocess.run(
+        ["docker", *args], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    require(
+        completed.returncode == 0,
+        f"docker {' '.join(args)} failed: {completed.stderr.strip()[:200]}",
+    )
+    return completed.stdout
+
+
+def group_deployment() -> str:
+    """The vault indexer is deployed, and the second vector space is gone."""
+    listed = _docker("ps", "-a", "--format", "{{.Names}}\t{{.State}}").splitlines()
+    names = {
+        line.split("\t")[0]: line.split("\t")[-1] for line in listed if line.strip()
+    }
+
+    require(
+        "snp-memory-sync-job-1" in names,
+        "sync-job has no container; it was declared `restart: unless-stopped` "
+        "and had never run, which is why nothing indexed the vault",
+    )
+    require(
+        names["snp-memory-sync-job-1"] == "running",
+        f"sync-job is {names['snp-memory-sync-job-1']}, not running",
+    )
+    health = _docker(
+        "inspect", "snp-memory-sync-job-1", "--format", "{{.State.Health.Status}}"
+    ).strip()
+    require(health == "healthy", f"sync-job reports {health}")
+
+    orphans = sorted(n for n in names if "basic-memory" in n)
+    require(
+        not orphans,
+        f"the FastEmbed@384 orphan is still running: {orphans}. Two vector "
+        "spaces in one deployment is F-2",
+    )
+
+    # Declared is not deployed: read the process and the markers from inside.
+    processes = _docker(
+        "exec",
+        "snp-memory-sync-job-1",
+        "sh",
+        "-c",
+        'for p in /proc/[0-9]*; do [ -r $p/cmdline ] && tr "\\0" " " < $p/cmdline '
+        "&& echo; done",
+    )
+    require(
+        "scout.sync_job" in processes,
+        "no scout.sync_job process inside the container",
+    )
+    markers = _docker(
+        "exec", "snp-memory-sync-job-1", "sh", "-c", "ls /tmp/snp-sync-job/"
+    ).split()
+    for marker in ("ready", "ready.raw", "ready.wiki"):
+        require(
+            marker in markers,
+            f"readiness marker {marker!r} is absent; markers present: {markers}",
+        )
+
+    print(f"  sync-job {health}, markers {sorted(markers)}, no basic-memory container")
+    return "DEPLOYMENT VERIFIED"
+
+
+async def _model_stamp() -> str:
+    import asyncpg
+
+    from scout.serve import _expected_embedding_model, assert_single_embedding_model
+
+    expected = _expected_embedding_model()
+    settings = _app_role_connection_settings()
+    conn = await asyncpg.connect(
+        host=settings.host,  # type: ignore[attr-defined]
+        port=settings.port,  # type: ignore[attr-defined]
+        database=settings.database,  # type: ignore[attr-defined]
+        user=settings.user,  # type: ignore[attr-defined]
+        password=settings.password,  # type: ignore[attr-defined]
+    )
+    try:
+        await conn.execute(
+            "SELECT set_config('scout.current_depts', $1, false);",
+            ",".join(sorted(CANONICAL_DEPARTMENTS)),
+        )
+        census = {
+            row["model"]: int(row["n"])
+            for row in await conn.fetch(
+                "SELECT c.metadata->>'model' AS model, count(*) AS n "
+                "FROM rag_chunks c GROUP BY 1;"
+            )
+        }
+        await assert_single_embedding_model(conn, expected_model=expected)
+    finally:
+        await conn.close()
+
+    require(bool(census), "the census saw no chunks at all")
+    require(
+        None not in census,
+        f"{census.get(None)} chunks carry no model stamp, so the guard against "
+        "two vector spaces does not cover them",
+    )
+    require(
+        set(census) == {expected},
+        f"the index holds {sorted(census)} but this process embeds with {expected!r}",
+    )
+
+    # The guard has to be able to fail on this very data, or its acceptance
+    # above says nothing. Plant a second space in a census of the real one.
+    class _Mixed:
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            return [
+                {"model": expected, "n": sum(census.values())},
+                {"model": "fastembed/bge-small-en-v1.5", "n": 1},
+            ]
+
+    detected = False
+    try:
+        await assert_single_embedding_model(_Mixed(), expected_model=expected)
+    except RuntimeError:
+        detected = True
+    require(
+        detected,
+        "the startup guard accepted a census holding two embedding models; it "
+        "cannot detect the failure it exists to prevent",
+    )
+
+    print(
+        f"  {sum(census.values())} chunks, all stamped {expected!r}; "
+        "guard rejects a planted second model"
+    )
+    return "MODEL STAMP VERIFIED"
+
+
+def group_model_stamp() -> str:
+    """One embedding model in the index, and a guard that can see otherwise."""
+    return asyncio.run(_model_stamp())
+
+
 GROUPS: dict[str, Callable[[], str]] = {
     "find-read-cite": group_find_read_cite,
     "vault-change-propagates": group_vault_change_propagates,
+    "live-sql": group_live_sql,
+    "deployment": group_deployment,
+    "model-stamp": group_model_stamp,
 }
 
 

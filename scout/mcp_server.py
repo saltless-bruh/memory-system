@@ -38,6 +38,52 @@ def _read_annotations(title: str) -> dict[str, object]:
     }
 
 
+#: Declared response shapes. A client that knows the shape can destructure a
+#: result instead of inferring it, and can tell a malformed response from an
+#: empty one. Kept beside the annotations so the two move together.
+_SEARCH_OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "type": {"type": "string"},
+                    "score": {"type": "number"},
+                    "snippet": {"type": "string"},
+                    "seen": {"type": "boolean"},
+                    "degraded": {"type": "boolean"},
+                },
+                "required": ["path", "seen"],
+            },
+        },
+        "returned": {"type": "integer"},
+        "suppressed_as_seen": {"type": "integer"},
+        "has_more": {"type": "boolean"},
+    },
+    "required": ["results", "returned", "suppressed_as_seen", "has_more"],
+}
+
+_READ_OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string"},
+        "title": {"type": "string"},
+        "type": {"type": "string"},
+        "tldr": {"type": "string"},
+        "content_hash": {"type": "string"},
+        "updated": {"type": ["string", "null"]},
+        "outline": {"type": "array"},
+        "sections": {"type": "object"},
+        "sources": {"type": "array"},
+        "links": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["path", "title", "tldr", "content_hash"],
+}
+
+
 async def wiki_search_tool(
     engine: ScoutDiyEngine,
     *,
@@ -155,6 +201,7 @@ def build_server(
         @mcp.tool(
             name="wiki_search",
             annotations=_read_annotations("Search wiki pages"),
+            output_schema=_SEARCH_OUTPUT_SCHEMA,
         )
         async def wiki_search_endpoint(
             query: str,
@@ -183,6 +230,7 @@ def build_server(
         @mcp.tool(
             name="wiki_read",
             annotations=_read_annotations("Read wiki page"),
+            output_schema=_READ_OUTPUT_SCHEMA,
         )
         async def wiki_read_endpoint(
             path: str,
@@ -214,6 +262,7 @@ def build_server(
         @mcp.tool(
             name="wiki_search",
             annotations=_read_annotations("Search wiki pages"),
+            output_schema=_SEARCH_OUTPUT_SCHEMA,
         )
         async def wiki_search_endpoint(
             query: str,
@@ -243,6 +292,7 @@ def build_server(
         @mcp.tool(
             name="wiki_read",
             annotations=_read_annotations("Read wiki page"),
+            output_schema=_READ_OUTPUT_SCHEMA,
         )
         async def wiki_read_endpoint(
             path: str,

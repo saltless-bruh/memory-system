@@ -187,8 +187,9 @@ async def test_authorization_header_reaches_current_access_token_and_can_narrow(
             {"query": "text", "department": "infra"},
         )
     assert not result.is_error
-    assert isinstance(result.data, dict)
-    assert result.data["results"][0]["path"] == "raw/a.md"
+    assert result.structured_content is not None
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["results"][0]["path"] == "raw/a.md"
     assert backend.calls == [Scope(departments=frozenset({"infra"}))]
 
 
@@ -213,10 +214,10 @@ async def test_protected_http_wiki_read_returns_canonical_payload(
             },
         )
     assert not result.is_error
-    assert result.data is not None
-    assert result.data["path"] == "concepts/page.md"
-    assert result.data["tldr"] == "Canonical protected read."
-    assert set(result.data) == {
+    assert result.structured_content is not None
+    assert result.structured_content["path"] == "concepts/page.md"
+    assert result.structured_content["tldr"] == "Canonical protected read."
+    assert set(result.structured_content) == {
         "path",
         "title",
         "type",

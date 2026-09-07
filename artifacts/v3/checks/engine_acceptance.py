@@ -303,7 +303,7 @@ class _Scout:
         return page if isinstance(page, dict) else {}
 
 
-def _git(*args: str, cwd: Path) -> str:
+def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run one git command, failing the gate rather than the process."""
     completed = subprocess.run(
         ["git", "-c", "core.quotePath=false", *args],
@@ -311,11 +311,19 @@ def _git(*args: str, cwd: Path) -> str:
         capture_output=True,
         text=True,
     )
-    require(
-        completed.returncode == 0,
-        f"git {' '.join(args)} failed: {completed.stderr.strip()[:300]}",
-    )
-    return completed.stdout
+    if check:
+        require(
+            completed.returncode == 0,
+            f"git {' '.join(args)} failed: {completed.stderr.strip()[:300]}",
+        )
+    return completed
+
+
+#: How many times to re-attempt a push that lost a race. The gate shares its
+#: branch with the vault lane, so a rejection is ordinary traffic rather than
+#: an error -- but a branch that never stops moving is a real problem and
+#: should surface rather than spin.
+_PUSH_ATTEMPTS = 4
 
 
 def _probe_page(sentinel: str) -> tuple[str, str]:
@@ -352,7 +360,40 @@ def _publish(clone: Path, relative: str, body: str | None, message: str) -> None
         message,
         cwd=clone,
     )
-    _git("push", "origin", f"HEAD:{VAULT_BRANCH}", cwd=clone)
+    _push_with_rebase(clone)
+
+
+def _push_with_rebase(clone: Path) -> None:
+    """Push to the vault branch, re-basing onto whatever else landed.
+
+    This gate pushes to the same branch the vault lane merges into, so `main`
+    moving between the clone and the push is ordinary traffic, not a fault. It
+    happened on 2026-09-07 and failed a gate whose subject was working
+    perfectly.
+
+    Never force. The competing push is somebody's authored work -- on that
+    occasion 50 pages of it -- and a gate that discards content to record its
+    own success has done far more damage than the failure it avoided.
+    """
+    for attempt in range(1, _PUSH_ATTEMPTS + 1):
+        pushed = _git("push", "origin", f"HEAD:{VAULT_BRANCH}", cwd=clone, check=False)
+        if pushed.returncode == 0:
+            return
+        stderr = pushed.stderr.strip()
+        require(
+            "non-fast-forward" in stderr
+            or "fetch first" in stderr
+            or "rejected" in stderr,
+            f"git push failed for a reason that is not a race: {stderr[:300]}",
+        )
+        require(
+            attempt < _PUSH_ATTEMPTS,
+            f"the vault branch moved under this gate {_PUSH_ATTEMPTS} times in a "
+            "row; another lane is pushing continuously, so pause it rather than "
+            "letting this retry forever",
+        )
+        _git("fetch", "origin", VAULT_BRANCH, cwd=clone)
+        _git("rebase", f"origin/{VAULT_BRANCH}", cwd=clone)
 
 
 async def _await_sentinel(scout: _Scout, sentinel: str, budget: float) -> str | None:

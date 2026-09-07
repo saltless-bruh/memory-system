@@ -25,39 +25,60 @@ So there are three divergent lines, all sharing 26abe20:
   - the vault + Agy work   (gitea/main)
   - the old baseline       (local main == origin/main)
 
-THE HAZARD -- READ THIS TWICE:
+THE HARD RULE -- THE LEAD'S VAULT NEVER GOES TO GITHUB.
 
-  wiki/ pages on feat        :   8
-  wiki/ pages on gitea/main  : 432
-  wiki/ pages on origin/main :   8
+  wiki/ pages on origin/main (GitHub, PUBLIC) :   8   generic sample stubs
+  wiki/ pages on feat                          :   8   the same stubs
+  wiki/ pages on gitea/main (LOCAL)            : 432   the lead's real vault
 
-This is not drift. It is deliberate and documented in
-docs/superpowers/plans/2026-09-05-three-lane-coordination.md §2: the feature
-branch carries an 8-page sample, and gitea/main carries the lead's real vault.
-The replica that the running system serves is built from gitea/main.
+github.com/saltless-bruh/memory-system is public. The 432 pages on gitea/main
+are the lead's personal knowledge base and are NOT to be published. The 8 pages
+on feat and on GitHub today are generic deep-learning stubs used as an offline
+test fixture; those are fine and stay.
 
-A naive `git merge gitea/main` into feat pulls 432 vault pages into the code
-history. A naive merge the other way can delete the lead's vault. Neither is
-acceptable. Decide explicitly what wiki/ should contain on the consolidated
-main and say so in the PR description before you merge. If the answer is not
-obvious to you, stop and ask -- this is the one place where a wrong call
-destroys content that took weeks to author.
+So this is not one consolidated history on both remotes. It is two targets with
+different content, and the difference is deliberate:
+
+  GitHub main   = the system.  wiki/ stays at the 8 sample pages.
+  Gitea  main   = the system + the lead's 432-page vault, which the running
+                  replica serves.
+
+CONCRETE CONSEQUENCE: do NOT merge gitea/main's wiki/ into feat. If you merge
+gitea/main into feat for the code, you must keep feat's wiki/ at 8 pages --
+`git checkout --ours wiki/` or equivalent -- and you must verify the count
+before any push to GitHub. Publishing the vault is not a mistake that can be
+undone by a later commit; it is public the moment it lands.
+
+MANDATORY CHECK, run before every push to origin and paste the output in your
+report:
+
+    git ls-tree -r --name-only <ref-you-are-pushing> wiki | grep -c '\.md$'
+
+If that is not exactly 8, do not push to GitHub. Stop and report.
 
 WHAT TO PRODUCE:
 
-One consolidated `main` on BOTH remotes, containing the engine work, the vault
-work, and a resolved answer to the wiki/ question. Route it through a pull
-request, not a direct push -- R-6.4 and R-7.3. The one standing exception in
-this project is the W-2 acceptance gate pushing a sentinel to the vault repo's
-main, and that is not you.
+Two targets, deliberately different:
+  - GitHub main: the system, wiki/ at 8 sample pages.
+  - Gitea  main: the same system code, with the lead's 432-page vault intact.
+
+Route it through a pull request, not a direct push -- R-6.4 and R-7.3. The one
+standing exception in this project is the W-2 acceptance gate pushing a
+sentinel to the vault repo's main, and that is not you.
 
 Order that keeps each step reviewable:
-  1. Push feat/v3-retrieval-inversion to BOTH remotes as-is, so 48 commits of
-     work stop existing on one disk only. Do this first, before any merging.
-  2. Open the PR. Resolve wiki/ deliberately.
-  3. Decide what to do with fix/architecture-security-hardening -- it is 16
-     commits ahead and may be stale or may be superseded. Report which; do not
-     assume.
+  1. DO THIS FIRST AND THEN STOP. Push feat/v3-retrieval-inversion to both
+     remotes exactly as it is -- it already carries 8 wiki pages, so it is safe
+     for GitHub without any editing. This gets 48 commits off a single disk and
+     touches no shared branch. Report, and wait for confirmation before step 2.
+  2. GitHub: open the PR from feat into main. Code only; wiki/ stays at 8.
+  3. Gitea: bring the same code onto gitea/main WITHOUT disturbing wiki/. The
+     432 pages there are what the running replica serves, and Agy is still
+     adding to them, so confirm with the owner that Agy is paused before you
+     start this step.
+  4. Report on fix/architecture-security-hardening -- 16 commits ahead, on both
+     remotes, and possibly superseded. Say which; do not assume, and do not
+     merge it as part of this.
 
 EXPECT CONFLICTS in at least these, because both lines moved:
   scout/vault.py  scout/wiki_ingest.py  scout/ingest.py  scout/sync_job.py
@@ -73,10 +94,10 @@ lands.
 
 DONE MEANS:
   - feat/v3-retrieval-inversion exists on both remotes.
-  - One PR, reviewable, with the wiki/ decision stated in its description.
-  - After merge: the offline suite passes, ruff/format/mypy are clean, and
-    `find wiki -name '*.md' | wc -l` on the merged main is the number you said
-    it would be.
+  - One PR on GitHub, reviewable, code only.
+  - GitHub main carries exactly 8 wiki pages. Paste the count.
+  - Gitea main carries 432 (or more, if Agy landed a batch). Paste the count.
+  - After merge: the offline suite passes, ruff/format/mypy are clean.
   - The running stack still serves: `snpmemory verify-secrets` exits 0 and the
     replica still has 433 files.
 

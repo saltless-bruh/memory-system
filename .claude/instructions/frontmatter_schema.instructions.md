@@ -29,10 +29,28 @@ Never regenerate those control documents from sparse metadata.
 
 ## Body frame
 
-Every page has an H1 and `## Cross-References`. `## TL;DR` is recommended.
-`## Provenance` is required when sources are declared. Interior sections are
-free-form. Add at least two outbound `[[wikilinks]]`, introduce lists with a
-context sentence, and keep one primary subject per page.
+Two headings are required, in this order, exactly once each:
+
+- `## TL;DR` — a summary of the page's own text. This is not decoration: the
+  ingester makes it **chunk 0** of the indexed page, so it is the first thing a
+  query is scored against. A page without one is found by whatever fragment
+  happens to match rather than by what it is about.
+- `## Cross-References` — gathers `[[wikilinks]]`. Lines that are nothing but
+  wikilinks are stripped from the indexed text, so this section is navigation
+  for a reader rather than content for the retriever.
+
+Three headings are optional. Each sits immediately before `## Cross-References`
+when present, in this order: `## Technical Specifications`, `## Provenance`,
+`## Works Cited`.
+
+`## Provenance` is optional unconditionally, including on pages that declare
+`sources:`. It is a dated sourcing changelog, and one cannot be written
+retroactively without inventing the dates — so requiring it would make
+fabrication the only route to a green lint.
+
+Interior sections are free-form under the authored frame (see below). Add at
+least two outbound `[[wikilinks]]`, introduce lists with a context sentence,
+and keep one primary subject per page.
 
 The current automated checker does not yet certify this complete V3 contract.
 Review these requirements explicitly and report the verifier limitation rather

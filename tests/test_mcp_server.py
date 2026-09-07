@@ -105,7 +105,7 @@ async def test_wiki_search_tool_returns_bounded_data_and_exact_scope() -> None:
         query="page meaning",
         k=3,
     )
-    assert result == [
+    assert result["results"] == [
         {
             "path": "concepts/page.md",
             "type": "concept",
@@ -123,7 +123,8 @@ async def test_wiki_search_tool_returns_bounded_data_and_exact_scope() -> None:
             3,
         )
     ]
-    assert "action" not in result[0] and "command" not in result[0]
+    results = result["results"]
+    assert "action" not in results[0] and "command" not in results[0]
 
 
 async def test_wiki_search_tool_seen_hash_returns_stub() -> None:
@@ -134,7 +135,10 @@ async def test_wiki_search_tool_seen_hash_returns_stub() -> None:
         query="page",
         seen=["sha:page"],
     )
-    assert result == [{"path": "concepts/page.md", "title": "Page", "seen": True}]
+    assert result["results"] == [
+        {"path": "concepts/page.md", "title": "Page", "seen": True}
+    ]
+    assert result["suppressed_as_seen"] == 1
 
 
 async def test_wiki_read_tool_returns_requested_canonical_mode(
@@ -278,6 +282,66 @@ async def test_default_server_reads_configured_runtime_vault(
     result = await tool.run({"path": "page", "mode": "tldr"})
     assert result.structured_content is not None
     assert result.structured_content["path"] == "concepts/page.md"
+
+
+def _page_chunk(path: str, content_hash: str) -> RagChunk:
+    """A chunk on its own page, so dedup keeps it as a distinct hit."""
+    return RagChunk(
+        text="Body text.",
+        file_path=path,
+        score=0.8,
+        meta={
+            "title": path,
+            "type": "concept",
+            "tldr": "Bounded page summary.",
+            "content_hash": content_hash,
+            "degraded": "false",
+        },
+    )
+
+
+async def test_wiki_search_says_when_there_are_probably_more_pages() -> None:
+    """Hitting the k ceiling and exhausting the matches look identical today."""
+    backend = RecordingBackend(
+        [_page_chunk(f"concepts/p{i}.md", f"sha:{i}") for i in range(6)]
+    )
+    payload = await wiki_search_tool(
+        _engine(backend), identity=_identity("ai_eng"), query="anything", k=5
+    )
+
+    assert isinstance(payload, dict), "the response carries metadata now"
+    assert len(payload["results"]) == 5
+    assert payload["returned"] == 5
+    assert payload["has_more"] is True
+    assert payload["suppressed_as_seen"] == 0
+
+
+async def test_wiki_search_reports_an_exhausted_result_as_complete() -> None:
+    backend = RecordingBackend(
+        [_page_chunk(f"concepts/p{i}.md", f"sha:{i}") for i in range(3)]
+    )
+    payload = await wiki_search_tool(
+        _engine(backend), identity=_identity("ai_eng"), query="anything", k=5
+    )
+    assert payload["returned"] == 3
+    assert payload["has_more"] is False
+
+
+async def test_wiki_search_counts_pages_redacted_as_already_seen() -> None:
+    """A seen page comes back without a snippet; say so rather than let it
+    look like a thin result."""
+    backend = RecordingBackend(
+        [_page_chunk(f"concepts/p{i}.md", f"sha:{i}") for i in range(3)]
+    )
+    payload = await wiki_search_tool(
+        _engine(backend),
+        identity=_identity("ai_eng"),
+        query="anything",
+        k=5,
+        seen=["sha:1"],
+    )
+    assert payload["returned"] == 3
+    assert payload["suppressed_as_seen"] == 1
 
 
 async def test_server_lifespan_closes_closeable_backend() -> None:

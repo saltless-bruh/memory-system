@@ -187,8 +187,8 @@ async def test_authorization_header_reaches_current_access_token_and_can_narrow(
             {"query": "text", "department": "infra"},
         )
     assert not result.is_error
-    assert isinstance(result.data, list)
-    assert result.data[0]["path"] == "raw/a.md"
+    assert isinstance(result.data, dict)
+    assert result.data["results"][0]["path"] == "raw/a.md"
     assert backend.calls == [Scope(departments=frozenset({"infra"}))]
 
 

@@ -227,6 +227,112 @@ async def test_protected_http_wiki_read_returns_canonical_payload(
     assert backend.calls == []
 
 
+class _StaticBackend(RagBackend):
+    """Returns fixed chunks verbatim, so callers can shape `.canonical()`
+    output precisely via chunk ``meta``."""
+
+    def __init__(self, chunks: Sequence[RagChunk]) -> None:
+        self.chunks = chunks
+
+    async def retrieve(
+        self,
+        hint: str,
+        *,
+        path: str | None = None,
+        scope: Scope | None = None,
+        k: int = 10,
+    ) -> Sequence[RagChunk]:
+        return self.chunks
+
+
+def _static_search_config() -> Any:
+    return load_auth_config(
+        {
+            "SCOUT_AUTH_MODE": "static",
+            "SCOUT_AUTH_BASE_URL": "http://scout.test",
+            "SCOUT_STATIC_TOKENS": (
+                '{"valid-token":{"subject":"http-client","departments":["infra"]}}'
+            ),
+        }
+    )
+
+
+async def test_wiki_search_data_destructures_per_declared_output_schema() -> None:
+    """``.data`` is exactly where an omitted schema field or a client-side
+    coercion bug lands invisibly; assert it destructures as declared."""
+    backend = _StaticBackend(
+        [
+            RagChunk(
+                text="Body text.",
+                file_path="concepts/p0.md",
+                score=0.8,
+                meta={
+                    "title": "concepts/p0.md",
+                    "type": "concept",
+                    "tldr": "Bounded page summary.",
+                    "content_hash": "sha:0",
+                    "degraded": "false",
+                },
+            )
+        ]
+    )
+    server = build_server(backend, auth_config=_static_search_config())
+    app = server.http_app(stateless_http=True)
+    transport = StreamableHttpTransport(
+        "http://scout.test/mcp",
+        auth="valid-token",
+        httpx_client_factory=_factory(app),
+    )
+    async with app.lifespan(app), Client(transport) as client:
+        result = await client.call_tool(
+            "wiki_search",
+            {"query": "text", "department": "infra"},
+        )
+    assert not result.is_error
+    assert result.data is not None
+    assert result.data.has_more is False
+    assert result.data.returned == 1
+    assert result.data.results[0].path == "concepts/p0.md"
+
+
+async def test_seen_stub_still_carries_title_through_data() -> None:
+    """A seen stub is how the agent learns a page was redacted rather than
+    empty; the declared schema must not silently drop the field naming it."""
+    backend = _StaticBackend(
+        [
+            RagChunk(
+                text="Body text.",
+                file_path="concepts/p1.md",
+                score=0.8,
+                meta={
+                    "title": "concepts/p1.md",
+                    "type": "concept",
+                    "tldr": "Bounded page summary.",
+                    "content_hash": "sha:1",
+                    "degraded": "false",
+                },
+            )
+        ]
+    )
+    server = build_server(backend, auth_config=_static_search_config())
+    app = server.http_app(stateless_http=True)
+    transport = StreamableHttpTransport(
+        "http://scout.test/mcp",
+        auth="valid-token",
+        httpx_client_factory=_factory(app),
+    )
+    async with app.lifespan(app), Client(transport) as client:
+        result = await client.call_tool(
+            "wiki_search",
+            {"query": "text", "department": "infra", "seen": ["sha:1"]},
+        )
+    assert not result.is_error
+    assert result.data is not None
+    stub = result.data.results[0]
+    assert stub.seen is True
+    assert stub.title == "concepts/p1.md"
+
+
 async def test_forbidden_department_is_tool_error_and_never_calls_backend() -> None:
     server, backend = _server()
     app = server.http_app(stateless_http=True)

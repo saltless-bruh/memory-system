@@ -359,6 +359,18 @@ async def test_wiki_search_counts_pages_redacted_as_already_seen() -> None:
     assert payload["suppressed_as_seen"] == 1
 
 
+async def test_wiki_search_k_zero_never_claims_more_pages() -> None:
+    """The engine returns no hits at all when ``k<=0``; ``has_more`` must not
+    read the resulting empty list as having hit a ceiling."""
+    backend = RecordingBackend([_page_chunk("concepts/p0.md", "sha:0")])
+    payload = await wiki_search_tool(
+        _engine(backend), identity=_identity("ai_eng"), query="anything", k=0
+    )
+    assert payload["results"] == []
+    assert payload["returned"] == 0
+    assert payload["has_more"] is False
+
+
 async def test_server_lifespan_closes_closeable_backend() -> None:
     backend = RecordingBackend()
     backend.close = AsyncMock()  # type: ignore[attr-defined]

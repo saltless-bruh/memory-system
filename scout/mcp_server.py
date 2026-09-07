@@ -49,12 +49,21 @@ _SEARCH_OUTPUT_SCHEMA: dict[str, object] = {
             "items": {
                 "type": "object",
                 "properties": {
+                    # Fields WikiHit.canonical() (scout/diy_engine.py:69-83) can
+                    # emit. A seen stub carries only path/title/seen; a live
+                    # hit carries path/type/score/snippet/seen/degraded, plus
+                    # an optional reason when degraded. Every field it can
+                    # emit must be declared here -- the schema drives client
+                    # coercion, so an omitted field is silently deleted from
+                    # the agent-facing response.
                     "path": {"type": "string"},
+                    "title": {"type": "string"},
                     "type": {"type": "string"},
                     "score": {"type": "number"},
                     "snippet": {"type": "string"},
                     "seen": {"type": "boolean"},
                     "degraded": {"type": "boolean"},
+                    "reason": {"type": "string"},
                 },
                 "required": ["path", "seen"],
             },
@@ -111,7 +120,7 @@ async def wiki_search_tool(
         "results": [hit.canonical() for hit in hits],
         "returned": len(hits),
         "suppressed_as_seen": sum(1 for hit in hits if hit.seen),
-        "has_more": len(hits) == k,
+        "has_more": len(hits) == k and k > 0,
     }
 
 

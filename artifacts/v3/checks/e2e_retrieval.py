@@ -445,11 +445,16 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
             {"query": "INDEXED_BODY_SENTINEL", "department": "infra"},
         )
         require(not search.is_error, "authenticated wiki_search returned an error")
+        search_payload = search.structured_content
         require(
-            isinstance(search.data, list) and bool(search.data),
+            isinstance(search_payload, dict), "search returned no structured payload"
+        )
+        results = search_payload.get("results")
+        require(
+            isinstance(results, list) and bool(results),
             "search found no page",
         )
-        first = search.data[0]
+        first = results[0]
         require(isinstance(first, dict), "search result was not a page mapping")
         path = first.get("path")
         require(path == "concepts/scope-routing.md", f"search chose {path!r}")
@@ -463,8 +468,9 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
             {"path": path, "department": "infra", "mode": "full"},
         )
         require(not read.is_error, "authenticated wiki_read returned an error")
-        require(isinstance(read.data, dict), "wiki_read returned no page envelope")
-        sections = read.data.get("sections")
+        read_payload = read.structured_content
+        require(isinstance(read_payload, dict), "wiki_read returned no page envelope")
+        sections = read_payload.get("sections")
         require(isinstance(sections, dict), "full wiki_read omitted page sections")
         current_text = "\n".join(str(value) for value in sections.values())
         require(
@@ -862,10 +868,16 @@ async def _exercise_boundary(wiki_dir: Path) -> None:
             "wiki_search",
             {"query": "BOUNDARY_QUERY_SENTINEL", "department": "infra"},
         )
+        positive_payload = positive.structured_content
+        positive_results = (
+            positive_payload.get("results")
+            if isinstance(positive_payload, dict)
+            else None
+        )
         require(
             not positive.is_error
-            and isinstance(positive.data, list)
-            and bool(positive.data),
+            and isinstance(positive_results, list)
+            and bool(positive_results),
             "authenticated positive control did not reach retrieval",
         )
         require(

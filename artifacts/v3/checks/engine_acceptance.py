@@ -295,7 +295,8 @@ class _Scout:
         return payload
 
     async def search(self, query: str, k: int = 5) -> list[dict[str, object]]:
-        hits = await self._call("wiki_search", {"query": query, "k": k})
+        payload = await self._call("wiki_search", {"query": query, "k": k})
+        hits = payload.get("results") if isinstance(payload, dict) else payload
         return list(hits) if isinstance(hits, list) else []
 
     async def read(self, path: str) -> dict[str, object]:

@@ -67,6 +67,7 @@ def test_render_index_includes_navigation_pages_and_all_non_generated_count(
 def test_collect_lint_keeps_broken_links_and_orphans_as_warnings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Authored sections are valid; graph defects remain warnings."""
     wiki = tmp_path / "wiki"
     raw = tmp_path / "raw"
     raw.mkdir()
@@ -78,6 +79,18 @@ def test_collect_lint_keeps_broken_links_and_orphans_as_warnings(
         else:
             target.mkdir(parents=True, exist_ok=True)
     page = _page(wiki, "concepts/content.md", "Content")
+    page.body = """## TL;DR
+
+Summary.
+
+## Trade-offs
+
+This authored section is not part of the compiled-page frame.
+
+## Cross-References
+
+[[missing-page]]
+"""
     monkeypatch.setattr(gen_index, "WIKI_DIR", wiki)
     monkeypatch.setattr(vault, "RAW_DIR", raw)
 

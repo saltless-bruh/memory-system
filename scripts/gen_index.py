@@ -66,7 +66,11 @@ def collect_lint(pages: list[vault.Page]) -> vault.LintResult:
 
     slugs = {p.slug for p in pages}
     for page in pages:
-        r = vault.lint_page(page, known_slugs=slugs)
+        r = vault.lint_page(
+            page,
+            known_slugs=slugs,
+            frame=vault.HeadingFrame.AUTHORED,
+        )
         result.errors.extend(r.errors)
         result.warnings.extend(r.warnings)
 

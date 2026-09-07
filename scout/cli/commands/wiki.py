@@ -23,6 +23,39 @@ if TYPE_CHECKING:
 #: Injected by the dispatcher; never a user-facing flag.
 Injected = Annotated[Any, Parameter(parse=False)]
 
+_INGEST_STATUS_BUCKETS = {
+    "dry_run_ok": "would_index",
+    "ingested_ok": "indexed",
+    "purged_deleted": "purged",
+    "purged_empty": "purged",
+    "skipped_no_body": "skipped",
+    "skipped_unmapped_acl": "skipped",
+    "unchanged": "unchanged",
+}
+_INGEST_BUCKETS = ("would_index", "indexed", "purged", "unchanged", "skipped")
+
+
+def _count_ingest_outcomes(results: list[dict[str, object]]) -> dict[str, int]:
+    """Map the pipeline vocabulary explicitly so new statuses cannot disappear."""
+    counts = {bucket: 0 for bucket in _INGEST_BUCKETS}
+    unknown: set[str] = set()
+    for result in results:
+        status = result.get("status")
+        bucket = _INGEST_STATUS_BUCKETS.get(status) if isinstance(status, str) else None
+        if bucket is None:
+            unknown.add(status if isinstance(status, str) else repr(status))
+            continue
+        counts[bucket] += 1
+
+    if unknown:
+        raise infrastructure_error(
+            "wiki ingestion returned an unrecognized status",
+            hint="upgrade the CLI and ingestion pipeline together",
+            retryable=False,
+            statuses=sorted(unknown),
+        )
+    return counts
+
 
 def _resolve(pages: list[Any], identifier: str) -> Any:
     """Find one page by path, slug, or title without choosing ambiguously."""
@@ -285,19 +318,16 @@ def ingest_wiki_command(
 
     del config
     results = asyncio.run(ingest_wiki(Path(dir), dry_run=dry_run))
-    indexed = sum(1 for result in results if result.get("status") == "ingested_ok")
-    unchanged = sum(1 for result in results if result.get("status") == "unchanged")
-    skipped = len(results) - indexed - unchanged
+    counts = _count_ingest_outcomes(results)
     return CommandResult(
         data={
             "pages": len(results),
-            "indexed": indexed,
-            "unchanged": unchanged,
-            "skipped": skipped,
+            **counts,
             "results": results,
         },
         summary=(
-            f"{indexed} pages indexed, {unchanged} unchanged, "
-            f"{skipped} skipped from {dir}"
+            f"{counts['would_index']} would be indexed, "
+            f"{counts['indexed']} indexed, {counts['purged']} purged, "
+            f"{counts['unchanged']} unchanged, {counts['skipped']} skipped from {dir}"
         ),
     )

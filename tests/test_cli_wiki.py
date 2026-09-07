@@ -404,8 +404,18 @@ def test_cli_search_engine_is_built_on_the_wiki_tier(tmp_path: Path) -> None:
 def test_ingest_wiki_reports_per_page_outcomes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The command must report what it indexed, not merely exit zero."""
+    """Every pipeline status has an explicit operator-facing outcome."""
     from scout.cli.commands.wiki import ingest_wiki_command
+
+    statuses = [
+        "dry_run_ok",
+        "ingested_ok",
+        "purged_deleted",
+        "purged_empty",
+        "skipped_no_body",
+        "skipped_unmapped_acl",
+        "unchanged",
+    ]
 
     async def fake_ingest_wiki(
         wiki_dir: Path, **kwargs: object
@@ -419,25 +429,27 @@ def test_ingest_wiki_reports_per_page_outcomes(
                 "chunks_count": 3 if status == "ingested_ok" else 0,
                 "status": status,
             }
-            for status in (
-                "dry_run_ok",
-                "ingested_ok",
-                "purged_deleted",
-                "purged_empty",
-                "skipped_no_body",
-                "skipped_unmapped_acl",
-                "unchanged",
-            )
+            for status in statuses
         ]
 
     monkeypatch.setattr("scout.wiki_ingest.ingest_wiki", fake_ingest_wiki)
     result = ingest_wiki_command(dir="wiki", dry_run=True)
 
     assert result.data["pages"] == 7
+    assert result.data["would_index"] == 1
     assert result.data["indexed"] == 1
+    assert result.data["purged"] == 2
     assert result.data["unchanged"] == 1
-    assert result.data["skipped"] == 5
-    assert result.summary == "1 pages indexed, 1 unchanged, 5 skipped from wiki"
+    assert result.data["skipped"] == 2
+    assert result.summary == (
+        "1 would be indexed, 1 indexed, 2 purged, 1 unchanged, 2 skipped from wiki"
+    )
+
+    statuses[:] = ["future_status"]
+    with pytest.raises(CliError) as caught:
+        ingest_wiki_command(dir="wiki", dry_run=True)
+    assert caught.value.to_result().exit_code == ExitCode.INFRASTRUCTURE
+    assert caught.value.details == {"statuses": ["future_status"]}
 
 
 def test_ingest_wiki_is_a_declared_shipped_command() -> None:

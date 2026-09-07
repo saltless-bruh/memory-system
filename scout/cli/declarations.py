@@ -576,7 +576,9 @@ command(
     example=("--dir", "wiki", "--dry-run", "-o", "json"),
     output_fields=(
         FieldSpec("pages", "integer"),
+        FieldSpec("would_index", "integer"),
         FieldSpec("indexed", "integer"),
+        FieldSpec("purged", "integer"),
         FieldSpec("unchanged", "integer"),
         FieldSpec("skipped", "integer"),
         FieldSpec("results", "array", items=FieldSpec("result", "object")),

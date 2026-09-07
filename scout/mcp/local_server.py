@@ -17,6 +17,17 @@ confused-deputy failure the MCP guidance exists to prevent.
 The authenticated Scout server exposes the same read-only ``wiki_search`` and
 ``wiki_read`` contract. Direct address fetch remains an operator-only command.
 
+**The response shapes are shared; the declared output schemas deliberately are
+not.** ``wiki_search`` here returns the same envelope as the authenticated
+server — ``results`` plus ``returned``, ``suppressed_as_seen`` and
+``has_more`` — but no ``output_schema`` is declared for either tool, so the two
+servers' tool metadata differs on purpose. Declaring one would make FastMCP
+coerce ``result.data`` into a generated model on this surface too, and that
+coercion is what silently broke three separate live-gate consumers when it was
+introduced on the HTTP side. The schemas are worth having eventually; adding
+them is a change with its own consumers to find, not a symmetry fix. Recorded
+here so the asymmetry reads as a decision rather than an oversight.
+
 **Why `compile_plan` is not an MCP task.** It looks like the obvious candidate —
 a batch that runs for minutes, handed back as a handle — and `fastmcp` 3.3.1 does
 implement Tasks. It was measured rather than assumed, and the cost is not one

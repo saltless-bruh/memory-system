@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -49,7 +50,17 @@ WIKI_MAX_CHUNK_CHARS = 1400
 #: chunks were cut under the rules this process would use. Same bytes cut at
 #: different boundaries retrieve differently, and nothing else records it:
 #: `capability_fingerprint` covers the parser, not the chunker.
-WIKI_CHUNK_POLICY = f"chars={WIKI_MAX_CHUNK_CHARS};tokens={WIKI_TARGET_CHUNK_TOKENS}"
+#: Bumped whenever the rules for preparing a section change -- which headings
+#: count as link sections, what is stripped, how the TL;DR is resolved. The
+#: page's bytes do not move when those rules do, so without this in the stamp
+#: the ingest short-circuit would skip exactly the pages a fix was written for.
+#: 2: fold diacritics in `_heading_key`, so `## Liên quan` is recognised as the
+#:    link section `_LINK_SECTION_NAMES` always claimed to cover.
+WIKI_PREPARE_REVISION = 2
+WIKI_CHUNK_POLICY = (
+    f"chars={WIKI_MAX_CHUNK_CHARS};tokens={WIKI_TARGET_CHUNK_TOKENS}"
+    f";rev={WIKI_PREPARE_REVISION}"
+)
 
 _HEADING_LINE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
@@ -168,7 +179,23 @@ def _heading(section: ParsedSection) -> tuple[int, str] | None:
 
 
 def _heading_key(value: str) -> str:
-    return re.sub(r"[^\w]+", "", value, flags=re.UNICODE).casefold()
+    """Normalise a heading to the key its section role is looked up by.
+
+    Diacritics are folded, so `## Liên quan` and `## Lien quan` reach the same
+    entry. Without that, `_LINK_SECTION_NAMES` contained `lienquan` and matched
+    nothing at all: `\w` under `re.UNICODE` keeps `ê`, so the real heading
+    normalised to `liênquan` and missed by one character. Nobody puts
+    `lienquan` in a set of link-section names by accident, so the normaliser is
+    made to produce what the entry describes rather than a second spelling
+    added beside it.
+
+    Folding is decomposition-based rather than a substitution table, so it
+    covers every accented form the vault uses instead of the handful someone
+    remembered.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    without_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^\w]+", "", without_marks, flags=re.UNICODE).casefold()
 
 
 def _section_body(section: ParsedSection) -> str:

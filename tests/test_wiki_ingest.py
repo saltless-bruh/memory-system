@@ -684,3 +684,74 @@ async def test_reconciliation_purges_control_documents(tmp_path: Path) -> None:
     assert deleted == ["concepts/deleted.md", "index.md", "log.md"]
     assert "concepts/real-page.md" not in deleted
     assert purged == [1, 2, 4]
+
+
+# ── the Vietnamese link heading the set already meant to catch ─────────────
+
+
+def test_the_vietnamese_link_heading_is_recognised() -> None:
+    """`_LINK_SECTION_NAMES` has always contained `lienquan`, and it has never
+    matched anything.
+
+    `_heading_key` keeps Unicode word characters, so `## Liên quan` normalises
+    to `liênquan` with the diacritic and misses the entry by one character. The
+    intent was unambiguous -- nobody adds `lienquan` to a set of link-section
+    names by accident -- so the fix is to make the normaliser produce what the
+    entry describes rather than to add a second spelling beside it.
+    """
+    from scout.wiki_ingest import _LINK_SECTION_NAMES, _heading_key
+
+    assert _heading_key("Liên quan") in _LINK_SECTION_NAMES
+    assert _heading_key("Lien quan") in _LINK_SECTION_NAMES
+    assert _heading_key("LIÊN QUAN") in _LINK_SECTION_NAMES
+
+
+def test_folding_diacritics_does_not_collide_unrelated_headings() -> None:
+    """Stripping accents must not make two different sections the same key."""
+    from scout.wiki_ingest import _heading_key
+
+    assert _heading_key("Dùng để") != _heading_key("Liên quan")
+    assert _heading_key("TL;DR") == "tldr"
+    assert _heading_key("Cross-References") == "crossreferences"
+    assert _heading_key("Provenance") == "provenance"
+
+
+def test_a_vietnamese_link_section_drops_its_pure_wikilink_lines() -> None:
+    """The behaviour the dead entry was supposed to produce, end to end."""
+    chunks = _chunks(
+        """---
+title: Vietnamese Links
+type: concept
+---
+
+# Vietnamese Links
+
+## TL;DR
+
+Trang này mô tả một khái niệm.
+
+## Liên quan
+
+[[Alpha]] · [[Beta]]
+"""
+    )
+    joined = "\n".join(chunk.chunk_text for chunk in chunks)
+    assert "[[Alpha]]" not in joined
+
+
+def test_the_chunk_policy_stamp_covers_how_sections_are_cut() -> None:
+    """A change to section handling must invalidate the stored chunks.
+
+    The short-circuit skips a page when its bytes, model, chunk policy and
+    capability fingerprint all match. None of those move when the *rules* for
+    preparing a section change -- folding diacritics so `## Liên quan` is
+    finally recognised as a link section changes what gets indexed for 13
+    pages, while their bytes stay identical. Without a revision in the stamp
+    the fix would silently never reach the corpus it was written for.
+    """
+    from scout.wiki_ingest import WIKI_CHUNK_POLICY, WIKI_PREPARE_REVISION
+
+    assert f"rev={WIKI_PREPARE_REVISION}" in WIKI_CHUNK_POLICY
+    assert WIKI_PREPARE_REVISION >= 2, (
+        "bump WIKI_PREPARE_REVISION whenever section preparation changes"
+    )

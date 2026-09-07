@@ -341,7 +341,10 @@ services:
     environment:
       GITEA_INSTANCE_URL: ${GITEA_INSTANCE_URL:-http://git:3000}
       GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_REGISTRATION_TOKEN:-}
-      GITEA_RUNNER_NAME: snp-auto-healer-runner
+      # Named for what it gates now. The auto-healer workflow it was named
+      # after was removed in 29f1f50; this runner serves checks.yaml and
+      # security.yaml.
+      GITEA_RUNNER_NAME: snp-ci-runner
       CONFIG_FILE: /config.yaml
     volumes:
       - ./config/gitea/runner-config.yaml:/config.yaml:ro

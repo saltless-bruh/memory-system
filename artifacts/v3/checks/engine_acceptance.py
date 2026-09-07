@@ -860,7 +860,76 @@ def group_ingest_integrity() -> str:
     return asyncio.run(_ingest_integrity())
 
 
+# --------------------------------------------------------------------------
+# CI -- workflows that are retained must actually gate something
+# --------------------------------------------------------------------------
+
+#: The workflows this repository keeps in order to gate changes. `pr-heal`'s
+#: workflow was deleted in 29f1f50 and is deliberately not listed.
+GATING_WORKFLOWS = ("checks.yaml", "security.yaml")
+
+#: Gitea records a job that was never dispatched with `started` at the Unix
+#: epoch while still marking its run complete. Reading the run status alone
+#: therefore reports 15 successful `checks` runs for a repository whose CI has
+#: never executed a single job -- which is exactly the reading that produced
+#: the claim this gate exists to replace.
+_JOB_STARTED_SQL = """
+    SELECT r.workflow_id AS workflow, j.name AS job, j.status AS status,
+           j.started AS started
+    FROM action_run r JOIN action_run_job j ON j.run_id = r.id
+    WHERE j.started > 0
+    ORDER BY j.started DESC;
+"""
+
+
+def group_ci_executed() -> str:
+    """The retained CI workflows have each actually run a job."""
+    query = _JOB_STARTED_SQL.replace("\n", " ").strip()
+    out = _docker(
+        "exec",
+        "snp-memory-git-1",
+        "sh",
+        "-c",
+        # A copy, because Gitea holds a write lock on the live database.
+        f'cp /data/gitea/gitea.db /tmp/ci.db && sqlite3 /tmp/ci.db "{query}"'
+        " ; rm -f /tmp/ci.db",
+    )
+    # 3 = success, 4 = failure. Both mean the job ran to a verdict, which is
+    # what "gated something" means. 5 (cancelled) and 6 (skipped) mean it did
+    # not, however healthy the runner looked while not running it.
+    reached_verdict = {"3", "4"}
+    verdicts: dict[str, list[str]] = {}
+    attempted: dict[str, list[str]] = {}
+    for line in out.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 4 or not parts[0]:
+            continue
+        workflow, job, status = parts[0], parts[1], parts[2]
+        attempted.setdefault(workflow, []).append(f"{job}:status={status}")
+        if status in reached_verdict:
+            verdicts.setdefault(workflow, []).append(f"{job}:status={status}")
+
+    require(
+        bool(attempted),
+        "no CI job has ever started on this instance. Gitea marks runs complete "
+        "even when no runner ever took them, so run status is not evidence; this "
+        "reads the job's own start time",
+    )
+    missing = [w for w in GATING_WORKFLOWS if w not in verdicts]
+    require(
+        not missing,
+        f"these retained workflows have never run a job to a verdict: {missing}. "
+        f"Jobs that started at all: {dict(attempted)} "
+        "(status 5 is cancelled and 6 is skipped -- neither gates anything)",
+    )
+
+    counts = {k: len(v) for k, v in verdicts.items()}
+    print(f"  jobs reaching a verdict, by workflow: {counts}")
+    return "CI EXECUTED VERIFIED"
+
+
 GROUPS: dict[str, Callable[[], str]] = {
+    "ci-executed": group_ci_executed,
     "ingest-integrity": group_ingest_integrity,
     "find-read-cite": group_find_read_cite,
     "vault-change-propagates": group_vault_change_propagates,

@@ -176,6 +176,60 @@ def test_no_skill_is_named_after_a_retired_tool() -> None:
     assert not named, f"skills named after retired surfaces: {named}"
 
 
+#: Small closed-class words dropped before comparing description vocabulary.
+#: Not an attempt at real stopword coverage -- just enough that shared
+#: grammatical glue ("the", "to", "and") doesn't count as shared meaning.
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "by",
+        "do",
+        "even",
+        "for",
+        "has",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "only",
+        "or",
+        "so",
+        "that",
+        "the",
+        "then",
+        "this",
+        "to",
+        "use",
+        "used",
+        "when",
+        "with",
+        "you",
+        "your",
+    }
+)
+_WORD = re.compile(r"[a-z0-9_]+")
+
+#: Measured on the current pair (query vs. read) the Jaccard overlap is
+#: ~0.094 -- five distinct shared words ("candidate", "pages", "question",
+#: "read", "wiki_search") out of a ~53-word combined vocabulary. 0.5 leaves
+#: over 5x headroom above that measured value, so an incidental wording tweak
+#: will not trip it, while two descriptions that once again both describe
+#: "retrieval" in the same terms -- the Retrieval Semantic Dissonance this
+#: task removed -- would cross it.
+_MAX_DESCRIPTION_OVERLAP = 0.5
+
+
+def _description_tokens(text: str) -> set[str]:
+    return {w for w in _WORD.findall(text) if w not in _STOPWORDS}
+
+
 def test_the_two_retrieval_skills_describe_different_moments() -> None:
     """Overlapping descriptions make the choice arbitrary."""
     root = REPO_ROOT / "packages/snp-agent/skills"
@@ -188,3 +242,11 @@ def test_the_two_retrieval_skills_describe_different_moments() -> None:
     query, read = desc("snp-query-wiki"), desc("snp-read-wiki-page")
     assert "wiki_search" in query and "first" in query
     assert "after" in read, "the read skill must say it comes second"
+
+    query_tokens, read_tokens = _description_tokens(query), _description_tokens(read)
+    overlap = len(query_tokens & read_tokens) / len(query_tokens | read_tokens)
+    assert overlap < _MAX_DESCRIPTION_OVERLAP, (
+        f"descriptions overlap too much to describe different moments: "
+        f"jaccard={overlap:.2f} >= {_MAX_DESCRIPTION_OVERLAP} "
+        f"shared={sorted(query_tokens & read_tokens)}"
+    )

@@ -46,8 +46,8 @@
           "snp-compile-wiki",
           "snp-export-mcp",
           "snp-ingest-raw-data",
-          "snp-rag-fetch",
-          "snp-search-wiki",
+          "snp-query-wiki",
+          "snp-read-wiki-page",
           "snp-verify-vault"
         ],
         "workflows": [

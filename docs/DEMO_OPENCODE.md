@@ -160,7 +160,7 @@ uv run snpmemory install-agent <opencode-agent-dir> --dry-run
 When OpenCode initializes:
 1. **Plugin Schema Discovery**: It loads `packages/snp-agent/plugin.json` conforming to Agent Plugins 1.0.0.
 2. **Skill Registration**: It registers the 7 portable domain skills:
-   - `snp-bootstrap-system`, `snp-compile-wiki`, `snp-export-mcp`, `snp-ingest-raw-data`, `snp-rag-fetch`, `snp-search-wiki`, `snp-verify-vault`.
+   - `snp-bootstrap-system`, `snp-compile-wiki`, `snp-export-mcp`, `snp-ingest-raw-data`, `snp-query-wiki`, `snp-read-wiki-page`, `snp-verify-vault`.
 3. **Tool Surface Audit**: Confirm OpenCode recognizes all declared MCP tools:
    - **`scout`**: `wiki_search`, `wiki_read`.
    - **`snpmemory`**: `verify`, `plan_articles`, `compile_plan`, `compile_status`, `wiki_search`, `wiki_read`.

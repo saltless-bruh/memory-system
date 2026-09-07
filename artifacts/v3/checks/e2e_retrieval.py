@@ -706,7 +706,7 @@ def group_contract_matches_surface() -> str:
     mirror_relatives = (
         Path("instructions/query_protocol.instructions.md"),
         Path("workflows/snp-query.md"),
-        Path("skills/snp-rag-fetch/SKILL.md"),
+        Path("skills/snp-query-wiki/SKILL.md"),
     )
     entry_contracts = [
         REPO_ROOT / "AGENTS.md",

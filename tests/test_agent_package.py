@@ -71,8 +71,8 @@ def test_package_skills_frontmatter() -> None:
         "snp-compile-wiki",
         "snp-export-mcp",
         "snp-ingest-raw-data",
-        "snp-rag-fetch",
-        "snp-search-wiki",
+        "snp-query-wiki",
+        "snp-read-wiki-page",
         "snp-verify-vault",
     ]
     for skill_name in expected_skills:
@@ -106,7 +106,7 @@ def test_installer_fresh_installation(tmp_path: Path) -> None:
     assert (agent_dir / "instructions" / "agent_guide.instructions.md").is_file()
     assert (agent_dir / "workflows" / "snp-query.md").is_file()
     assert (agent_dir / "workflows" / "snp-reload.md").is_file()
-    assert (agent_dir / "skills" / "snp-search-wiki" / "SKILL.md").is_file()
+    assert (agent_dir / "skills" / "snp-read-wiki-page" / "SKILL.md").is_file()
     assert (tmp_path / ".mcp.json").is_file()
 
 

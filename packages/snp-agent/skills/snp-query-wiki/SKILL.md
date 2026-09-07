@@ -1,11 +1,10 @@
 ---
-name: snp-rag-fetch
-description: "Use this skill as the primary V3 knowledge-retrieval entry point when answering a question from the indexed wiki through Scout."
+name: snp-query-wiki
+description: "Start here for any question that should be answered from the knowledge vault. Call wiki_search first to find candidate pages, then hand off to snp-read-wiki-page to read one. Use this skill whenever the user asks about something the vault might cover, even when they do not mention the vault, Scout, or retrieval by name."
 ---
 
 # Retrieve knowledge through Scout
 
-Despite this compatibility skill name, the active interface is page retrieval.
 Use the two Scout tools in order.
 
 ## 1. Find pages with `wiki_search`

@@ -1238,7 +1238,7 @@ def group_contracts() -> str:
         REPO_ROOT / "CLAUDE.md",
         package_root / "instructions" / "query_protocol.instructions.md",
         package_root / "workflows" / "snp-query.md",
-        package_root / "skills" / "snp-rag-fetch" / "SKILL.md",
+        package_root / "skills" / "snp-query-wiki" / "SKILL.md",
     )
     for path in ordered_contracts:
         content = path.read_text(encoding="utf-8")
@@ -1290,8 +1290,8 @@ def group_contracts() -> str:
         "snp-compile-wiki",
         "snp-export-mcp",
         "snp-ingest-raw-data",
-        "snp-rag-fetch",
-        "snp-search-wiki",
+        "snp-query-wiki",
+        "snp-read-wiki-page",
         "snp-verify-vault",
     }
     expected_workflows = {

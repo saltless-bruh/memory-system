@@ -60,7 +60,7 @@ def test_config_emitters_advertise_exactly_the_two_v3_servers() -> None:
     (
         Path("instructions/query_protocol.instructions.md"),
         Path("workflows/snp-query.md"),
-        Path("skills/snp-rag-fetch/SKILL.md"),
+        Path("skills/snp-query-wiki/SKILL.md"),
     ),
 )
 def test_entry_contracts_put_search_before_read(relative: Path) -> None:

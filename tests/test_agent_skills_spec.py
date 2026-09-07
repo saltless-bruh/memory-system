@@ -161,3 +161,30 @@ def test_the_authoritative_and_mirrored_skill_sets_are_identical() -> None:
         f"excluded skills are still present under .claude/: {sorted(claude & excluded)}"
     )
     assert agent - excluded == claude
+
+
+def test_no_skill_is_named_after_a_retired_tool() -> None:
+    """A skill's name is how it gets selected; naming it after a tool that no
+    longer exists means it is chosen for the wrong reason or not at all."""
+    retired = ("rag-fetch", "rag_fetch", "basic-memory", "auto-heal")
+    root = REPO_ROOT / "packages/snp-agent/skills"
+    named = [
+        d.name
+        for d in root.iterdir()
+        if d.is_dir() and any(term in d.name for term in retired)
+    ]
+    assert not named, f"skills named after retired surfaces: {named}"
+
+
+def test_the_two_retrieval_skills_describe_different_moments() -> None:
+    """Overlapping descriptions make the choice arbitrary."""
+    root = REPO_ROOT / "packages/snp-agent/skills"
+
+    def desc(name: str) -> str:
+        text = (root / name / "SKILL.md").read_text(encoding="utf-8")
+        line = next(ln for ln in text.splitlines() if ln.startswith("description:"))
+        return line.split(":", 1)[1].strip().strip('"').lower()
+
+    query, read = desc("snp-query-wiki"), desc("snp-read-wiki-page")
+    assert "wiki_search" in query and "first" in query
+    assert "after" in read, "the read skill must say it comes second"

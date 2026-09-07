@@ -1,12 +1,12 @@
 ---
-name: snp-search-wiki
-description: "Use this skill after wiki_search identifies candidate pages, when you need to select the right page and read only the V3 canonical content required for an answer."
+name: snp-read-wiki-page
+description: "Use after wiki_search has returned candidate pages, when the next step is choosing the right one and reading only the part that answers the question. Covers the read modes - tldr, outline, section, full - and how to cite the path and heading you used."
 ---
 
 # Select and read a wiki page
 
-This skill is step two of retrieval. Begin with `wiki_search` through the
-primary retrieval skill, then inspect its distinct page candidates.
+This skill is step two of retrieval. Begin with `wiki_search` through
+`snp-query-wiki`, then inspect its distinct page candidates.
 
 Choose by `path`, `type`, bounded `snippet`, and score. A score orders results;
 it is not a confidence probability. A degraded result remains usable but should

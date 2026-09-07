@@ -355,7 +355,7 @@ gives a server, and every surface that configures a client says `snp-wiki`, so
 that tool has never existed for anyone.
 
 **Is now:** renamed across 30 files in all three trees — including
-`snp-search-wiki`'s **frontmatter description**, the text an agent reads to
+`snp-read-wiki-page`'s **frontmatter description**, the text an agent reads to
 decide whether the skill applies at all. `basic-memory` survives only where it
 names the *engine* (`Roadmap`) or the *container* (`snp-bootstrap-system`'s list
 of compose services), because there it is correct.

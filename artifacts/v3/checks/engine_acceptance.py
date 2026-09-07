@@ -894,10 +894,13 @@ def group_ci_executed() -> str:
         f'cp /data/gitea/gitea.db /tmp/ci.db && sqlite3 /tmp/ci.db "{query}"'
         " ; rm -f /tmp/ci.db",
     )
-    # 3 = success, 4 = failure. Both mean the job ran to a verdict, which is
-    # what "gated something" means. 5 (cancelled) and 6 (skipped) mean it did
-    # not, however healthy the runner looked while not running it.
-    reached_verdict = {"3", "4"}
+    # Gitea's job status enum, from modules/actions: 0 unknown, 1 success,
+    # 2 failure, 3 cancelled, 4 skipped, 5 waiting, 6 running. Only success and
+    # failure mean the job ran to a verdict, which is what "gated something"
+    # means. This gate previously treated 3 and 4 as verdicts, which is exactly
+    # backwards -- it would have credited a cancelled job as a passing CI run,
+    # and 44 of the jobs on this instance are cancelled.
+    reached_verdict = {"1", "2"}
     verdicts: dict[str, list[str]] = {}
     attempted: dict[str, list[str]] = {}
     for line in out.splitlines():

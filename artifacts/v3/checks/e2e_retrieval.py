@@ -547,6 +547,14 @@ _SCOUT_PARAMETERS = {
     "wiki_read": {"path", "mode", "section", "department"},
 }
 _SCOUT_REQUIRED = {"wiki_search": {"query"}, "wiki_read": {"path"}}
+#: Envelope keys wiki_search declares. The per-page rows moved under
+#: ``results``; the three counters describe the search itself.
+_SEARCH_ENVELOPE_FIELDS = {
+    "results",
+    "returned",
+    "suppressed_as_seen",
+    "has_more",
+}
 _LOCAL_TOOLS = {
     "verify",
     "plan_articles",
@@ -602,11 +610,14 @@ def _scout_surface_errors(tools: Sequence[object]) -> list[str]:
         if not isinstance(output_schema, dict):
             errors.append(f"{name} output schema missing")
         elif name == "wiki_search":
-            result = output_schema.get("properties", {}).get("result", {})
+            declared = output_schema.get("properties")
+            fields = set(declared) if isinstance(declared, dict) else set()
+            results = declared.get("results") if isinstance(declared, dict) else None
             if not (
-                output_schema.get("x-fastmcp-wrap-result") is True
-                and isinstance(result, dict)
-                and result.get("type") == "array"
+                output_schema.get("type") == "object"
+                and fields >= _SEARCH_ENVELOPE_FIELDS
+                and isinstance(results, dict)
+                and results.get("type") == "array"
             ):
                 errors.append("wiki_search output schema drifted")
         elif output_schema.get("type") != "object":

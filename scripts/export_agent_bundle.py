@@ -39,9 +39,15 @@ DEFAULT_AGENT_DIR = REPO_ROOT / ".agent"
 DEFAULT_CLAUDE_DIR = REPO_ROOT / ".claude"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist"
 CONTRACT_SUBDIRS = ("instructions", "rules", "skills", "workflows")
+#: SNP-owned components an install must delete rather than leave beside their
+#: replacements. A rename is additive to an existing tree: without the old name
+#: here, an upgrade leaves the retired directory in place and the agent sees
+#: both, the stale one still describing a retired tool and response shape.
 RETIRED_COMPONENTS = (
     Path("skills/snp-auto-heal-vault"),
     Path("workflows/snp-heal.md"),
+    Path("skills/snp-rag-fetch"),
+    Path("skills/snp-search-wiki"),
 )
 
 
@@ -175,7 +181,7 @@ def sync_packages(
 
 
 def remove_retired_components(target_dir: Path) -> list[Path]:
-    """Remove only the two SNP-owned components retired by V3.
+    """Remove only the SNP-owned components retired or renamed by V3.
 
     This is intentionally not a generic mirror delete: custom skills,
     workflows, and repository-local development files must survive upgrades.

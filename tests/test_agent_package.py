@@ -284,6 +284,16 @@ def test_installer_removes_retired_components_but_preserves_custom_files(
     retired_workflow = agent_dir / "workflows" / "snp-heal.md"
     retired_workflow.parent.mkdir(parents=True)
     retired_workflow.write_text("stale", encoding="utf-8")
+    # A rename is additive over an existing tree: left in place, the old
+    # directories give the agent four retrieval skills, two of them naming a
+    # retired tool and describing the pre-envelope response shape.
+    renamed = [
+        agent_dir / "skills" / "snp-rag-fetch",
+        agent_dir / "skills" / "snp-search-wiki",
+    ]
+    for directory in renamed:
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text("stale", encoding="utf-8")
     custom = agent_dir / "skills" / "custom-team" / "SKILL.md"
     custom.parent.mkdir(parents=True)
     custom.write_text("custom", encoding="utf-8")
@@ -294,6 +304,17 @@ def test_installer_removes_retired_components_but_preserves_custom_files(
 
     assert not retired_skill.exists()
     assert not retired_workflow.exists()
+    assert [d for d in renamed if d.exists()] == []
+    installed = sorted(d.name for d in (agent_dir / "skills").glob("snp-*"))
+    assert installed == [
+        "snp-bootstrap-system",
+        "snp-compile-wiki",
+        "snp-export-mcp",
+        "snp-ingest-raw-data",
+        "snp-query-wiki",
+        "snp-read-wiki-page",
+        "snp-verify-vault",
+    ]
     assert custom.read_text(encoding="utf-8") == "custom"
 
 

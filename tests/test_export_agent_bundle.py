@@ -227,6 +227,13 @@ def test_antigravity_upgrade_removes_only_retired_snp_components(
     retired_workflow = agent / "workflows" / "snp-heal.md"
     retired_workflow.parent.mkdir(parents=True)
     retired_workflow.write_text("stale", encoding="utf-8")
+    renamed = [
+        agent / "skills" / "snp-rag-fetch",
+        agent / "skills" / "snp-search-wiki",
+    ]
+    for directory in renamed:
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text("stale", encoding="utf-8")
     custom = agent / "skills" / "custom-team" / "SKILL.md"
     custom.parent.mkdir(parents=True)
     custom.write_text("preserve", encoding="utf-8")
@@ -235,4 +242,5 @@ def test_antigravity_upgrade_removes_only_retired_snp_components(
 
     assert not retired_skill.exists()
     assert not retired_workflow.exists()
+    assert [d for d in renamed if d.exists()] == []
     assert custom.read_text(encoding="utf-8") == "preserve"

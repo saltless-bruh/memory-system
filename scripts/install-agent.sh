@@ -66,9 +66,15 @@ mkdir -p "${TARGET_AGENT_DIR}/instructions"
 mkdir -p "${TARGET_AGENT_DIR}/workflows"
 mkdir -p "${TARGET_AGENT_DIR}/skills"
 
-# Remove only the two SNP-owned V2 components withdrawn by V3. This is bounded
-# cleanup, not a mirror delete: custom rules, skills, and workflows survive.
+# Remove only the SNP-owned components withdrawn or renamed by V3. This is
+# bounded cleanup, not a mirror delete: custom rules, skills, and workflows
+# survive. The two renamed retrieval skills are listed because a rename is
+# additive over an existing tree -- without this, an upgrade leaves the old
+# directory beside its replacement and the agent sees four retrieval skills,
+# two of them naming a retired tool.
 rm -rf "${TARGET_AGENT_DIR}/skills/snp-auto-heal-vault"
+rm -rf "${TARGET_AGENT_DIR}/skills/snp-rag-fetch"
+rm -rf "${TARGET_AGENT_DIR}/skills/snp-search-wiki"
 rm -f "${TARGET_AGENT_DIR}/workflows/snp-heal.md"
 
 # 2. Non-destructively copy rules

@@ -13,6 +13,18 @@ It speaks only MCP over `SCOUT_URL` for exactly the reason the W-1 oracle does:
 a check that could reach the vault another way would stop measuring the surface
 an agent has.
 
+Three further requirements keep a pass meaningful rather than incidental:
+
+  * The answer must be **absent from every search snippet**. Snippets route; if
+    one already contains the answer, that question is answerable in a single
+    call and stops measuring the read path at all.
+  * The pair's recorded `<source>` page must be **among the pages the search
+    routed to**, so the question still reaches the page it was derived from.
+  * The answer must be present **on that source page specifically**, not merely
+    somewhere in the union of routed pages. Without this a fact could migrate
+    off its page, or vanish from it, while a neighbouring hit kept the gate
+    green.
+
 Every pair was solved through this same surface before it was written down, so
 a failure here is a regression in the system, not a question that was always
 wrong. Four pairs are Vietnamese because a dense-timeout regression once
@@ -49,7 +61,10 @@ EXPECTED_PAIRS = 10
 MIN_VIETNAMESE_PAIRS = 3
 
 #: Characters that only appear in Vietnamese text, used to count the bilingual
-#: half of the set without carrying a language tag in the eval file.
+#: half of the set without carrying a language tag in the eval file. This is a
+#: heuristic: a Vietnamese question written entirely without diacritics would
+#: not be counted, so the constant is a floor on the bilingual half, not a
+#: language classifier.
 _VIETNAMESE_MARKS = (
     "ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ"
 )
@@ -67,11 +82,19 @@ def require(condition: bool, message: str) -> None:
 
 @dataclass(frozen=True)
 class QaPair:
-    """One question and the answer string that must come back from the read."""
+    """One question, its answer string, and the page that page came from.
+
+    `source_path` is load-bearing rather than documentary: the gate requires
+    the search to route to that page and requires the answer to be present on
+    it, which is what makes this a per-page regression detector instead of a
+    corpus-wide one.
+    """
 
     index: int
     question: str
     answer: str
+    source_path: str
+    source_heading: str
 
     @property
     def is_vietnamese(self) -> bool:
@@ -96,7 +119,29 @@ def load_pairs(path: Path = EVAL_XML) -> list[QaPair]:
         answer = (node.findtext("answer") or "").strip()
         require(bool(question), f"{path}: qa_pair {index} has no <question>")
         require(bool(answer), f"{path}: qa_pair {index} has no <answer>")
-        pairs.append(QaPair(index=index, question=question, answer=answer))
+        source = node.find("source")
+        require(
+            source is not None,
+            f"{path}: qa_pair {index} has no <source path=... heading=.../>; "
+            "the page an answer came from is part of the assertion, not a note",
+        )
+        assert source is not None
+        source_path = (source.get("path") or "").strip()
+        source_heading = (source.get("heading") or "").strip()
+        require(bool(source_path), f"{path}: qa_pair {index} <source> has no path")
+        require(
+            bool(source_heading),
+            f"{path}: qa_pair {index} <source> has no heading",
+        )
+        pairs.append(
+            QaPair(
+                index=index,
+                question=question,
+                answer=answer,
+                source_path=source_path,
+                source_heading=source_heading,
+            )
+        )
     return pairs
 
 
@@ -123,8 +168,8 @@ class _Scout:
             return payload["result"]
         return payload
 
-    async def search(self, query: str, k: int = SEARCH_K) -> list[str]:
-        """Return the distinct page paths the served search routed us to."""
+    async def search(self, query: str, k: int = SEARCH_K) -> tuple[list[str], str]:
+        """The distinct paths the search routed to, and its snippet text."""
         payload = await self._call("wiki_search", {"query": query, "k": k})
         require(
             isinstance(payload, dict) and "results" in payload,
@@ -137,11 +182,15 @@ class _Scout:
             f"wiki_search results is {type(hits).__name__}, not a list",
         )
         paths: list[str] = []
+        snippets: list[str] = []
         for hit in hits:
-            path = hit.get("path") if isinstance(hit, dict) else None
+            if not isinstance(hit, dict):
+                continue
+            path = hit.get("path")
             if isinstance(path, str) and path not in paths:
                 paths.append(path)
-        return paths
+            snippets.append(str(hit.get("snippet") or ""))
+        return paths, "\n".join(snippets)
 
     async def read_text(self, path: str) -> str:
         """The page body an agent would have in context after one read."""
@@ -189,13 +238,35 @@ async def _answerable() -> str:
     async with Client(transport) as client:
         scout = _Scout(client)
         for pair in pairs:
-            paths = await scout.search(pair.question)
+            paths, snippets = await scout.search(pair.question)
             if not paths:
                 unanswered.append(
                     f"Q{pair.index} {pair.question!r}: wiki_search returned no pages"
                 )
                 continue
             read_paths.update(paths)
+            if pair.answer in snippets:
+                unanswered.append(
+                    f"Q{pair.index} {pair.question!r}: {pair.answer!r} is already "
+                    "in the search snippets, so one call answers it and the "
+                    "question no longer measures the read path"
+                )
+                continue
+            if pair.source_path not in paths:
+                unanswered.append(
+                    f"Q{pair.index} {pair.question!r}: its recorded source page "
+                    f"{pair.source_path!r} was not among the {len(paths)} page(s) "
+                    f"the search routed to ({', '.join(paths)})"
+                )
+                continue
+            source_text = await scout.read_text(pair.source_path)
+            if pair.answer not in source_text:
+                unanswered.append(
+                    f"Q{pair.index} {pair.question!r}: expected {pair.answer!r} on "
+                    f"{pair.source_path!r} under {pair.source_heading!r}, and it "
+                    "was not on that page"
+                )
+                continue
             corpus = "\n".join([await scout.read_text(path) for path in paths])
             if pair.answer not in corpus:
                 unanswered.append(
@@ -212,7 +283,8 @@ async def _answerable() -> str:
     print(
         f"  {len(pairs)} questions ({len(vietnamese)} Vietnamese), "
         f"{len(read_paths)} distinct pages searched and read at k={SEARCH_K}; "
-        "every recorded answer was present in the read text"
+        "no answer appeared in a search snippet, and every answer was present "
+        "on its own recorded source page"
     )
     return "MCP EVAL VERIFIED"
 

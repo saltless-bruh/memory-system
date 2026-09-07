@@ -6,77 +6,82 @@
   copied from the page that supplied it. None was invented: an invented answer
   would make the gate measure this file instead of the system.
 
-  Each question is framed across two pages (a cluster or concept page that
-  names the entity, and the entity page that carries the fact) so that one
-  lucky search cannot answer it.
+  What makes each question multi-step is not that its answer is spread over two
+  pages (for several of them the fact lives on exactly one page) but that
+  the answer string appears in NO snippet of the search results the question
+  itself produces. Search can only route; the answer has to be read. The runner
+  asserts that property rather than trusting this comment.
+
+  Each pair carries a <source> element naming the page and heading its answer
+  was taken from. That is a load-bearing record, not documentation: the runner
+  requires the search to route to that exact page and requires the answer to be
+  present in that page, so a fact that moves off its source page fails the gate
+  even if some other routed page still happens to carry the string.
 
   Four are Vietnamese. The corpus is bilingual, and a dense-timeout regression
   once made every Vietnamese query return nothing while every mechanical gate
   stayed green. These are the pairs that would have caught it.
-
-  The comment beside each pair records the page path and heading the answer
-  came from, so a later reader can re-verify without redoing the search.
 -->
 <evaluation>
 
-  <!-- Entities/Crawl4AI.md :: "Bảo mật quan trọng" -->
   <qa_pair>
     <question>The PixelRAG page names Crawl4AI as its text-RAG peer. On the Crawl4AI page, which package replaced litellm in the v0.8.6 security hotfix?</question>
     <answer>unclecode-litellm</answer>
+    <source path="Entities/Crawl4AI.md" heading="Bảo mật quan trọng"/>
   </qa_pair>
 
-  <!-- Entities/superfile.md :: "superfile" -->
   <qa_pair>
-    <question>The terminal file manager decision page picks superfile as the cross-platform team standard. Which TUI framework is superfile built with?</question>
-    <answer>Bubble Tea</answer>
+    <question>The terminal file manager decision page picks superfile as the cross-platform team standard. According to the Architecture section of the superfile page, what does its plugin system consist of?</question>
+    <answer>Go plugins + Lua scripting (planned/partial)</answer>
+    <source path="Entities/superfile.md" heading="Architecture"/>
   </qa_pair>
 
-  <!-- Entities/Headroom.md :: "Headroom" -->
   <qa_pair>
     <question>Headroom holds the universal context compression slice of the Agent I/O Token Optimization cluster. What does its CCR acronym stand for?</question>
     <answer>Compress-Cache-Retrieve</answer>
+    <source path="Entities/Headroom.md" heading="Headroom"/>
   </qa_pair>
 
-  <!-- Tools/Semble.md :: "Core Architecture" -->
   <qa_pair>
     <question>Agent I/O Token Optimization cross-references Semble for code search. Which Model2Vec static embedding model does the Semble page say it uses?</question>
     <answer>potion-code-16M</answer>
+    <source path="Tools/Semble.md" heading="Core Architecture"/>
   </qa_pair>
 
-  <!-- Entities/Webwright.md :: "Architecture" -->
   <qa_pair>
     <question>Browser Agent describes Webwright as the code-as-action framework. According to the Webwright page, how many lines is its agent loop module?</question>
     <answer>~450 lines (agent loop)</answer>
+    <source path="Entities/Webwright.md" heading="Architecture"/>
   </qa_pair>
 
-  <!-- Entities/Webwright.md :: "Benchmark results" -->
   <qa_pair>
     <question>Trang Browser Agent so sánh code-as-action với coordinate prediction. Theo trang Webwright, model nào đạt 86.7% trên Online-Mind2Web?</question>
     <answer>GPT-5.4</answer>
+    <source path="Entities/Webwright.md" heading="Benchmark results"/>
   </qa_pair>
 
-  <!-- Entities/LiteParse.md :: "Tại sao đáng chú ý" -->
   <qa_pair>
     <question>LiteParse là PDF parser của LlamaIndex. Code V1 đã được chuyển sang branch nào?</question>
     <answer>logan/liteparse-v1</answer>
+    <source path="Entities/LiteParse.md" heading="Tại sao đáng chú ý"/>
   </qa_pair>
 
-  <!-- Entities/PixelRAG.md :: "PixelRAG" -->
   <qa_pair>
     <question>PixelRAG dùng screenshot thay vì parse DOM. Benchmark headline của nó index bao nhiêu trang Wikipedia?</question>
     <answer>8.28M trang Wikipedia</answer>
+    <source path="Entities/PixelRAG.md" heading="PixelRAG"/>
   </qa_pair>
 
-  <!-- Entities/Agent-Reach.md :: "Trade-offs" -->
   <qa_pair>
     <question>Agent-Reach thuộc cụm Web Data Extraction for AI Agents. Chi phí proxy hàng tháng khi chạy trên server để bypass geo-block là bao nhiêu?</question>
     <answer>$1/tháng</answer>
+    <source path="Entities/Agent-Reach.md" heading="Trade-offs"/>
   </qa_pair>
 
-  <!-- Concepts/Second Brain Ecosystem.md :: "Luồng Hoạt Động" -->
   <qa_pair>
     <question>Second Brain Ecosystem stack: which hybrid retrieval methods does the GBrain layer combine?</question>
     <answer>BM25 + HNSW vector + RRF</answer>
+    <source path="Concepts/Second Brain Ecosystem.md" heading="Luồng Hoạt Động"/>
   </qa_pair>
 
 </evaluation>

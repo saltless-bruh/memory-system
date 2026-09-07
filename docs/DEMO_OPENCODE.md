@@ -202,23 +202,34 @@ When OpenCode initializes:
      "k": 5
    }
    ```
-   Scout returns ranked hits with ~40-token routing snippets:
+   Scout returns an envelope whose `results` carry ~40-token routing snippets:
    ```json
-   [
-     {
-       "path": "techniques/SS7 Interception as a Service.md",
-       "type": "concept",
-       "score": 0.824,
-       "snippet": "SS7 network flaws allow remote attackers to intercept SMS verification codes by spoofing carrier location updates..."
-     },
-     {
-       "path": "concepts/Signaling System 7 Security.md",
-       "type": "concept",
-       "score": 0.781,
-       "snippet": "Telecom SS7 protocol lacks origin authentication on MAP messages..."
-     }
-   ]
+   {
+     "results": [
+       {
+         "path": "techniques/SS7 Interception as a Service.md",
+         "type": "concept",
+         "score": 0.824,
+         "snippet": "SS7 network flaws allow remote attackers to intercept SMS verification codes by spoofing carrier location updates...",
+         "seen": false,
+         "degraded": false
+       },
+       {
+         "path": "concepts/Signaling System 7 Security.md",
+         "type": "concept",
+         "score": 0.781,
+         "snippet": "Telecom SS7 protocol lacks origin authentication on MAP messages...",
+         "seen": false,
+         "degraded": false
+       }
+     ],
+     "returned": 2,
+     "suppressed_as_seen": 0,
+     "has_more": false
+   }
    ```
+   A page already named in `seen` comes back redacted to
+   `{"path": ..., "title": ..., "seen": true}` instead of a scored row.
 2. **Step 2: Canonical Read (`wiki_read`)**:
    OpenCode inspects the snippets and chooses the top relevant page:
    ```json

@@ -43,14 +43,25 @@ read envelope.
 5. Pass previously returned `content_hash` values through `seen` in later
    searches so repeated pages return compact stubs.
 
-`wiki_search` returns one result per page with `path`, `type`, `score`, a
-bounded `snippet`, `seen`, and `degraded`. `degraded: true` means the dense arm
-was unavailable and sparse retrieval supplied the result.
+`wiki_search` returns an envelope, not a bare list. The per-page rows live
+under `results`; alongside them the search reports `returned` (how many pages
+came back), `suppressed_as_seen` (how many of those were redacted because
+`seen` already named them), and `has_more` (true when the `k` ceiling was
+reached, so more distinct pages probably exist). There is deliberately no
+`total_count` and no cursor.
 
-`wiki_read` returns a canonical envelope with `path`, `title`, `type`,
-`updated`, `tldr`, `outline`, `sections`, `sources`, `links`, and
-`content_hash`. Read-time normalization handles older pages; do not rewrite a
-page merely to make its stored shape resemble the envelope.
+Each entry in `results` carries `path`, `type`, `score`, a bounded `snippet`,
+`seen`, and `degraded`, plus a `reason` when degraded. `degraded: true` means
+the dense arm was unavailable and sparse retrieval supplied the result. A page
+the caller has already read comes back redacted to `{path, title, seen: true}`
+— no snippet, no score — so a seen stub is never mistaken for a thin result.
+
+`wiki_read` returns a canonical envelope whose field set narrows with the mode.
+Every mode returns `path`, `title`, `type`, `tldr`, and `content_hash`;
+`mode="outline"` adds `outline`, `mode="section"` adds `sections`, and the full
+read adds `updated`, `outline`, `sections`, `sources`, and `links`. Read-time
+normalization handles older pages; do not rewrite a page merely to make its
+stored shape resemble the envelope.
 
 Source extraction beyond an indexed wiki page is a deferred subsystem. When a
 page lacks the needed evidence, state that limit plainly. Do not invent a tool,

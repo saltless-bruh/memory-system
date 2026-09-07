@@ -333,6 +333,82 @@ async def test_seen_stub_still_carries_title_through_data() -> None:
     assert stub.title == "concepts/p1.md"
 
 
+def _write_full_page(root: Path) -> None:
+    """A page with every field the full read envelope can carry."""
+    page = root / "concepts" / "full.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        """---
+title: Full Page
+type: concept
+updated: 2026-09-01
+sources:
+  - raw/evidence.pdf
+---
+# Full Page
+
+## TL;DR
+Canonical full read.
+
+## Mechanics
+Scope routing selects the department set before the query runs.
+See [[concepts/scope-routing]] for the resolution order.
+
+## Limits
+The dense arm can be unavailable; sparse retrieval still answers.
+""",
+        encoding="utf-8",
+    )
+
+
+async def test_wiki_read_data_destructures_nested_content_at_full_mode(
+    tmp_path: Path,
+) -> None:
+    """``sections``, ``outline``, ``sources`` and ``links`` are the fields
+    ``_READ_OUTPUT_SCHEMA`` declares without ``properties`` or ``items``, so a
+    coercion that emptied them would leave a well-formed but contentless page.
+    ``.data`` is where that lands; assert the nested content survives it."""
+    _write_full_page(tmp_path)
+    server, _backend = _server(tmp_path)
+    app = server.http_app(stateless_http=True)
+    transport = StreamableHttpTransport(
+        "http://scout.test/mcp",
+        auth="valid-token",
+        httpx_client_factory=_factory(app),
+    )
+    async with app.lifespan(app), Client(transport) as client:
+        result = await client.call_tool(
+            "wiki_read",
+            {
+                "path": "concepts/full.md",
+                "mode": "full",
+                "department": "infra",
+            },
+        )
+    assert not result.is_error
+    assert result.data is not None
+    assert result.data.path == "concepts/full.md"
+    assert result.data.tldr == "Canonical full read."
+    assert result.data.updated == "2026-09-01"
+
+    sections = result.data.sections
+    body = sections if isinstance(sections, dict) else vars(sections)
+    assert "Mechanics" in body
+    assert "Scope routing selects" in str(body["Mechanics"])
+    assert "Limits" in body
+
+    outline = list(result.data.outline)
+    assert outline, "full read returned an empty outline"
+    headings = {
+        str(entry.get("heading") if isinstance(entry, dict) else entry)
+        for entry in outline
+    }
+    assert "Mechanics" in headings
+
+    assert list(result.data.links) == ["concepts/scope-routing"]
+    assert list(result.data.sources) == ["raw/evidence.pdf"]
+
+
 async def test_forbidden_department_is_tool_error_and_never_calls_backend() -> None:
     server, backend = _server()
     app = server.http_app(stateless_http=True)

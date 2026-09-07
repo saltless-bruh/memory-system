@@ -6,6 +6,103 @@
 **Measured:** 2026-09-04 / 2026-09-05, against the live stack and the 433-page served corpus.
 Nothing here is read from a report; every number has a command behind it.
 
+## Update — 2026-09-07
+
+Everything below was measured on 2026-09-04/05 and roughly a third of it is now
+stale. This section records what moved, measured the same way. Where a number
+here disagrees with one below, this one is current.
+
+### 🔌 WIRED is now empty
+
+| Component | 2026-09-05 | 2026-09-07 |
+|---|---|---|
+| `sync-job` | *"has never had a container"* | **running and healthy**, two watchers (raw + vault) |
+| `gitea-runner` | never registered | registered, ran, since removed by the owner |
+| CI `checks` · `security` | *"zero runs on any commit"* | **4 jobs ran to a verdict** — all four failed |
+
+### ◐ PARTIAL — what moved
+
+| Component | 2026-09-05 | 2026-09-07 |
+|---|---|---|
+| model stamp | 94% (2176/2303) | **100%** (2089/2089) **+ a startup guard** that refuses to serve a mixed index |
+| body: `Cross-References` | 0/433 | **242/433** |
+| body: `TL;DR` | 12/433 | 12/433 — **unmoved, and now the sole bottleneck** |
+| CLI | 27 commands | **26** — `gate` and `heal` removed; `mint` and `fetch` remain |
+| scout MCP server description | 📄 PAPER | **● REAL** — `mcp_server.py:125` passes `instructions=` |
+
+### Two figures below are wrong, not merely old
+
+**Retrieval.** §Layer 2 says `recall@1 0.80 · recall@3 1.00 · recall@5 1.00`.
+The question set has since doubled from 20 to 40, and the honest number is
+**recall@1 0.80 · recall@3 0.97 · recall@5 0.97**. Lower, on a harder set, with
+one genuine weakness visible: a Vietnamese query for LiteLLM misses entirely
+at k=5.
+
+**"body structure 8%"** is the wrong frame, not the wrong number. It assumed
+all four headings on every page. Measured 2026-09-07: **0 of 430 content pages
+can ever satisfy that**, and 1006 distinct non-contract `##` headings are in
+use. The frame was written for `compile_note.py`'s generated pages, not for a
+hand-authored vault. `scout/vault.py` now carries two frames -- `COMPILED`
+(exact, unchanged) and `AUTHORED` (required headings present, in order, other
+sections permitted). Against the authored frame the vault passes **11 of 430**,
+and the bottleneck is entirely `TL;DR`: 231 pages have `Cross-References` and
+no `TL;DR`; exactly 1 has the reverse.
+
+### CI: it ran, it failed, and the two failures are unrelated
+
+`checks.yaml` and `security.yaml` are no longer 🔌 WIRED. Four jobs executed on
+2026-09-07 while the runner was briefly registered, and every one failed. The
+causes are different and only one is a defect.
+
+**`checks.yaml` — not a bug.** Lint failed with 2 ruff errors, both real, both
+on `main`: an unsorted import block in `scripts/host_sync.py` and a nested
+`with` in `tests/test_host_sync.py:546`. The working branch has both fixed and
+is clean. CI runs against `main`, and `main` predates this week's work because
+`feat/v3-retrieval-inversion` has never been pushed — correctly, under R-6.4
+and R-7.3. So CI is accurately reporting that `main` is stale, and it will keep
+failing until that branch is reviewed and merged. Nothing to fix in CI.
+
+**`security.yaml` — a real, structural defect. 🟥**
+
+```
+FTL unable to load gitleaks config, err: read /trusted/gitleaks.toml: is a directory
+```
+
+`security.yaml:47` runs `docker run --volume "$GITHUB_WORKSPACE/trusted-security/.gitleaks.toml:/trusted/gitleaks.toml:ro"` from *inside* the job
+container, but the daemon resolving that path is the **host** daemon — the
+runner has `/var/run/docker.sock` mounted. `$GITHUB_WORKSPACE` is a container
+path that does not exist on the host, so Docker created the mount source as an
+empty directory and mounted that. Confirmed on disk:
+
+```
+drwxr-xr-x root  /workspace/snp-admin/snp-memory/trusted-security/.gitleaks.toml
+```
+
+This cannot work as written on a self-hosted `act_runner` with a mounted socket.
+The consequence is worth stating plainly: **the independent Gitleaks
+all-history scan has never scanned anything.** It is the check that would have
+caught this session's credential exposures, and it fails before it reads a
+single commit. The workflow's *other* step, a custom prohibited-values grep,
+did run and did pass.
+
+Two byproducts: root-owned directories are left at `/workspace` on the host,
+and the runner has since been removed, so nothing new will run until it is
+re-registered.
+
+### New since 2026-09-05
+
+| Component | Status |
+|---|---|
+| `WikiIndexer` + vault watcher | ● REAL — closes W-2; a push reaches the served index in **7 seconds** |
+| content-hash ingest short-circuit | ● REAL — unchanged pages are not re-embedded; a full rebuild is ~4 minutes |
+| single-model startup guard | ● REAL — `scout/serve.py` refuses to bind on a mixed index |
+| `HeadingFrame` COMPILED / AUTHORED | ● REAL |
+| engine acceptance oracles | ● REAL — `find-read-cite`, `vault-change-propagates`, `live-sql`, `deployment`, `model-stamp`, `ingest-integrity`, `ci-executed` |
+| PDF extractors in the scout image | ● REAL — `pdfplumber` + `pillow` were declared but never shipped |
+| `_heading_key` diacritic folding | ● REAL — `## Liên quan` was named in `_LINK_SECTION_NAMES` and never matched |
+
+---
+
 ## How to read this
 
 **Verdicts** are the blueprint's: 🟩 keep · 🟨 rework · 🟥 remove.

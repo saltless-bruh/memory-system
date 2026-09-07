@@ -58,6 +58,9 @@ VAULT_SUBDIR = "wiki"
 #: How long a change may take to travel push -> webhook -> replica -> index.
 PROPAGATION_TIMEOUT_SECONDS = 180.0
 PROPAGATION_POLL_SECONDS = 5.0
+#: How long the deployment gate waits for a restarted container's health to
+#: settle. Measured cold start is about 90 seconds; this is that with room.
+HEALTH_SETTLE_SECONDS = 180.0
 VAULT = Path(
     os.environ.get("SNP_REFERENCE_VAULT")
     or Path.home() / "Documents" / "memo-project" / "Obsidian Vault"
@@ -625,10 +628,26 @@ def group_deployment() -> str:
         names["snp-memory-sync-job-1"] == "running",
         f"sync-job is {names['snp-memory-sync-job-1']}, not running",
     )
-    health = _docker(
-        "inspect", "snp-memory-sync-job-1", "--format", "{{.State.Health.Status}}"
-    ).strip()
-    require(health == "healthy", f"sync-job reports {health}")
+    # `starting` is not a verdict. This container's cold start re-reads both
+    # corpora, which was measured at about 90 seconds, so a single sample taken
+    # just after a restart reports `starting` and then `unhealthy` before the
+    # first probe ever succeeds. Waiting for the status to settle keeps the
+    # assertion intact -- a container that is genuinely broken still stays
+    # unhealthy and still fails here -- while removing a flake that would
+    # otherwise teach a reader to re-run the gate until it goes green.
+    deadline = time.monotonic() + HEALTH_SETTLE_SECONDS
+    health = "starting"
+    while time.monotonic() < deadline:
+        health = _docker(
+            "inspect", "snp-memory-sync-job-1", "--format", "{{.State.Health.Status}}"
+        ).strip()
+        if health == "healthy":
+            break
+        time.sleep(2.0)
+    require(
+        health == "healthy",
+        f"sync-job still reports {health} after {HEALTH_SETTLE_SECONDS:.0f}s",
+    )
 
     orphans = sorted(n for n in names if "basic-memory" in n)
     require(

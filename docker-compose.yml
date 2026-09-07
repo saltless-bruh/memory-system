@@ -253,7 +253,13 @@ services:
       interval: 10s
       timeout: 3s
       retries: 6
-      start_period: 30s
+      # Measured, not guessed: a cold start re-reads both corpora and took
+      # about 90 seconds on 2026-09-07 (probes failed at 08:42:53, 08:43:03
+      # and 08:43:13, then succeeded at 08:43:23). At 30s the container
+      # crossed the retry threshold and reported `unhealthy` on every restart
+      # while it was in fact working, which is the opposite of what this check
+      # is for. It still reports unhealthy for a start that never completes.
+      start_period: 150s
       start_interval: 2s
 
   # ── host-sync — Zero-Credential Git Puller (Phase 1) ─────────────

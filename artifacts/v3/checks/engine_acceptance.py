@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -71,6 +72,12 @@ VAULT = Path(
 RECALL_AT_1_FLOOR = 0.60
 RECALL_AT_5_FLOOR = 0.85
 SEARCH_K = 5
+
+
+class _Fetches(Protocol):
+    """The one thing a census needs from a database connection."""
+
+    async def fetch(self, query: str, *args: Any) -> Any: ...
 
 
 class GateFailure(AssertionError):
@@ -755,7 +762,106 @@ def group_model_stamp() -> str:
     return asyncio.run(_model_stamp())
 
 
+# --------------------------------------------------------------------------
+# Ingest integrity -- a corpus built while an extractor was down
+# --------------------------------------------------------------------------
+
+#: What the parser records about each optional extractor. `ok` means it ran and
+#: covered everything it found; `no_evidence` means it looked and the document
+#: has none. The rest are degradations that produce a *smaller document* and
+#: are logged rather than raised, so nothing downstream notices.
+HEALTHY_EXTRACTOR_STATES = frozenset({"ok", "no_evidence"})
+_EXTRACTOR_KEYS = ("figures_status", "tables_status")
+
+
+async def _assert_ingest_integrity(conn: _Fetches) -> str:
+    """Read the extractor census from `conn` and refuse a degraded corpus.
+
+    Takes the connection rather than opening one so a control can plant a
+    degraded state inside a transaction and have this observe it. Opening its
+    own would put the plant on another connection, where an uncommitted change
+    is invisible -- a control that cannot reach the code it is testing reports
+    "gate passed" and looks exactly like a broken gate.
+    """
+    census: dict[str, dict[str, int]] = {}
+    for key in _EXTRACTOR_KEYS:
+        rows = await conn.fetch(
+            f"SELECT c.metadata->>'{key}' AS state, count(*) AS n "  # noqa: S608
+            "FROM rag_chunks c GROUP BY 1;"
+        )
+        census[key] = {
+            str(r["state"]): int(r["n"]) for r in rows if r["state"] is not None
+        }
+    # `described < found` is a degradation the coarse status can still call
+    # `ok` in older rows, so read the pair as well as the flag.
+    coverage = await conn.fetch(
+        "SELECT DISTINCT c.metadata->>'figure_count' AS found, "
+        "c.metadata->>'figures_described' AS described "
+        "FROM rag_chunks c WHERE c.metadata ? 'figure_count';"
+    )
+
+    require(
+        any(census[key] for key in _EXTRACTOR_KEYS),
+        "no chunk records an extractor status at all, so this gate cannot "
+        "observe its subject; the corpus may predate the status metadata",
+    )
+    broken = {
+        key: {
+            state: n
+            for state, n in states.items()
+            if state not in HEALTHY_EXTRACTOR_STATES
+        }
+        for key, states in census.items()
+    }
+    broken = {key: states for key, states in broken.items() if states}
+    require(
+        not broken,
+        f"chunks were ingested while an extractor was degraded: {broken}. The "
+        "parser logs this and returns a smaller document, so the corpus is "
+        "quietly incomplete and nothing downstream can tell",
+    )
+    short = [
+        (r["found"], r["described"])
+        for r in coverage
+        if r["described"] is not None and r["found"] != r["described"]
+    ]
+    require(not short, f"a document describes fewer figures than it found: {short}")
+
+    print(
+        f"  extractor states {census}; figure coverage "
+        f"{[(r['found'], r['described']) for r in coverage]}"
+    )
+    return "INGEST INTEGRITY VERIFIED"
+
+
+async def _ingest_integrity() -> str:
+    import asyncpg
+
+    settings = _app_role_connection_settings()
+    conn = await asyncpg.connect(
+        host=settings.host,  # type: ignore[attr-defined]
+        port=settings.port,  # type: ignore[attr-defined]
+        database=settings.database,  # type: ignore[attr-defined]
+        user=settings.user,  # type: ignore[attr-defined]
+        password=settings.password,  # type: ignore[attr-defined]
+    )
+    try:
+        await conn.execute(
+            "SELECT set_config('scout.current_depts', $1, false);",
+            ",".join(sorted(CANONICAL_DEPARTMENTS)),
+        )
+        return await _assert_ingest_integrity(conn)
+    finally:
+        await conn.close()
+
+
+def group_ingest_integrity() -> str:
+    """No chunk was ingested while a document extractor was degraded."""
+    return asyncio.run(_ingest_integrity())
+
+
 GROUPS: dict[str, Callable[[], str]] = {
+    "ingest-integrity": group_ingest_integrity,
     "find-read-cite": group_find_read_cite,
     "vault-change-propagates": group_vault_change_propagates,
     "live-sql": group_live_sql,

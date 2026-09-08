@@ -7,6 +7,7 @@ fourth stale file was never in the sweep at all. A test does not get tired.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -34,6 +35,9 @@ CHECKED_DOCS = ("docs/DEMO_OPENCODE.md",)
 #: "basic-memory was replaced by Scout" is accurate documentation; "basic-memory
 #: reads /vault-replica read-only" is a lie. The distinction is the marker, so
 #: the test looks for one rather than banning the word outright.
+#: NOTE: "v2 " (trailing space) is unverified in isolation as a marker — no
+#: live over-skip has been found for it, but it has not been exercised on its
+#: own against a genuinely stale "v2 ..." line. Left as-is per review.
 HISTORICAL_MARKERS = (
     "historical",
     "no longer",
@@ -47,7 +51,12 @@ HISTORICAL_MARKERS = (
 
 @pytest.mark.parametrize("relative", CHECKED_DOCS)
 def test_no_shipped_doc_names_a_retired_surface(relative: str) -> None:
-    """Flag only lines that present a retired surface as current."""
+    """Flag only lines that present a retired surface as current.
+
+    Matches are anchored on word boundaries so a retired name never fires as
+    a false positive inside an unrelated, currently-live token — e.g.
+    `auto-heal` must not match `auto-healer.yaml`, a live CI config file.
+    """
     offenders: list[str] = []
     for number, line in enumerate(
         (REPO_ROOT / relative).read_text(encoding="utf-8").splitlines(), start=1
@@ -55,7 +64,13 @@ def test_no_shipped_doc_names_a_retired_surface(relative: str) -> None:
         lowered = line.lower()
         if any(marker in lowered for marker in HISTORICAL_MARKERS):
             continue
-        named = sorted({name for name in RETIRED_SURFACES if name in line})
+        named = sorted(
+            {
+                name
+                for name in RETIRED_SURFACES
+                if re.search(rf"\b{re.escape(name)}\b", line)
+            }
+        )
         if named:
             offenders.append(f"{relative}:{number} {named}: {line.strip()[:70]}")
     assert not offenders, "retired surfaces presented as current:\n" + "\n".join(
@@ -69,15 +84,27 @@ def test_no_shipped_doc_shows_wiki_search_returning_a_bare_list(
 ) -> None:
     """The prose sweep missed this because the offender was a code block.
 
-    `wiki_search` returns an envelope. A doc showing a bare `[]` or a bare
-    top-level array as its response teaches a reader to index the result
-    directly, which is exactly what broke three gate consumers.
+    `wiki_search` returns an envelope, never a bare top-level array — empty
+    (`[]`) or populated (`[{"path": "foo.md", ...}]`). A doc showing either
+    shape as the response teaches a reader to index the result directly,
+    which is exactly what broke three gate consumers. Each fenced `json`
+    block is parsed and checked for a top-level `list`; blocks that fail to
+    parse (illustrative fragments, `...` elisions) are skipped rather than
+    treated as evidence of anything.
     """
     text = (REPO_ROOT / relative).read_text(encoding="utf-8")
     fenced = re.findall(r"```json\s*\n(.*?)```", text, re.DOTALL)
-    bare = [block.strip() for block in fenced if block.strip() in ("[]", "[ ]")]
-    assert not bare, (
-        f"{relative} shows wiki_search returning a bare list; it returns "
-        '{"results": [...], "returned": N, "suppressed_as_seen": N, '
-        '"has_more": bool}'
+    offenders: list[str] = []
+    for block in fenced:
+        stripped = block.strip()
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            offenders.append(stripped[:70])
+    assert not offenders, (
+        f"{relative} shows wiki_search returning a bare top-level array; it "
+        'returns {"results": [...], "returned": N, "suppressed_as_seen": N, '
+        f'"has_more": bool}}:\n' + "\n".join(offenders)
     )

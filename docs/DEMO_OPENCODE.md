@@ -247,6 +247,19 @@ When OpenCode initializes:
    }
    ```
    Scout extracts and normalizes the page envelope directly from `/vault-replica`.
+
+   `tldr` carries no outline and no section bodies, so it cannot support a
+   heading citation on its own. OpenCode escalates once it knows which section
+   it needs:
+   ```json
+   {
+     "path": "techniques/SS7 Interception as a Service.md",
+     "mode": "section",
+     "section": "Attack Chain"
+   }
+   ```
+   This is the read-mode ladder working as designed: the cheapest mode that
+   answers the question, escalated only when the answer needs more.
 3. **Step 3: Grounded Answer & Citation**:
    OpenCode answers:
    > *"Yes. Attackers exploit SS7 by sending forged UpdateLocation messages to mobile carriers, redirecting incoming SMS messages containing one-time passwords (OTPs) to an attacker-controlled handset.*
@@ -326,7 +339,10 @@ When OpenCode initializes:
 * Gitea fires a webhook $\rightarrow$ `host-sync` pulls snapshot into `/vault-replica`.
 * `sync-job` detects file change $\rightarrow$ detects `content_hash` mismatch.
 * Re-chunks sections $\rightarrow$ embeds via LiteLLM $\rightarrow$ atomic PostgreSQL update.
-* **Elapsed Time**: ~3 to 5 seconds. **Operator commands run**: Zero.
+* **Elapsed Time**: ~7 seconds, measured by the W-2 acceptance gate
+  (`engine_acceptance.py --group vault-change-propagates`); the same gate
+  observes nothing arriving at all within 180 s when the watcher is stopped.
+  **Operator commands run**: Zero.
 
 **Presenter Prompt to OpenCode**:
 > *"What is the 2026 telephony guardrail for SS7 security?"*
@@ -362,26 +378,34 @@ OpenCode calls `wiki_search`, immediately reads the updated chunk, and quotes:
    - `## Technical Overview`
    - `## Provenance`
    - `## Cross-References` (includes `[[Signaling System 7 Security]]` and `[[LTE Network Architecture]]`).
-4. Checks out branch: `feat/agent-diameter-security`.
-5. Pushes branch and creates Pull Request on Gitea.
-6. **Master remains completely untouched until human approval.**
+4. Prepares the change on branch `feat/agent-diameter-security`.
+5. **Stops there.** No exposed tool performs a `git push` — the branch-and-PR
+   rule is enforced by absent capability, not by good behaviour (`AGENTS.md`,
+   rules R-6.4 and R-7.3). A human pushes the branch and opens the pull
+   request. Demonstrate this by asking the agent to push and watching it
+   decline for lack of a tool; that refusal is the control being demonstrated.
+6. **`main` remains untouched until human review and merge.**
 
 ---
 
 ## 5. Live Acceptance Scorecard
 
+> Fill this in **during** the rehearsal, from what you observe. Every row ships
+> blank on purpose: a scorecard filled before the run records an intention, not
+> a result, and the whole point of these criteria is that they can fail.
+
 | Acceptance Criterion | Verification Check | Demo Result |
 | :--- | :--- | :--- |
-| **I-1: Ask** | OpenCode answers complex technical prompt. | [ PASS ] |
-| **I-2: Add Document** | New document indexed and findable. | [ PASS ] |
-| **I-3: Edit Page** | Human edit in Obsidian updates index in < 5s. | [ PASS ] |
-| **O-1: Grounded Answer** | Answers cite `[[Page#Heading]]`, no hallucinated URLs. | [ PASS ] |
-| **H-1: No Local Read** | Zero disk reads of `/vault-replica` in agent shell. | [ PASS ] |
-| **H-2: Fresh Agent** | OpenCode starts with empty context and succeeds. | [ PASS ] |
-| **H-3: Audit Trace** | Query $\rightarrow$ Hits $\rightarrow$ Envelope logged in console. | [ PASS ] |
-| **H-4: Shipped Surfaces** | Driven 100% via `wiki_search`, `wiki_read`, `snpmemory`. | [ PASS ] |
-| **P-1: Package Loading** | OpenCode successfully loads `packages/snp-agent` (`plugin.json`, rules, instructions, and 7 portable skills) with zero schema or parse errors. | [ PASS ] |
-| **T-1: Tool Boundary & Execution** | OpenCode restricts actions exclusively to provided MCP tools and `snpmemory` CLI commands, attempts zero hallucinated/unauthorized tools, and successfully runs all invoked tools to clean completion. | [ PASS ] |
+| **I-1: Ask** | OpenCode answers complex technical prompt. | [ ] not yet run |
+| **I-2: Add Document** | New document indexed and findable. | [ ] not yet run |
+| **I-3: Edit Page** | Human edit in Obsidian updates index in < 5s. | [ ] not yet run |
+| **O-1: Grounded Answer** | Answers cite `[[Page#Heading]]`, no hallucinated URLs. | [ ] not yet run |
+| **H-1: No Local Read** | Zero disk reads of `/vault-replica` in agent shell. | [ ] not yet run |
+| **H-2: Fresh Agent** | OpenCode starts with empty context and succeeds. | [ ] not yet run |
+| **H-3: Audit Trace** | Query $\rightarrow$ Hits $\rightarrow$ Envelope logged in console. | [ ] not yet run |
+| **H-4: Shipped Surfaces** | Driven 100% via `wiki_search`, `wiki_read`, `snpmemory`. | [ ] not yet run |
+| **P-1: Package Loading** | OpenCode successfully loads `packages/snp-agent` (`plugin.json`, rules, instructions, and 7 portable skills) with zero schema or parse errors. | [ ] not yet run |
+| **T-1: Tool Boundary & Execution** | OpenCode restricts actions exclusively to provided MCP tools and `snpmemory` CLI commands, attempts zero hallucinated/unauthorized tools, and successfully runs all invoked tools to clean completion. | [ ] not yet run |
 
 ---
 

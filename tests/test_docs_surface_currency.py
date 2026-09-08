@@ -17,6 +17,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Names the system no longer exposes. `rag_fetch` and `basic-memory` were
 #: retired in V3; `search_notes`/`read_note` were basic-memory's tools.
+#: `dual-layer` and `source evidence` are not surface names but phrases that
+#: name the retired two-tier workflow itself -- "search the wiki, then fetch
+#: source evidence from a second RAG tier" -- which a doc can assert without
+#: naming any single retired tool. `docs/DEMO.md`'s title and opening sentence
+#: did exactly that (fix round 1) while the rest of the file, twelve lines
+#: later, correctly described the real single-tier flow.
 RETIRED_SURFACES = (
     "rag_fetch",
     "basic-memory",
@@ -25,6 +31,8 @@ RETIRED_SURFACES = (
     "auto-heal",
     "snp-rag-fetch",
     "snp-search-wiki",
+    "dual-layer",
+    "source evidence",
 )
 
 #: Docs a reader is expected to act on. Task 4 adds the entry docs.

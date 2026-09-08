@@ -1,8 +1,9 @@
-# Demo — Authenticated Dual-Layer Retrieval
+# Demo — Authenticated Wiki Retrieval
 
-This demonstration shows the system's intended behavior: search compiled
-knowledge first, then retrieve department-authorized source evidence only when
-the page is insufficient.
+This demonstration shows the system's intended behavior: `wiki_search` finds
+candidate pages, `wiki_read` returns the canonical page, and the read mode
+escalates — `tldr` → `outline` → `section` → `full` — only as far as the
+answer needs. A search snippet is never answer text.
 
 ## Prerequisites
 
@@ -34,8 +35,8 @@ plausible filename or hand-written path for a demo.
 
 - Repeat the Scout call without a bearer token in JWT/static mode: it must be
   rejected.
-- Repeat it with a token lacking the page department: it must not expose the
-  source.
+- Repeat it with a token lacking the page department: `wiki_search` must not
+  surface the page and `wiki_read` must not return it.
 - Request a narrower authorized department: it may reduce results.
 - Attempt to request a department absent from the token: Scout must reject the
   scope expansion.

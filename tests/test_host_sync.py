@@ -555,3 +555,90 @@ def test_a_failed_git_step_is_named_without_leaking_the_url() -> None:
     assert "fetch" in message
     for leak in ("http://", "https://", "@", "token", "password"):
         assert leak not in message.lower()
+
+
+def test_a_transient_fetch_failure_is_retried_rather_than_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blip must not leave the replica reporting degraded forever.
+
+    `_perform_git_sync` records a failure in the in-process state and nothing
+    re-attempts it, so before this a single transient fetch error left `/ready`
+    reporting `degraded, last_error: "git fetch failed"` until an unrelated
+    webhook happened to trigger a later sync. The content stayed correct
+    throughout, which is what made it dangerous: a healthy system reporting a
+    fault it had already recovered from.
+    """
+    upstream = _make_upstream(tmp_path)
+    replica = tmp_path / "replica"
+    monkeypatch.setenv("GIT_SYNC_URL", str(upstream))
+    monkeypatch.setenv("GIT_SYNC_ATTEMPTS", "3")
+    monkeypatch.setenv("GIT_SYNC_RETRY_SECONDS", "0")
+
+    real_sync_once = host_sync._sync_once
+    attempts: list[int] = []
+
+    def flaky(root: Path) -> str:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise host_sync.GitStepError("fetch")
+        return real_sync_once(root)
+
+    monkeypatch.setattr(host_sync, "_sync_once", flaky)
+
+    assert host_sync._perform_git_sync(str(replica)) is True
+    assert len(attempts) == 2, "the second attempt should have been made"
+    state = host_sync._read_state()
+    assert state["last_error"] is None, "a recovered blip is not a live fault"
+    assert state["published_at"] is not None
+
+
+def test_a_misconfiguration_is_reported_immediately_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retrying a deterministic error only delays an honest answer.
+
+    `SyncConfigurationError` and `ReplicaSafetyError` are both `RuntimeError`
+    subclasses, so a naive retry loop would sit through the full backoff budget
+    before reporting a bad `GIT_SYNC_URL` that was never going to heal.
+    """
+    monkeypatch.delenv("GIT_SYNC_URL", raising=False)
+    monkeypatch.setenv("GIT_SYNC_ATTEMPTS", "5")
+    monkeypatch.setenv("GIT_SYNC_RETRY_SECONDS", "0")
+
+    real_sync_once = host_sync._sync_once
+    attempts: list[int] = []
+
+    def counting(root: Path) -> str:
+        attempts.append(1)
+        return real_sync_once(root)
+
+    monkeypatch.setattr(host_sync, "_sync_once", counting)
+
+    assert host_sync._perform_git_sync(str(tmp_path / "replica")) is False
+    assert len(attempts) == 1, "a misconfiguration will not fix itself"
+    assert host_sync._read_state()["last_error"]
+
+
+def test_a_persistent_failure_still_surfaces_as_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry absorbs blips; it must not hide a real outage.
+
+    The readiness endpoint's three states exist so a replica serving stale
+    content is visibly degraded rather than quietly "ready". Exhausting the
+    attempts must still reach that state.
+    """
+    upstream = _make_upstream(tmp_path)
+    replica = tmp_path / "replica"
+    monkeypatch.setenv("GIT_SYNC_URL", str(upstream))
+    assert host_sync._perform_git_sync(str(replica)) is True
+
+    monkeypatch.setenv("GIT_SYNC_URL", str(tmp_path / "missing"))
+    monkeypatch.setenv("GIT_SYNC_ATTEMPTS", "2")
+    monkeypatch.setenv("GIT_SYNC_RETRY_SECONDS", "0")
+
+    assert host_sync._perform_git_sync(str(replica)) is False
+    state = host_sync._read_state()
+    assert state["ready"] is True, "stale content stays in service"
+    assert state["last_error"] == "git fetch failed"

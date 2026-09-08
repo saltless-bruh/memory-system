@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -447,32 +448,95 @@ def _existing_published_commit(raw_root: str | Path) -> str | None:
         return None
 
 
+def _sync_attempts() -> int:
+    raw = os.environ.get("GIT_SYNC_ATTEMPTS", "3")
+    try:
+        attempts = int(raw)
+    except ValueError as exc:
+        raise SyncConfigurationError("GIT_SYNC_ATTEMPTS must be an integer") from exc
+    if not 1 <= attempts <= 10:
+        raise SyncConfigurationError("GIT_SYNC_ATTEMPTS must be between 1 and 10")
+    return attempts
+
+
+def _sync_retry_delay() -> float:
+    raw = os.environ.get("GIT_SYNC_RETRY_SECONDS", "2")
+    try:
+        delay = float(raw)
+    except ValueError as exc:
+        raise SyncConfigurationError("GIT_SYNC_RETRY_SECONDS must be numeric") from exc
+    if not 0 <= delay <= 60:
+        raise SyncConfigurationError("GIT_SYNC_RETRY_SECONDS must be between 0 and 60")
+    return delay
+
+
+def _sync_error_message(exc: BaseException) -> str:
+    """Name the failing step without surfacing output or a credentialed URL."""
+    if isinstance(exc, GitStepError):
+        return f"git {exc.step} failed"
+    return f"{type(exc).__name__}: synchronization failed"
+
+
 def _perform_git_sync(vault_path: str = VAULT_DIR, *, queued: bool = False) -> bool:
-    """Serialize one sync and preserve a published snapshot on every failure."""
+    """Serialize one sync, retrying a transient failure, and always keep a snapshot.
+
+    A single failed sync used to be permanent in effect: the error went into the
+    in-process state and nothing re-attempted it, so a momentary blip left
+    ``/ready`` reporting ``degraded`` until an unrelated webhook happened to
+    trigger a later sync. The content stayed correct throughout, which is what
+    made it dangerous -- a healthy replica reporting a fault it had already
+    recovered from.
+
+    Retrying only covers errors that can plausibly clear on their own. A bad
+    ``GIT_SYNC_URL`` or a replica-safety violation will read the same way on the
+    tenth attempt as on the first, so those are reported immediately rather than
+    after the whole backoff budget. Exhausting the attempts still marks the
+    replica degraded: this absorbs blips, it does not hide an outage.
+    """
     if not queued:
         _mark_sync_queued()
     with _sync_lock:
         try:
-            commit = _sync_once(Path(vault_path))
-        except (
-            OSError,
-            subprocess.SubprocessError,
-            tarfile.TarError,
-            RuntimeError,
-        ) as exc:
-            # Do not expose command output or URLs, which can contain credentials.
-            error = (
-                f"git {exc.step} failed"
-                if isinstance(exc, GitStepError)
-                else f"{type(exc).__name__}: synchronization failed"
-            )
-            fallback = _existing_published_commit(vault_path)
-            _mark_failure(error, fallback)
+            attempts = _sync_attempts()
+            delay = _sync_retry_delay()
+        except SyncConfigurationError as exc:
+            error = _sync_error_message(exc)
+            _mark_failure(error, _existing_published_commit(vault_path))
             logger.error("Host-sync failed: %s", error)
             return False
-        _mark_success(commit)
-        logger.info("Published wiki snapshot at commit %s", commit)
-        return True
+
+        for attempt in range(1, attempts + 1):
+            try:
+                commit = _sync_once(Path(vault_path))
+            except (SyncConfigurationError, ReplicaSafetyError) as exc:
+                # Deterministic. Retrying only delays an honest answer.
+                error = _sync_error_message(exc)
+                _mark_failure(error, _existing_published_commit(vault_path))
+                logger.error("Host-sync failed: %s", error)
+                return False
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                tarfile.TarError,
+                RuntimeError,
+            ) as exc:
+                error = _sync_error_message(exc)
+                if attempt < attempts:
+                    logger.warning(
+                        "Host-sync attempt %d of %d failed: %s; retrying",
+                        attempt,
+                        attempts,
+                        error,
+                    )
+                    time.sleep(delay * attempt)
+                    continue
+                _mark_failure(error, _existing_published_commit(vault_path))
+                logger.error("Host-sync failed after %d attempts: %s", attempts, error)
+                return False
+            _mark_success(commit)
+            logger.info("Published wiki snapshot at commit %s", commit)
+            return True
+        return False
 
 
 def _start_daemon_sync(vault_path: str) -> None:

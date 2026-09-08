@@ -271,6 +271,16 @@ services:
         SNP_GIT_REVISION: ${SNP_GIT_REVISION:-unknown}
     image: ${SNP_HOST_SYNC_IMAGE:-snp-host-sync}
     restart: unless-stopped
+    # The initial sync fires about three seconds after this container starts,
+    # and `git` declares `start_period: 40s`. Without this the first fetch
+    # races Gitea's boot and loses -- and the loss is not transient in effect:
+    # the error lands in host-sync's in-process state, nothing retries it, and
+    # `/ready` reports `degraded, last_error: "git fetch failed"` until an
+    # unrelated webhook triggers a later sync. `gitea-runner` already waits
+    # this way; host-sync was the only Gitea-dependent service that did not.
+    depends_on:
+      git:
+        condition: service_healthy
     environment:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET}
       VAULT_REPLICA_DIR: /vault-replica

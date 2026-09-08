@@ -271,10 +271,19 @@ When OpenCode initializes:
 3. PostgreSQL Row-Level Security (RLS) evaluates `doc_dept_overlap_select`:
    - Redteam documents have `allowed_depts = {'redteam'}`.
    - `allowed_depts && ARRAY['ai_eng']` evaluates to `FALSE`.
-4. Scout returns:
+4. Scout returns an empty envelope — the shape never changes, only the contents:
    ```json
-   []
+   {
+     "results": [],
+     "returned": 0,
+     "suppressed_as_seen": 0,
+     "has_more": false
+   }
    ```
+   Note `suppressed_as_seen: 0`. The redteam pages were not hidden as
+   already-read; row-level security meant they were never rows to begin with.
+   The caller cannot tell the difference between "no such page" and "no such
+   page *for you*", and that is the intended behaviour.
 5. OpenCode honestly reports:
    > *"I found no documents matching this topic within your authorized department scope (`ai_eng`)."*
 

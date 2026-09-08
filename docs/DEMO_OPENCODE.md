@@ -77,8 +77,10 @@ docker compose ps
 
 ### Step 2.2: Confirm Readiness Probes
 ```bash
-# 1. Check Scout HTTP readiness
-curl -fsS http://localhost:8080/health
+# 1. Check Scout readiness. Scout serves MCP at /mcp and has no /health route;
+#    Compose probes the TCP port, so probe the same thing here.
+docker compose ps scout --format '{{.Service}} {{.Status}}'
+# Expect: scout Up ... (healthy)
 
 # 2. Check sync-job readiness flag
 test -f /tmp/snp-sync-job/ready && echo "Sync-job ready!"
@@ -108,12 +110,18 @@ docker compose exec postgres psql -U postgres -d snp_rag \
 OpenCode supports standard MCP tool declarations. Connect OpenCode to the authenticated Scout server and the local `snpmemory` tools.
 
 ### Step 3.1: Generate MCP Configuration
-Run the built-in MCP exporter to inspect or emit the client configuration:
+The exporter supports `cursor`, `vscode`, `claude` and `gemini`. It prints to
+stdout unless you pass `--out`:
 
 ```bash
-# Export MCP configuration for standard clients
-uv run snpmemory mcp-config --client claude --print
+uv run snpmemory mcp-config --client claude
 ```
+
+**There is no `opencode` target yet**, and the `claude` output is Claude Code's
+`.mcp.json` / `mcpServers` shape, which OpenCode does not read. For this
+rehearsal, hand-write `opencode.json` using Step 3.2 and verify it with
+`opencode mcp list` before starting a session. Generating an OpenCode config
+from the CLI is tracked separately and is not part of this runbook.
 
 ### Step 3.2: Configure OpenCode (`opencode.json` or `.mcp.json`)
 Add the `scout` and `snpmemory` servers to OpenCode's configuration file:
@@ -301,8 +309,14 @@ When OpenCode initializes:
    ## 2026 Telephony Guardrail
    All Tier-1 telecom operators in the region now mandate Diameter-to-SS7 gateway filtering to block rogue UpdateLocation packets.
    ```
-3. Run:
+3. Run — **from the vault checkout, not this source checkout**:
    ```bash
+   # Confirm you are in the vault repo and that the remote is the private
+   # Gitea one. If this prints a github.com URL, STOP: you are in the source
+   # checkout and this push would publish the vault.
+   git remote get-url origin
+   # Expect: http://localhost:3000/snp-admin/snp-memory.git
+
    git add "concepts/Signaling System 7 Security.md"
    git commit -m "docs(telecom): add 2026 telephony guardrail update"
    git push origin main

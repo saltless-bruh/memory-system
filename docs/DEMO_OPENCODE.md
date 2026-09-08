@@ -413,6 +413,8 @@ OpenCode calls `wiki_search`, immediately reads the updated chunk, and quotes:
 | **P-1: Package Loading** | OpenCode successfully loads `packages/snp-agent` (`plugin.json`, rules, instructions, and 7 portable skills) with zero schema or parse errors. | [ ] not yet run |
 | **T-1: Tool Boundary & Execution** | OpenCode restricts actions exclusively to provided MCP tools and `snpmemory` CLI commands, attempts zero hallucinated/unauthorized tools, and successfully runs all invoked tools to clean completion. | [ ] not yet run |
 
+**Note: I-3 is currently expected to fail as written.** The W-2 acceptance gate measures propagation at ~7 seconds (Act 3), against I-3's bar of under 5. That gap is real and unexplained, not a rounding error — record the observed time during the rehearsal rather than adjusting the criterion, and treat closing it as work rather than a wording problem.
+
 ---
 
 ## 6. Live Emergency Troubleshooting

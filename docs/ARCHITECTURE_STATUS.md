@@ -41,9 +41,11 @@ not an operations manual.
   `scout/ingest.py`), distinguished only by a stored corpus tier
   (`scout/wiki_ingest.py::WIKI_CORPUS`), never by a separate model or vector
   space. There is no in-process FastEmbed model. `basic-memory` is no longer
-  part of this system, and the 384-dimension model the Phase 0 Gate 4 spike
-  evaluated is not part of the deployed system — see "Open decisions" below
-  and the banner on `spikes/GATE_RESULTS.md`.
+  part of this system (the directory remains on disk but unbuilt; no Compose
+  service or CI workflow instantiates it, though its `requirements.lock`
+  remains tracked as a release-manifest input), and the 384-dimension model
+  the Phase 0 Gate 4 spike evaluated is not part of the deployed system — see
+  "Open decisions" below and the banner on `spikes/GATE_RESULTS.md`.
 - Address verification enforces two conditions, not a similarity threshold: the
   addressed file must win **rank 1** of its page's department-scoped retrieval,
   and at least **50%** of the hint's content tokens must occur in text that file

@@ -12,7 +12,7 @@ FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd
 
 ARG SNP_GIT_REVISION=unknown
 LABEL org.opencontainers.image.revision=$SNP_GIT_REVISION
-LABEL org.opencontainers.image.source=https://github.com/saltless-bruh/snp-memory-system
+LABEL org.opencontainers.image.source=https://github.com/saltless-bruh/memory-system
 
 # --prefer-binary is REQUIRED: without it pip builds litellm's Rust sdist and
 # fails (setup doc).

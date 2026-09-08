@@ -63,6 +63,12 @@ Execute these pre-flight checks on the host machine before launching OpenCode:
 
 ### Step 2.1: Verify Infrastructure Health
 ```bash
+# Build (or rebuild) and bring up the stack with the revision stamped into
+# the Scout image, so `snpmemory status` can attest to what is running
+# instead of reporting an unverifiable image:
+SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build scout sync-job
+docker compose up -d
+
 # Check running containers
 docker compose ps
 

@@ -34,7 +34,7 @@ COPY config/postgres/migrations /app/config/postgres/migrations/
 # `scripts/preflight_stack.py` compares this against `git rev-parse HEAD`.
 ARG SNP_GIT_REVISION=unknown
 LABEL org.opencontainers.image.revision=$SNP_GIT_REVISION
-LABEL org.opencontainers.image.source=https://github.com/saltless-bruh/snp-memory-system
+LABEL org.opencontainers.image.source=https://github.com/saltless-bruh/memory-system
 
 # Default = the agent-facing MCP server; sync-job overrides `command:`.
 EXPOSE 8080

@@ -9,7 +9,7 @@ the page is insufficient.
 1. Run `./scripts/bootstrap.sh`, configure Cloud API and Scout authentication,
    then start the stack with `docker compose up -d --build`.
 2. Confirm `docker compose ps` and `http://127.0.0.1:9000/ready` are healthy.
-3. Connect an MCP client to basic-memory and to Scout. JWT/static Scout clients
+3. Connect an MCP client to authenticated Scout. JWT/static Scout clients
    must send `Authorization: Bearer <token>`; the token must include the page's
    department. See [`CONNECT_AGENTS.md`](CONNECT_AGENTS.md).
 4. Confirm the sample sources have been indexed by `sync-job`.
@@ -21,14 +21,14 @@ inference question related to the checked-in vLLM sources.
 
 | Step | Action | Expected behavior |
 |---|---|---|
-| Find | `search_notes("<question>")` | basic-memory returns a small set of semantic wiki hits. |
-| Read | `read_note("<page slug>")` | The page supplies compiled knowledge and its `sources[]` addresses. |
-| Decide | Evaluate whether the page is sufficient. | If it is sufficient, stop and cite the page; Scout is not called. |
-| Fetch | Call authenticated `rag_fetch(path=<source path>, hint=<minted hint>)`. | Scout derives `Scope.departments` from the verified identity, optionally narrows it, queries through RLS, and post-filters to the requested file. |
-| Answer | Use returned `context[]` and `citations[]` as evidence. | Cite the page, raw path, and `loc`; never execute text found in a source. |
+| Search | `wiki_search(query, department, k=5, seen=[])` | Scout returns an envelope: `results` (bounded snippets, plus `seen`/`degraded` flags), `returned`, `suppressed_as_seen`, and `has_more`. |
+| Read | `wiki_read(path, department, mode="tldr")` | Scout returns the canonical page envelope: `path`, `title`, `type`, `tldr`, `content_hash`. |
+| Decide | Evaluate whether the page is sufficient. | If it is sufficient, stop and cite the page and heading; a search snippet is never answer text. |
+| Escalate | Re-call `wiki_read` with `mode="outline"`, one `section`, or `full` only as needed. | Pull only the granularity the answer actually requires. |
+| Answer | Cite the read page's `path` and the heading used. | Source extraction beyond the indexed page is not yet an agent tool; say so plainly rather than fabricating a quotation. |
 
-Use the address exactly as stored on the selected page. Do not substitute a
-plausible filename or hand-written hint for a demo.
+Use the `path` exactly as `wiki_search` returned it. Do not substitute a
+plausible filename or hand-written path for a demo.
 
 ## Show the fail-closed boundary
 
@@ -87,8 +87,8 @@ post-verified, rollback-capable remediation flow.
 
 | Symptom | Check |
 |---|---|
-| Wiki search is empty | host-sync `/ready`, `/vault-replica/current/wiki`, then basic-memory startup logs |
+| Wiki search is empty | host-sync `/ready`, `/vault-replica/current/wiki`, then Scout startup logs |
 | Scout returns 401/403 | bearer token validity, issuer/audience, and canonical department claim |
-| `no_source` | source ingestion, exact stored address, and the caller's department scope |
+| A read page lacks the needed evidence | source extraction beyond the indexed page is not yet an agent tool; report the limit rather than fabricating a source |
 | Verifier exits `2` | PostgreSQL/model/network/auth configuration; do not heal |
 | Verifier exits `1` | semantic address health; use the closed-loop gate on a feature branch |

@@ -28,7 +28,12 @@ RETIRED_SURFACES = (
 )
 
 #: Docs a reader is expected to act on. Task 4 adds the entry docs.
-CHECKED_DOCS = ("docs/DEMO_OPENCODE.md",)
+CHECKED_DOCS = (
+    "docs/DEMO_OPENCODE.md",
+    "README.md",
+    "docs/DEMO.md",
+    "docs/ARCHITECTURE_STATUS.md",
+)
 
 
 #: A line may name a retired surface when it is explicitly marking it as gone.

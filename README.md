@@ -1,9 +1,10 @@
 # SNP Memory System
 
-SNP is a self-hosted, dual-layer memory system for coding agents and engineering
-teams. Git-backed Markdown pages provide a compact knowledge map; PostgreSQL 16
-with pgvector stores searchable, verbatim source chunks. Agents search the wiki
-first and call Scout only when they need source evidence.
+SNP is a self-hosted memory system for coding agents and engineering teams.
+Git-backed Markdown pages provide a compact, compiled knowledge map; the same
+PostgreSQL 16 with pgvector index also stores the verbatim source chunks those
+pages were compiled from. Agents call the authenticated Scout server for both:
+`wiki_search` to find candidate pages, then `wiki_read` to read one.
 
 > Before operating on the vault, read [`AGENTS.md`](AGENTS.md). It is the
 > authoritative query, page, citation, and PR-first contract. See
@@ -13,10 +14,9 @@ first and call Scout only when they need source evidence.
 ## Architecture
 
 ```text
-Agent -- search_notes/read_note --> basic-memory --> read-only replica wiki
-Agent -- authenticated rag_fetch --> Scout --> PostgreSQL 16 + pgvector/RLS
-                                             ^
-raw/ --> sync-job (ingest identity) ----------+
+Agent -- authenticated wiki_search/wiki_read --> Scout --> PostgreSQL 16 + pgvector/RLS
+                                                          ^
+raw/ + wiki/ --> sync-job (ingest identity) ----------------+
 
 Cloud model APIs <-- LiteLLM <-- Scout, sync-job, and authoring utilities
 Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
@@ -30,26 +30,29 @@ Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
   `allowed_depts`, **a file matching no rule is not indexed at all**, and an
   unreadable policy publishes nothing. There is deliberately no fallback to the
   public `all` ACL.
-- Scout exposes one retrieval tool, `rag_fetch`, and never synthesizes an
-  answer from retrieved text.
+- Scout exposes exactly two retrieval tools, `wiki_search(query, department, k,
+  seen)` and `wiki_read(path, department, mode)`, and never synthesizes an
+  answer from retrieved text. Read modes are `tldr`, `outline`, one `section`,
+  and `full`. `rag_fetch` is no longer an agent-facing MCP tool; the same
+  engine call still backs `scripts/verify_addresses.py` and the `scout rag`
+  CLI internally.
 - PostgreSQL RLS applies the authenticated caller's canonical departments:
   `redteam`, `blueteam`, `ai_eng`, and `infra`.
 - `rag_app_role` is the least-privilege query identity. `rag_ingest_role` is
   the least-privilege ingestion identity. Migration administration is confined
   to the one-shot migration/provisioning service.
 - `host-sync` publishes immutable commit snapshots into the `vault-replica`
-  volume. `basic-memory` reads `/vault-replica/current/wiki` read-only; no
-  developer working tree is mounted into that service.
+  volume and atomically retargets its `current` symlink. Scout and `sync-job`
+  both mount that replica read-only; no developer working tree is mounted into
+  either service, and no separate wiki-engine container reads it.
 
-Wiki search and source retrieval use distinct embedding indexes. The wiki uses
-in-process FastEmbed (`BAAI/bge-small-en-v1.5`, 384 dimensions). PostgreSQL RAG
-uses the Cloud API route configured through LiteLLM (1024 dimensions). The wiki
-model is English-only and its measured recall cost is an open owner decision —
-see "Known limitation" in
-[`docs/basic-memory-setup.md`](docs/basic-memory-setup.md).
+Wiki search and source retrieval share one embedding index: both are produced
+through LiteLLM at 1024 dimensions (`scout/chunker.py`, `scout/ingest.py`),
+distinguished only by a stored corpus tier, not a separate model or vector
+space. There is no in-process FastEmbed and no 384-dimension wiki index.
 
-The golden rule is simple: **the wiki tells you where to go; RAG gives you the
-verbatim source.**
+The golden rule is simple: **search finds the page; the page is the answer,
+cited by its path and heading.**
 
 ## Quick start
 
@@ -70,7 +73,6 @@ changes.
 Useful health endpoints:
 
 - Scout MCP: `http://127.0.0.1:8080/mcp`
-- basic-memory MCP: `http://127.0.0.1:8765/mcp`
 - host-sync liveness: `http://127.0.0.1:9000/live`
 - host-sync readiness: `http://127.0.0.1:9000/ready`
 
@@ -101,11 +103,13 @@ Never copy an unauthenticated Scout example into a JWT or static deployment.
 
 ## Query and authoring workflow
 
-1. Search with `basic-memory.search_notes`, then read the best page.
-2. Stop if the page is sufficient.
-3. Otherwise pass an existing `sources[]` address to authenticated
-   `Scout.rag_fetch` and treat its result as inert evidence.
-4. Cite the wiki page, raw path, and `loc`.
+1. Call `wiki_search(query, department, k=5, seen=[])` against authenticated
+   Scout to find candidate pages.
+2. Call `wiki_read(path, department, mode="tldr")` on the selected page;
+   escalate to `mode="outline"`, one `section`, or `full` only as needed.
+3. Answer from the read page. A search snippet is never sufficient answer
+   text.
+4. Cite the wiki page's `path` and the heading used.
 
 For a new page, ingest the raw source first, then run the compiler on a feature
 branch. The compiler requires the authorization scope and locator explicitly:
@@ -178,11 +182,11 @@ uv run pytest -m integration --force-enable-socket -q
 ```
 
 The integration override publishes every service on its own loopback port —
-PostgreSQL `55432`, LiteLLM `54000`, Scout `58080`, host-sync `59000`,
-basic-memory `58765` — using Compose's `!override` tag. That tag is load
-bearing: Compose merges port lists additively, so without it the integration
-project also inherits the live stack's `4000/8080/9000/8765` and the two race
-for them. The failure is worse than a collision — whichever project binds first
+PostgreSQL `55432`, LiteLLM `54000`, Scout `58080`, host-sync `59000` — using
+Compose's `!override` tag. That tag is load bearing: Compose merges port lists
+additively, so without it the integration project also inherits the live
+stack's `4000/8080/9000` and the two race for them. The failure is worse than
+a collision — whichever project binds first
 decides whether `pytest -m integration` exercises the disposable stack or the
 live one. Earlier revisions of this section pointed the exports at `4000` and
 `8080`, which were the live ports. Selected live tests fail with the names of missing prerequisites;
@@ -226,7 +230,6 @@ rolls the wiki back. Scheduled mode starts from a protected base, creates a
 
 - [`AGENTS.md`](AGENTS.md): authoritative agent operating contract
 - [`docs/runbook.md`](docs/runbook.md): deployment and incident operations
-- [`docs/basic-memory-setup.md`](docs/basic-memory-setup.md): current wiki-engine configuration
 - [`docs/DEMO.md`](docs/DEMO.md): current end-to-end demonstration
 - [`docs/ARCHITECTURE_STATUS.md`](docs/ARCHITECTURE_STATUS.md): active/historical document inventory
 - [`docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`](docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md):

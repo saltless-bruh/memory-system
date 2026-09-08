@@ -11,7 +11,6 @@ code, migrations, Compose files, and `AGENTS.md` operating contract win.
 | `AGENTS.md` | Agent query, page, citation, scope, and PR-first contract |
 | `README.md` | Current architecture overview and supported commands |
 | `docs/runbook.md` | Deployment, readiness, database roles, verification, and incidents |
-| `docs/basic-memory-setup.md` | Current containerized basic-memory configuration |
 | `docs/DEMO.md` | Current end-to-end demonstration |
 | `docs/CONNECT_AGENTS.md` | MCP client wiring; authentication examples are maintained separately |
 | `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md` | **ACTIVE PROPOSAL, not implemented.** Its "Findings" section records verified defects in the current system and is factual; nothing under "Proposed design" exists in the codebase |
@@ -33,16 +32,18 @@ not an operations manual.
   `redteam`, `blueteam`, `ai_eng`, and `infra`; tool input can only narrow it.
 - `postgres-migrate` completes before Scout and `sync-job` start.
 - Host-sync writes commit-addressed snapshots in the `vault-replica` volume and
-  atomically publishes `current`. basic-memory mounts the replica read-only and
-  becomes available only after host-sync readiness succeeds.
-- Wiki search embeds **in-process inside the basic-memory container** with
-  FastEmbed `BAAI/bge-small-en-v1.5` at 384 dimensions
-  (`basic-memory/config.json`), and that container is deliberately never given
-  the LiteLLM credential. PostgreSQL RAG embeds separately at 1024 dimensions
-  through LiteLLM. The two indexes never share a model or a vector dimension.
-  The Phase 0 Gate 4 spike concluded the opposite model should be adopted; that
-  decision was reversed by what shipped — see "Open decisions" below and the
-  banner on `spikes/GATE_RESULTS.md`.
+  atomically publishes `current`. Scout mounts the replica read-only and
+  becomes available only after host-sync readiness succeeds; `sync-job` mounts
+  the same replica and re-indexes it on change. No separate wiki-engine
+  container reads it.
+- Wiki search and PostgreSQL RAG now share **one** embedding index: both are
+  produced through LiteLLM at 1024 dimensions (`scout/chunker.py`,
+  `scout/ingest.py`), distinguished only by a stored corpus tier
+  (`scout/wiki_ingest.py::WIKI_CORPUS`), never by a separate model or vector
+  space. There is no in-process FastEmbed model. `basic-memory` is no longer
+  part of this system, and the 384-dimension model the Phase 0 Gate 4 spike
+  evaluated is not part of the deployed system — see "Open decisions" below
+  and the banner on `spikes/GATE_RESULTS.md`.
 - Address verification enforces two conditions, not a similarity threshold: the
   addressed file must win **rank 1** of its page's department-scoped retrieval,
   and at least **50%** of the hint's content tokens must occur in text that file
@@ -50,10 +51,13 @@ not an operations manual.
   `scripts/verify_addresses.py`). `RagChunk.score` carries Reciprocal Rank
   Fusion weights capped near `0.033`, so no score floor is meaningful and none
   is applied.
-- `rag_fetch` passes `path=` to the backend, so a mismatched `hint` returns the
-  addressed file anyway — the hint governs ranking, never existence. A `loc` is
-  a human locator that retrieval does not honor; it is validated at mint time
-  (`scripts/mint.py` → `LOC_MISMATCH`) and only advised on at verify time.
+- `rag_fetch` is no longer an agent-facing tool — `scout/mcp_server.py` exposes
+  only `wiki_search` and `wiki_read` — but the same engine call still backs
+  `scripts/verify_addresses.py` and the `scout rag` CLI. It passes `path=` to
+  the backend, so a mismatched `hint` returns the addressed file anyway: the
+  hint governs ranking, never existence. A `loc` is a human locator that
+  retrieval does not honor; it is validated at mint time (`scripts/mint.py` →
+  `LOC_MISMATCH`) and only advised on at verify time.
 - `scripts/compile_note.py` generates a page body from the passages the page's
   minted address retrieves (`verify_groundedness.collect_context`, `k=20`, page
   department scope) and judges it against those same passages before writing.
@@ -63,9 +67,9 @@ not an operations manual.
   validation, so generated text can never break heading order or create an
   unvalidated wikilink (R-1.5).
 - Two MCP surfaces exist and they are not interchangeable.
-  **`scout`** is the deployed one: a container on Streamable HTTP with exactly one
-  tool, `rag_fetch`, behind request-scoped JWT/static authentication. It remains the
-  only door into RAG.
+  **`scout`** is the deployed one: a container on Streamable HTTP with exactly two
+  tools, `wiki_search` and `wiki_read`, behind request-scoped JWT/static
+  authentication. It remains the only door into the wiki and the RAG index.
   **`snpmemory mcp`** is a local **stdio** server exposing this repository's own
   operations (`verify`, `plan_articles`, `compile_plan`, `compile_status`), generated
   from the command declarations in `scout/cli/declarations.py`.
@@ -98,6 +102,11 @@ and topology inside them must not be used to operate the current stack.
 - `spikes/GATE_RESULTS.md` — the Phase 0 gate ledger. Its Gate 4 conclusion was
   **never implemented**; the file's banner records the reversal and the
   re-measured recall cost
+- `docs/basic-memory-setup.md` — describes `basic-memory`, removed in v3
+  along with the wiki-only FastEmbed model it ran in-process. Wiki search now
+  shares Scout's PostgreSQL/pgvector index, embedded through LiteLLM at 1024
+  dimensions; this document's own banner still reads "Current," which is
+  itself dated and should not be trusted over this inventory
 - `artifacts/superpowers/finish.md` — completion handoffs. Its "Needle in a
   Haystack" and token-economy figures were audited on 2026-08-19; see the
   correction banner in that file before quoting any number from it
@@ -113,42 +122,32 @@ artifacts.
 These are recorded, not resolved. Each names the cost of the current default so
 that leaving it in place stays a choice rather than an oversight.
 
-### OD-1 — the wiki-search embedding model (opened 2026-08-19, owner decision)
+### OD-1 — the wiki-search embedding model (opened 2026-08-19, closed 2026-09-08 as moot)
 
-**Question.** Keep FastEmbed `BAAI/bge-small-en-v1.5` @384 for wiki search, or
-adopt a multilingual model?
+**Question, as originally opened.** Keep FastEmbed `BAAI/bge-small-en-v1.5`
+@384 for wiki search, or adopt a multilingual model?
 
-**What ships today.** `bge-small-en-v1.5` @384 — an English-only model. The
-Phase 0 Gate 4 spike measured it at recall@1 `0.625` on Vietnamese paraphrases
-against `0.812` for a multilingual alternative and concluded it should be
-replaced. It was not, and until now no document said so.
+**Resolution.** Moot. `basic-memory` is no longer part of this system. Wiki
+search no longer embeds in-process at all: `wiki_search` now queries the same
+PostgreSQL/pgvector index as source retrieval, embedded through LiteLLM at
+1024 dimensions
+(`scout/diy_engine.py`, `scout/chunker.py`). No owner chose an option below —
+the integration boundary that made this a decision was removed by the
+architecture change instead.
 
-**Measured cost of staying, re-probed live 2026-08-19.** The query
-`"dual layer memory architecture"` ranks its own exact-title page **5th**
-(1.019), behind an unrelated page (1.254). A Vietnamese query returns large
-score ties (0.6603 ×3, 0.5619 ×5) — near-random discrimination. Wiki search is
-step 1 of the query workflow in `AGENTS.md`, so a page that does not surface is
-a page the agent never reads.
+**Historical record, prior to v3.** `bge-small-en-v1.5` @384 shipped despite
+the Phase 0 Gate 4 spike measuring it at recall@1 `0.625` on Vietnamese
+paraphrases against `0.812` for a multilingual alternative and concluding it
+should be replaced. Re-probed live on 2026-08-19, while it was still deployed:
+the query `"dual layer memory architecture"` ranked its own exact-title page
+**5th** (1.019), behind an unrelated page (1.254), and a Vietnamese query
+returned large score ties (0.6603 ×3, 0.5619 ×5) — near-random discrimination.
+That measurement is retained for the audit trail; it does not describe the
+current index, which is not English-restricted by a local model.
 
-**Why this is not a documentation edit.** The model Gate 4 measured ran on a
-local model daemon that is no longer part of this stack, and wiki search embeds
-in-process inside basic-memory, which is intentionally never given the LiteLLM
-credential — so "adopt the Gate 4 winner" is a new integration, not a config
-swap. Any change also alters `semantic_embedding_dimensions`, invalidates the
-existing SQLite search index, and requires a full basic-memory re-index plus a
-re-run of the Gate 4 probe set. That is a runtime behaviour change and an owner
-call.
-
-**Options.**
-1. Adopt a multilingual FastEmbed model that the pinned `basic-memory==0.22.1`
-   image can load in-process, re-index, and re-run the Gate 4 probes.
-2. Accept the recall cost explicitly and date the acceptance here, at which
-   point Gate 4 is closed as *rejected on integration grounds* rather than
-   silently unimplemented.
-3. Restrict wiki content and queries to English, making the gate moot.
-
-**Status: OPEN.** No option has been chosen. Neither `basic-memory/config.json`
-nor any runtime file was changed while recording this.
+**Status: CLOSED (moot).** A separate wiki-only embedding path does not exist
+today, so there is nothing left to decide. The multilingual-adoption question
+would resurface only if a future change reintroduced one.
 
 ### OD-2 — the auto-healer's push credential (opened 2026-08-26, owner decision)
 
@@ -235,7 +234,7 @@ from later product-scope work:
 | staging project or approved maintenance window | **approved:** isolated `snp-v021-staging`, never the default `snp-memory` project |
 | PostgreSQL backup/restore-point owner and identifier | **approved:** release operator creates a custom archive, checksum record, and staging restore result before transition; the generated `BACKUP_ID` is retained outside Git |
 | container-side capability-change acknowledgement | pending — it must be copied from the release dry run |
-| supported-language contract | deferred product decision — see OD-1; not a blocker for the v0.2.1 operational release |
+| supported-language contract | not a blocker for the v0.2.1 operational release — OD-1 closed as moot; the wiki-only English model it concerned no longer exists |
 | content/judge budget | deferred product decision — see T4.1 |
 | derived-asset location and retention | deferred product decision — see T4.3 |
 | source-health thresholds and quarantine policy | deferred product decision — see Tier 5 |
@@ -254,7 +253,6 @@ Active instructions must not describe:
 - anonymous Scout access outside loopback development mode;
 - runtime use of a PostgreSQL superuser;
 - a developer checkout mounted read-write at `/repo`;
-- a single embedding model/dimension shared by wiki and RAG;
 - DOCX or an unimplemented central ingest REST endpoint as supported;
 - caller scope as `roles`, `team`, or a magic `all` authority;
 - verifier exit `2` as semantic drift or as permission to mutate;
@@ -262,12 +260,13 @@ Active instructions must not describe:
 - a similarity/relevance score threshold for address verification — no such
   threshold exists in code, and `RagChunk.score` is an RRF weight capped near
   `0.033`, so none can be stated as a similarity;
-- a mismatched `hint` returning empty or "dead-ending" — `rag_fetch` pre-filters
-  by `path`, so the addressed file is returned regardless;
+- a mismatched `hint` returning empty or "dead-ending" — `rag_fetch` is no longer agent-facing, but the internal call still
+  pre-filters by `path`, so the addressed file is returned regardless;
 - the Phase 0 Gate 4 model as deployed for wiki search;
 - the local `snpmemory mcp` server as network-reachable, authenticated, or safe to
   expose over HTTP — it is stdio-only and unauthenticated by design;
-- any MCP tool other than `rag_fetch` as a door into RAG;
+- any MCP tool other than `wiki_search`/`wiki_read` as a door into the wiki or
+  RAG index;
 - figure or table extraction as working in the deployed ingester — the
   `snp-scout` image installs `pypdf` only (`scout/requirements.txt`), so
   `pdfplumber` (tables) and Pillow (`pypdf[image]`, figures) are both absent,

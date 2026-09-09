@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
-"""Hermetic integration oracles for the V3 retrieval path.
+"""Integration oracles for the V3 retrieval path.
 
-The checks use FastMCP's in-process ASGI transport and transaction-shaped test
-doubles at the PostgreSQL socket boundary.  Product ingest, retrieval-backend,
-engine, authentication, and MCP code all run unchanged.
+`full-chain` ingests a disposable page through the real `ingest_wiki` /
+`ingest_document` path against the running PostgreSQL, then hands the rows it
+actually wrote to a transaction-shaped test double that plays back the
+retrieval, engine, authentication, and MCP layers hermetically. Ingest is real;
+the retrieval socket boundary is a double fed from real rows, not fabricated
+ones. `boundary-fails-closed` never touches PostgreSQL -- it hand-seeds the
+same double to exercise scope and authentication refusal.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import re
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+import uuid
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Any, cast
 
+import asyncpg
 import httpx
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
@@ -57,12 +65,21 @@ class _AsyncContext:
 
 
 class _DualEmbedder:
-    """Deterministic gateway satisfying the current ingest and query seams."""
+    """Deterministic gateway satisfying the current ingest and query seams.
+
+    `calls` counts invocations of the synchronous seam `ingest_document` uses,
+    so a caller can prove the content-hash short-circuit skipped embedding
+    entirely rather than merely skipping the write.
+    """
 
     model = "gate/e2e-embedding"
     dim = 1024
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
         return [[0.0] * self.dim for _text in texts]
 
     async def aembed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -77,67 +94,24 @@ class _StoredChunk:
     metadata: dict[str, object]
 
 
-class _IngestConnection:
-    """Capture exactly what ``ingest_document`` writes through asyncpg."""
+@dataclass(slots=True)
+class _IngestedFixture:
+    """What ingestion produced, for `_RetrievalConnection` to serve.
 
-    def __init__(self) -> None:
-        self.source_uri = ""
-        self.allowed_depts: tuple[str, ...] = ()
-        self.chunks: list[_StoredChunk] = []
+    `full-chain` populates this from rows read back after a real PostgreSQL
+    ingest. `boundary-fails-closed` hand-seeds it directly -- it never
+    ingests anything, only exercises scope and authentication refusal. Either
+    way this is pure in-memory data; nothing here talks to a database.
+    """
 
-    def transaction(self) -> _AsyncContext:
-        return _AsyncContext()
-
-    async def fetchrow(self, query: str, *args: object) -> Mapping[str, object]:
-        require(
-            "INSERT INTO rag_documents" in query and "ON CONFLICT" in query,
-            "wiki ingest bypassed the idempotent document upsert",
-        )
-        require(len(args) >= 2, "document upsert omitted source or ACL arguments")
-        source_uri = args[0]
-        departments = args[1]
-        if not isinstance(source_uri, str):
-            raise GateFailure("document source_uri was not text")
-        if not isinstance(departments, list):
-            raise GateFailure("document ACL was not a list")
-        require(
-            all(isinstance(item, str) for item in departments),
-            "document ACL contained a non-text department",
-        )
-        self.source_uri = source_uri
-        self.allowed_depts = tuple(cast(list[str], departments))
-        return {"doc_id": 1}
-
-    async def execute(self, query: str, *args: object) -> str:
-        if "DELETE FROM rag_chunks" in query:
-            self.chunks.clear()
-            return "DELETE 0"
-        if "INSERT INTO rag_chunks" not in query:
-            raise GateFailure("wiki ingest issued unexpected SQL")
-        require(len(args) == 6, "chunk insert argument contract drifted")
-        metadata_raw = args[5]
-        if not isinstance(metadata_raw, str):
-            raise GateFailure("chunk metadata was not JSON text")
-        metadata = json.loads(metadata_raw)
-        require(isinstance(metadata, dict), "chunk metadata was not a JSON object")
-        self.chunks.append(
-            _StoredChunk(
-                chunk_id=len(self.chunks) + 1,
-                source_uri=self.source_uri,
-                text=str(args[2]),
-                metadata=cast(dict[str, object], metadata),
-            )
-        )
-        return "INSERT 0 1"
-
-    async def close(self) -> None:
-        return None
+    chunks: list[_StoredChunk] = field(default_factory=list)
+    allowed_depts: tuple[str, ...] = ()
 
 
 class _RetrievalConnection:
     """Return ingested rows while recording real backend SQL and RLS scope."""
 
-    def __init__(self, ingest: _IngestConnection) -> None:
+    def __init__(self, ingest: _IngestedFixture) -> None:
         self.ingest = ingest
         self.configured_depts: list[str] = []
         self.queries: list[str] = []
@@ -314,8 +288,10 @@ def _http_client_factory(app: object) -> Callable[..., httpx.AsyncClient]:
     return factory
 
 
-def _write_page(root: Path, body_sentinel: str) -> Path:
-    page = root / "concepts" / "scope-routing.md"
+def _write_page(
+    root: Path, body_sentinel: str, *, relative_path: str = "concepts/scope-routing.md"
+) -> Path:
+    page = root / relative_path
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
         f"""---
@@ -342,58 +318,154 @@ read from disk after search chooses its path.
     return page
 
 
-async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
+def _ingest_role_connection_settings() -> object:
+    """Ingest-role credentials, mirroring `engine_acceptance._live_sql`.
+
+    That gate reads with the `query` role; this one writes, so it asks for
+    `ingest` -- the role `scout.ingest.get_pg_connection` itself resolves.
+    """
+    from scout.config import postgres_settings  # noqa: PLC0415
+
+    return postgres_settings("ingest", env=os.environ)
+
+
+async def _real_ingest_and_short_circuit(
+    wiki_dir: Path, page_path: Path, source_uri: str, embedder: _DualEmbedder
+) -> list[_StoredChunk]:
+    """Ingest one disposable page against real PostgreSQL and read back what
+    landed, then prove the content-hash short-circuit re-embeds nothing.
+
+    This replaces `_IngestConnection`, the hand-rolled fake that answered
+    `transaction()` and `fetchrow()` but not `fetch()` -- the call
+    `_indexed_signatures` makes to decide whether a page is unchanged. Adding
+    `fetch()` to the fake would have made this gate green without ever
+    touching Postgres; this ingests, asserts, and cleans up for real instead.
+    """
+    from scout.wiki_ingest import WIKI_ALLOWED_DEPARTMENTS, ingest_wiki
+
+    settings = cast(Any, _ingest_role_connection_settings())
+    conn = await asyncpg.connect(
+        host=settings.host,
+        port=settings.port,
+        database=settings.database,
+        user=settings.user,
+        password=settings.password,
+    )
+    try:
+        first_pass = await ingest_wiki(wiki_dir, conn=conn, embedder=embedder)
+        require(
+            len(first_pass) == 1 and first_pass[0].get("status") == "ingested_ok",
+            f"wiki ingest did not publish the page to PostgreSQL: {first_pass!r}",
+        )
+        require(
+            embedder.calls == 1,
+            f"ingesting a new page made {embedder.calls} embed call(s), not 1",
+        )
+
+        doc_row = await conn.fetchrow(
+            "SELECT doc_id, allowed_depts, ingested_at FROM rag_documents "
+            "WHERE source_uri = $1;",
+            source_uri,
+        )
+        require(doc_row is not None, "ingest did not create a rag_documents row")
+        require(
+            tuple(doc_row["allowed_depts"]) == tuple(WIKI_ALLOWED_DEPARTMENTS),
+            "wiki ingest did not assign all four canonical departments in Postgres",
+        )
+
+        chunk_rows = await conn.fetch(
+            "SELECT chunk_text, metadata FROM rag_chunks "
+            "WHERE doc_id = $1 ORDER BY chunk_index;",
+            doc_row["doc_id"],
+        )
+        require(bool(chunk_rows), "wiki ingest published no chunks to PostgreSQL")
+
+        expected_hash = hashlib.sha256(page_path.read_bytes()).hexdigest()  # noqa: ASYNC240
+        stored_chunks: list[_StoredChunk] = []
+        for index, row in enumerate(chunk_rows):
+            metadata = json.loads(row["metadata"])
+            require(
+                bool(str(row["chunk_text"]).strip()),
+                "wiki ingest stored an empty searchable chunk",
+            )
+            require(
+                metadata.get("corpus") == "wiki",
+                "wiki ingest omitted the wiki corpus tier in Postgres",
+            )
+            require(
+                metadata.get("model") == embedder.model
+                and metadata.get("dim") == embedder.dim,
+                "wiki ingest and retrieval disagree on embedding provenance",
+            )
+            require(
+                metadata.get("content_hash") == expected_hash,
+                f"stored content_hash {metadata.get('content_hash')!r} did not "
+                f"match the ingested bytes ({expected_hash!r})",
+            )
+            stored_chunks.append(
+                _StoredChunk(
+                    chunk_id=index + 1,
+                    source_uri=source_uri,
+                    text=str(row["chunk_text"]),
+                    metadata=metadata,
+                )
+            )
+
+        # The content-hash short-circuit -- and therefore `conn.fetch`, the
+        # call the fake could never answer -- exists so a re-published, byte
+        # identical page re-embeds nothing. Prove it against the same rows.
+        second_pass = await ingest_wiki(wiki_dir, conn=conn, embedder=embedder)
+        require(
+            len(second_pass) == 1 and second_pass[0].get("status") == "unchanged",
+            f"re-ingesting unchanged content did not short-circuit: {second_pass!r}",
+        )
+        require(
+            embedder.calls == 1,
+            f"re-ingesting unchanged content made {embedder.calls} embed call(s); "
+            "the content-hash short-circuit did not hold",
+        )
+        unchanged_row = await conn.fetchrow(
+            "SELECT ingested_at FROM rag_documents WHERE doc_id = $1;",
+            doc_row["doc_id"],
+        )
+        require(
+            unchanged_row is not None
+            and unchanged_row["ingested_at"] == doc_row["ingested_at"],
+            "the short-circuited ingest still rewrote the document row",
+        )
+    finally:
+        await conn.execute(
+            "DELETE FROM rag_documents WHERE source_uri = $1;", source_uri
+        )
+        await conn.close()
+
+    return stored_chunks
+
+
+async def _exercise_full_chain(
+    wiki_dir: Path, page_path: Path, source_uri: str
+) -> None:
     from scout.auth import AuthConfig  # noqa: PLC0415
     from scout.backends.pgvector import PgVectorRlsBackend  # noqa: PLC0415
     from scout.diy_engine import ScoutDiyEngine  # noqa: PLC0415
     from scout.mcp_server import build_server  # noqa: PLC0415
     from scout.types import Scope  # noqa: PLC0415
-    from scout.wiki_ingest import (  # noqa: PLC0415
-        WIKI_ALLOWED_DEPARTMENTS,
-        ingest_wiki,
-    )
+    from scout.wiki_ingest import WIKI_ALLOWED_DEPARTMENTS
 
     embedder = _DualEmbedder()
-    ingest_connection = _IngestConnection()
-    results = await ingest_wiki(
-        wiki_dir,
-        conn=cast(Any, ingest_connection),
-        embedder=embedder,
-    )
-    require(
-        len(results) == 1 and results[0].get("status") == "ingested_ok",
-        f"wiki ingest did not publish the page: {results!r}",
-    )
-    require(bool(ingest_connection.chunks), "wiki ingest published no chunks")
-    require(
-        ingest_connection.allowed_depts == tuple(WIKI_ALLOWED_DEPARTMENTS),
-        "wiki ingest did not assign all four canonical departments",
-    )
-    require(
-        all(chunk.text.strip() for chunk in ingest_connection.chunks),
-        "wiki ingest emitted an empty searchable chunk",
-    )
-    require(
-        all(
-            chunk.metadata.get("corpus") == "wiki" for chunk in ingest_connection.chunks
-        ),
-        "wiki ingest omitted the wiki corpus tier",
-    )
-    require(
-        all(
-            chunk.metadata.get("model") == embedder.model
-            and chunk.metadata.get("dim") == embedder.dim
-            for chunk in ingest_connection.chunks
-        ),
-        "wiki ingest and retrieval disagree on embedding provenance",
+    stored_chunks = await _real_ingest_and_short_circuit(
+        wiki_dir, page_path, source_uri, embedder
     )
     raw_decoy = _StoredChunk(
-        chunk_id=max(chunk.chunk_id for chunk in ingest_connection.chunks) + 1,
+        chunk_id=len(stored_chunks) + 1,
         source_uri="raw/body-decoy.md",
         text="INDEXED_BODY_SENTINEL is raw-corpus evidence.",
         metadata={"corpus": "raw", "title": "Raw Decoy", "type": "raw"},
     )
-    ingest_connection.chunks.append(raw_decoy)
+    fixture = _IngestedFixture(
+        chunks=[*stored_chunks, raw_decoy],
+        allowed_depts=tuple(WIKI_ALLOWED_DEPARTMENTS),
+    )
 
     indexed_bytes = page_path.read_bytes()  # noqa: ASYNC240
     refreshed_bytes = indexed_bytes.replace(
@@ -402,7 +474,7 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
     require(refreshed_bytes != indexed_bytes, "disk-refresh control was not planted")
     page_path.write_bytes(refreshed_bytes)  # noqa: ASYNC240
 
-    retrieval_connection = _RetrievalConnection(ingest_connection)
+    retrieval_connection = _RetrievalConnection(fixture)
     pool = _RetrievalPool(retrieval_connection)
     unfiltered_backend = PgVectorRlsBackend(
         embedder=embedder,
@@ -414,8 +486,7 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
         k=5,
     )
     require(
-        {chunk.file_path for chunk in unfiltered}
-        == {"concepts/scope-routing.md", raw_decoy.source_uri},
+        {chunk.file_path for chunk in unfiltered} == {source_uri, raw_decoy.source_uri},
         "unfiltered corpus control could not retrieve both wiki and raw matches",
     )
     backend = PgVectorRlsBackend(
@@ -457,7 +528,7 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
         first = results[0]
         require(isinstance(first, dict), "search result was not a page mapping")
         path = first.get("path")
-        require(path == "concepts/scope-routing.md", f"search chose {path!r}")
+        require(path == source_uri, f"search chose {path!r}")
         require(
             str(first.get("snippet", "")).startswith("Scope routing selects"),
             "search result did not expose the indexed page TLDR",
@@ -495,7 +566,7 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
     )
     matched_id = retrieval_connection.matched_chunk_ids[1][0]
     matched_chunk = next(
-        chunk for chunk in ingest_connection.chunks if chunk.chunk_id == matched_id
+        chunk for chunk in fixture.chunks if chunk.chunk_id == matched_id
     )
     require(
         "INDEXED_BODY_SENTINEL" in matched_chunk.text,
@@ -521,11 +592,17 @@ async def _exercise_full_chain(wiki_dir: Path, page_path: Path) -> None:
 
 
 def group_full_chain() -> str:
-    """Cross ingest, SQL, engine, authenticated MCP, and disk-backed read."""
+    """Cross real ingest, SQL, engine, authenticated MCP, and disk-backed read."""
+    # A unique relative path per run: this now writes real rows to the shared
+    # PostgreSQL the other gates and the live vault also use, so two runs (or
+    # a rerun after a partial failure) must never collide on `source_uri`.
+    relative_path = f"gate/e2e-full-chain-{uuid.uuid4().hex}/scope-routing.md"
     with tempfile.TemporaryDirectory(prefix="v3-e2e-retrieval-") as temporary:
         wiki_dir = Path(temporary) / "wiki"
-        page_path = _write_page(wiki_dir, "INDEXED_BODY_SENTINEL")
-        asyncio.run(_exercise_full_chain(wiki_dir, page_path))
+        page_path = _write_page(
+            wiki_dir, "INDEXED_BODY_SENTINEL", relative_path=relative_path
+        )
+        asyncio.run(_exercise_full_chain(wiki_dir, page_path, relative_path))
     return "FULL CHAIN VERIFIED"
 
 
@@ -795,21 +872,22 @@ async def _exercise_boundary(wiki_dir: Path) -> None:
     from scout.mcp_server import build_server  # noqa: PLC0415
     from scout.types import Scope  # noqa: PLC0415
 
-    store = _IngestConnection()
-    store.source_uri = "concepts/control.md"
-    store.allowed_depts = ("infra",)
-    store.chunks = [
-        _StoredChunk(
-            chunk_id=1,
-            source_uri=store.source_uri,
-            text="BOUNDARY_QUERY_SENTINEL is visible to infra.",
-            metadata={
-                "corpus": "wiki",
-                "title": "Control",
-                "type": "concept",
-            },
-        )
-    ]
+    control_source_uri = "concepts/control.md"
+    store = _IngestedFixture(
+        chunks=[
+            _StoredChunk(
+                chunk_id=1,
+                source_uri=control_source_uri,
+                text="BOUNDARY_QUERY_SENTINEL is visible to infra.",
+                metadata={
+                    "corpus": "wiki",
+                    "title": "Control",
+                    "type": "concept",
+                },
+            )
+        ],
+        allowed_depts=("infra",),
+    )
     query_connection = _RetrievalConnection(store)
     pool = _RetrievalPool(query_connection)
     backend = PgVectorRlsBackend(
@@ -837,7 +915,7 @@ async def _exercise_boundary(wiki_dir: Path) -> None:
         k=1,
     )
     require(
-        len(scoped) == 1 and scoped[0].file_path == store.source_uri,
+        len(scoped) == 1 and scoped[0].file_path == control_source_uri,
         "authenticated backend control could not see the seeded wiki row",
     )
     engine = ScoutDiyEngine.from_vault(

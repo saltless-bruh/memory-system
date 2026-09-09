@@ -153,6 +153,11 @@ async def test_document_insert_failure_rolls_back_last_good_rows(
             return None
 
     conn = TransactionalConnection()
+    observed: list[str] = []
+
+    def observe(stage: str, _details: object) -> None:
+        observed.append(stage)
+
     with pytest.raises(RuntimeError, match="insert failure"):
         await ingest_document(
             source,
@@ -160,8 +165,14 @@ async def test_document_insert_failure_rolls_back_last_good_rows(
             conn=conn,
             embedder=FakeEmbedder(),
             base_dir=tmp_path,
+            stage_observer=observe,
         )
     assert conn.state == {"title": "old", "chunks": ["old chunk"]}
+    assert observed == [
+        "chunk_complete",
+        "embed_request_sent",
+        "embed_response_received",
+    ]
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,22 @@ from scout.config import postgres_settings
 from scout.parsers import ParsedDocument, parse_file
 from scout.policy import PolicyValidationError, validate_document_acl
 
+# Optional instrumentation hook used by the live sync-job. The ingestion layer
+# reports facts it alone can observe, while the caller owns correlation and log
+# formatting. Keeping this synchronous makes observation unable to add network
+# or scheduling work between the measured stages.
+IngestStageObserver = Callable[[str, Mapping[str, object]], None]
+
+
+def _observe_ingest_stage(
+    observer: IngestStageObserver | None,
+    stage: str,
+    **details: object,
+) -> None:
+    """Report one bounded ingestion stage when an observer was supplied."""
+    if observer is not None:
+        observer(stage, details)
+
 
 def validate_allowed_depts(values: list[str]) -> list[str]:
     """Return a stable, unique document ACL list or fail before any I/O."""
@@ -297,6 +313,7 @@ async def ingest_document(
     dry_run: bool = False,
     parse_cache: ParseCache | None = None,
     document_transform: Callable[[ParsedDocument], ParsedDocument] | None = None,
+    stage_observer: IngestStageObserver | None = None,
 ) -> dict[str, Any]:
     """Parses, chunks, embeds, and ingests a single document into PostgreSQL."""
     allowed_depts = validate_allowed_depts(allowed_depts)
@@ -312,6 +329,12 @@ async def ingest_document(
     if document_transform is not None:
         parsed_doc = document_transform(parsed_doc)
     chunks = chunker.chunk_document(parsed_doc)
+    _observe_ingest_stage(
+        stage_observer,
+        "chunk_complete",
+        source_uri=parsed_doc.source_uri,
+        chunk_count=len(chunks),
+    )
 
     if dry_run:
         return {
@@ -345,7 +368,19 @@ async def ingest_document(
 
     # 2. Batch generate dense embeddings
     texts_to_embed = [c.contextual_text for c in chunks]
+    _observe_ingest_stage(
+        stage_observer,
+        "embed_request_sent",
+        source_uri=parsed_doc.source_uri,
+        chunk_count=len(chunks),
+    )
     embeddings = embedder.embed_texts(texts_to_embed)
+    _observe_ingest_stage(
+        stage_observer,
+        "embed_response_received",
+        source_uri=parsed_doc.source_uri,
+        chunk_count=len(embeddings),
+    )
     if len(embeddings) != len(chunks):
         raise EmbeddingError("embedding batch cardinality mismatch during ingestion")
     for c, emb in zip(chunks, embeddings, strict=True):
@@ -417,6 +452,25 @@ async def ingest_document(
                     emb_str,
                     meta_json,
                 )
+
+        # Leaving the transaction context is PostgreSQL's commit acknowledgement.
+        # Under READ COMMITTED the newly committed rows are visible to subsequent
+        # statements at this point; the live acceptance probe separately records
+        # when the served wiki_search surface first returns the page.
+        _observe_ingest_stage(
+            stage_observer,
+            "postgres_commit",
+            source_uri=parsed_doc.source_uri,
+            chunk_count=len(chunks),
+            doc_id=str(doc_id),
+        )
+        _observe_ingest_stage(
+            stage_observer,
+            "row_visible",
+            source_uri=parsed_doc.source_uri,
+            chunk_count=len(chunks),
+            doc_id=str(doc_id),
+        )
 
         return {
             "source_uri": parsed_doc.source_uri,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import urllib.error
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -25,9 +26,11 @@ from scout.sync_job import (
     WikiIndexer,
     _aggregate_readiness,
     _async_main,
+    _emit_wiki_sync_stage,
     _is_transient,
     _PermanentSyncFailure,
     _supervise,
+    _wiki_snapshot_commit,
     sync_once,
     watch,
 )
@@ -998,6 +1001,93 @@ async def test_wiki_indexer_reports_what_it_skipped(
 
     outcome = await WikiIndexer(wiki_dir=tmp_path).index()
     assert outcome.status == "1 indexed, 2 unchanged, 0 deleted"
+
+
+@pytest.mark.asyncio
+async def test_wiki_indexer_logs_correlated_structured_stage_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One published commit must be traceable through every hidden stage."""
+    commit = "a" * 40
+    snapshot = tmp_path / "snapshots" / commit
+    (snapshot / "wiki").mkdir(parents=True)
+    current = tmp_path / "current"
+    current.symlink_to(snapshot, target_is_directory=True)
+
+    async def fake_ingest_wiki(
+        wiki_dir: Path, **kwargs: object
+    ) -> list[dict[str, object]]:
+        observer = kwargs["stage_observer"]
+        assert callable(observer)
+        for stage in (
+            "chunk_complete",
+            "embed_request_sent",
+            "embed_response_received",
+            "postgres_commit",
+            "row_visible",
+        ):
+            observer(  # type: ignore[operator]
+                stage,
+                {"source_uri": "probe.md", "chunk_count": 1},
+            )
+        return [{"source_uri": "probe.md", "status": "ingested_ok"}]
+
+    async def fake_reconcile(wiki_dir: Path, **kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", fake_ingest_wiki)
+    monkeypatch.setattr("scout.sync_job.reconcile_wiki_deletions", fake_reconcile)
+
+    outcome = await WikiIndexer(wiki_dir=current / "wiki").index()
+
+    assert outcome.ok
+    records = [
+        json.loads(line.partition("[sync-job] ")[2])
+        for line in capsys.readouterr().out.splitlines()
+        if "[sync-job] " in line
+    ]
+    assert [record["stage"] for record in records] == [
+        "watcher_wake",
+        "chunk_complete",
+        "embed_request_sent",
+        "embed_response_received",
+        "postgres_commit",
+        "row_visible",
+        "cycle_complete",
+    ]
+    assert all(record["event"] == "wiki_sync_stage" for record in records)
+    assert all(record["correlation_id"] == commit for record in records)
+    assert all(float(record["elapsed_ms"]) >= 0 for record in records)
+    assert all(str(record["observed_at"]).endswith("+00:00") for record in records)
+
+
+def test_wiki_stage_correlation_rejects_a_non_snapshot_path(tmp_path: Path) -> None:
+    """A directory name must not be mislabeled as a commit correlation id."""
+    wiki = tmp_path / "ordinary" / "wiki"
+    wiki.mkdir(parents=True)
+    assert _wiki_snapshot_commit(wiki) == "unversioned"
+
+
+def test_structured_stage_identity_cannot_be_overridden(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Observer details are data and cannot replace the trusted envelope."""
+    _emit_wiki_sync_stage(
+        "b" * 40,
+        "postgres_commit",
+        cycle_started=0.0,
+        details={
+            "correlation_id": "forged",
+            "event": "forged",
+            "stage": "forged",
+        },
+    )
+    record = json.loads(capsys.readouterr().out.partition("[sync-job] ")[2])
+    assert record["correlation_id"] == "b" * 40
+    assert record["event"] == "wiki_sync_stage"
+    assert record["stage"] == "postgres_commit"
 
 
 @pytest.mark.asyncio

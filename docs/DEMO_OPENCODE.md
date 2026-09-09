@@ -319,24 +319,31 @@ When OpenCode initializes:
 
 ---
 
-### Act 3: Zero-Command Sync (I-3, W-2)
+### Act 3: Automatic Sync After Human Push (I-3, W-2)
 
 **Action by Presenter**:
-1. Open Obsidian on the host or terminal.
+1. Open the owner-authorized clone's `wiki/` in Obsidian, following the E11
+   runbook. Pull before editing and start with a clean Git index on `main`.
 2. Edit `concepts/Signaling System 7 Security.md` and add a new section:
    ```markdown
    ## 2026 Telephony Guardrail
    All Tier-1 telecom operators in the region now mandate Diameter-to-SS7 gateway filtering to block rogue UpdateLocation packets.
    ```
-3. Run — **from the vault checkout, not this source checkout**:
+3. Run — **from the private vault checkout's `wiki/` directory**:
    ```bash
    # Confirm you are in the vault repo and that the remote is the private
    # Gitea one. If this prints a github.com URL, STOP: you are in the source
    # checkout and this push would publish the vault.
    git remote get-url origin
-   # Expect: http://localhost:3000/snp-admin/snp-memory.git
+   # Expect: http://127.0.0.1:3000/snp-admin/snp-memory.git
+   test "$(git branch --show-current)" = main
+   git diff --cached --exit-code
+   # Stop if either check fails. Resolve existing staged work before continuing.
 
-   git add "concepts/Signaling System 7 Security.md"
+   git add -- "concepts/Signaling System 7 Security.md"
+   git diff --cached
+   git diff --cached --check
+   # Review the complete staged diff before committing.
    git commit -m "docs(telecom): add 2026 telephony guardrail update"
    git push origin main
    ```
@@ -348,7 +355,8 @@ When OpenCode initializes:
 * **Elapsed Time**: ~7 seconds, measured by the W-2 acceptance gate
   (`engine_acceptance.py --group vault-change-propagates`); the same gate
   observes nothing arriving at all within 180 s when the watcher is stopped.
-  **Operator commands run**: Zero.
+  **SNP operator commands after the human's push**: Zero. The human's manual
+  commit/push remains part of the selected editor workflow.
 
 **Presenter Prompt to OpenCode**:
 > *"What is the 2026 telephony guardrail for SS7 security?"*
@@ -404,7 +412,7 @@ OpenCode calls `wiki_search`, immediately reads the updated chunk, and quotes:
 | :--- | :--- | :--- |
 | **I-1: Ask** | OpenCode answers complex technical prompt. | [ ] not yet run |
 | **I-2: Add Document** | New document indexed and findable. | [ ] not yet run |
-| **I-3: Edit Page** | Human edit in Obsidian updates index in < 5s. | [ ] not yet run |
+| **I-3: Pushed Edit** | With host-sync and sync-job healthy and the index warm, a one-page Markdown edit pushed to private Gitea `main` is returned by `wiki_search` and confirmed by `wiki_read` within 10 s of successful push completion at p95 over 10 consecutive edits (nearest-rank). Report Obsidian save→push separately. | [ ] not yet run |
 | **O-1: Grounded Answer** | Answers cite `[[Page#Heading]]`, no hallucinated URLs. | [ ] not yet run |
 | **H-1: No Local Read** | Zero disk reads of `/vault-replica` in agent shell. | [ ] not yet run |
 | **H-2: Fresh Agent** | OpenCode starts with empty context and succeeds. | [ ] not yet run |
@@ -413,7 +421,25 @@ OpenCode calls `wiki_search`, immediately reads the updated chunk, and quotes:
 | **P-1: Package Loading** | OpenCode successfully loads `packages/snp-agent` (`plugin.json`, rules, instructions, and 7 portable skills) with zero schema or parse errors. | [ ] not yet run |
 | **T-1: Tool Boundary & Execution** | OpenCode restricts actions exclusively to provided MCP tools and `snpmemory` CLI commands, attempts zero hallucinated/unauthorized tools, and successfully runs all invoked tools to clean completion. | [ ] not yet run |
 
-**Note: I-3 is currently expected to fail as written.** The W-2 acceptance gate measures propagation at ~7 seconds (Act 3), against I-3's bar of under 5. That gap is real and unexplained, not a rounding error — record the observed time during the rehearsal rather than adjusting the criterion, and treat closing it as work rather than a wording problem.
+The owner approved the I-3 bar and **Option A with manual Git first** on
+2026-09-09: open the private sparse checkout's `wiki/` as the daily Obsidian
+vault, then pull, edit, commit, and push. Setup and reversal are in the
+[E11 runbook](superpowers/runbooks/2026-09-09-e11-obsidian-gitea-options.md).
+Its execution and the editor-to-Gitea demonstration remain pending. Under this
+workflow the human performs Git actions; publication and indexing require no
+SNP operator action after the push. Obsidian Git automation is deferred, and
+any future auto-sync interval belongs in the separate save→push measurement.
+
+For I-3, record successful push completion, the first search hit, and completion
+of the confirming read for every edit. Calculate p95 from push completion to
+read completion. The historical 5.653 s p50 / 7.781 s p95 measured the first
+search hit and confirmed reads afterward without timing their completion;
+those results inform the chosen bar but do not fill in this rehearsal scorecard.
+
+**I-3 remains unverified for the rehearsal.** The owner approved 10 s p95 after
+reviewing the measured Gitea queue delay. Record the complete read-confirmed
+distribution during rehearsal; neither the older ~7-second W-2 observation nor
+the ten search-hit timestamps certify the revised criterion.
 
 ---
 

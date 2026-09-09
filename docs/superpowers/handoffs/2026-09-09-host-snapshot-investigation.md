@@ -79,10 +79,12 @@ Nearest-rank summaries at N=10 are:
 The queue-free replay subtracts each sample's own push-to-fetch wait from its
 own end-to-end latency and then recalculates nearest-rank percentiles. It is a
 counterfactual from measured timestamps, not a claim that an unshipped fix was
-live-tested. It shows the expected shape if persistent queue pushes wake their
-consumers immediately and every downstream span stays the same.
+live-tested. This is an optimistic replay: subtracting the full pre-fetch span
+also removes webhook processing and request overhead that a queue fix would
+retain. It estimates the potential gain while holding downstream spans fixed;
+only a live rerun can establish the actual post-fix distribution.
 
-The current five-second wording fails at the **median**: 5.653 seconds against
+The original five-second wording fails at the **median**: 5.653 seconds against
 five seconds. With the queue wait removed, the same samples would be 2.503
 seconds p50 / 4.321 seconds p95, but that does not yet prove a five-second
 operating bar; it leaves only 0.679 seconds above this ten-sample p95.
@@ -169,8 +171,11 @@ human edit reaches the next answer without recovery work.
    is proven. Six seconds carries 1.679 seconds (38.9%) over the measured
    4.321-second queue-free p95.
 
-The I-3 criterion in `docs/DEMO_OPENCODE.md` remains unchanged pending the
-owner decision.
+The owner subsequently approved 10 seconds p95 on 2026-09-09. The I-3 criterion
+in `docs/DEMO_OPENCODE.md` now records that choice and keeps the rehearsal result
+unfilled. The historical timestamps end at the first search hit; the newly
+worded criterion must also time completion of the confirming read. See the
+[decision record](2026-09-08-codex-i3-latency-results.md#owner-decisions-recorded).
 
 ## Commands and exit status
 
@@ -181,7 +186,7 @@ python /tmp/snp-post-latency/parse_prior_gitea_timing.py
 ```
 
 It exited **0** and produced **20 push/fetch pairs**, including **10 one-page
-adds** with 3.403-second p50 / 3.742-second p95 from Gitea receive completion to
+adds** with 3.409-second p50 / 3.742-second p95 from Gitea receive completion to
 host fetch completion. The six-millisecond difference from the correlated
 3.736-second p95 above comes from using Gitea's receive completion rather than
 the client process's slightly later `git push` return.

@@ -1,12 +1,12 @@
 # I-3 latency distribution and Obsidian-hop decision
 
 **Measured:** 2026-09-09 02:07:18–02:09:32 UTC
-**Disposition:** pipeline measured; editor workflow and replacement criterion await
-owner approval
+**Disposition:** owner approved 10 s p95 and Option A with manual Git first on
+2026-09-09; vault setup and the E11 demonstration remain pending
 
 ## Outcome
 
-The warm push-to-query path is slower than the current five-second I-3 bar.
+The warm push-to-query path was slower than the original five-second I-3 bar.
 Samples: **10** consecutive single-page add/read/delete cycles. The latency from
 a successful `git push` return to the first `wiki_search` result had:
 
@@ -102,9 +102,10 @@ push-to-publication result is **N=0**, not an inferred duration.
 
 ## Obsidian-to-Git options
 
-The daily vault is not a Git checkout, so none of the choices below has been
-selected or demonstrated. This changes the owner's normal editing workflow and
-requires his decision.
+The owner selected **Option A with manual Git first** on 2026-09-09 through the
+interactive decision requests. The daily vault has not been changed and the
+chosen workflow has not been demonstrated. Options B, C, and the plugin variant
+remain documented alternatives; plugin automation is deferred.
 
 ### Option A — sparse checkout
 
@@ -153,9 +154,10 @@ plugin's primary documentation confirms that automatic commit-and-sync runs on
 a configurable interval and that commit-and-sync stages, commits, pulls, and
 pushes by default: [Obsidian Git feature documentation](https://github.com/Vinzent03/obsidian-git/blob/master/docs/Features.md).
 
-Its interval is measured in minutes. Any nonzero interval therefore becomes a
-separate lower bound on editor-to-answer latency and makes a sub-five-second
-end-to-end claim impossible by construction.
+Its interval is measured in minutes and adds a scheduling wait before the push.
+That wait varies with when the edit is saved; it is not a fixed lower bound on
+every edit. A sub-five-second editor-to-answer guarantee cannot be inferred
+from the measured push-to-query span.
 
 The executable setup, daily flow, safe reversal, and no-action consequences
 for every option are in
@@ -164,11 +166,16 @@ for every option are in
 ## Ledger identity
 
 The authoritative engine ledger is
-`.unlazy/v3-retrieval/gates/engine-2026-09-04.md`. It currently has **15 gate
-entries: 13 met, 1 open, and 1 abandoned**. The open gate and abandoned handoff
-are both E11: its acceptance box remains open and its `ABANDON` line records
-that the owner decision was deferred. Abandonment therefore does not mean E11
-closed.
+`.unlazy/v3-retrieval/gates/engine-2026-09-04.md`. Direct counting gives **14
+unique gates: 13 checked and E11 unchecked**, with **one abandonment record,
+also E11**. The earlier “15 gate entries” counted E11 twice by adding overlapping
+categories. The engine ledger's evidence is historical and was not rerun by this
+documentation change.
+
+E11's `ABANDON` line records the owner's 2026-09-07 deferral of the daily workflow
+choice. The 2026-09-09 answers below resolve that choice; execution and
+demonstration are still pending. Preserve the engine handoff until the chosen
+workflow is demonstrated. No gate count for this task implies E11 has closed.
 
 Earlier reports of “11 met, 0 abandoned” and “12 met, 0 abandoned” referred to
 the separate execution ledger `/tmp/snp-i3-latency/GATES.md`, but failed to name
@@ -176,25 +183,38 @@ it. This post-latency work has another temporary execution ledger at
 `/tmp/snp-post-latency/GATES.md`. Future counts must name the ledger; only the
 engine ledger speaks for E11's product state.
 
-## Proposed measurable replacement for I-3
+## Owner-approved I-3 criterion
 
-I-3 remains unchanged in `docs/DEMO_OPENCODE.md`. The following is a proposal,
-not an accepted criterion:
+The owner selected **“10s p95 now (Recommended)”** after reviewing the snapshot
+investigation. `docs/DEMO_OPENCODE.md` now uses the following criterion:
 
 > **I-3: Pushed edit propagates.** With host-sync and sync-job healthy and the
 > index warm, a commit changing one Markdown page on the private vault repo's
 > `main` is returned by `wiki_search` and confirmed by `wiki_read` within
-> **10 seconds of a successful push at p95 over 10 consecutive edits**.
+> **10 seconds of successful push completion at p95 over 10 consecutive edits
+> (nearest-rank)**. Report Obsidian save→push separately.
 
 Ten seconds gives about 29% headroom over the measured 7.781-second p95 while
-remaining tight enough to expose a regression. The proposed scope explicitly
-excludes Obsidian-to-push. If Option D is selected, its configured auto-sync
+remaining tight enough to expose a regression. The approved scope explicitly
+excludes Obsidian-to-push. If the plugin is selected later, its auto-sync
 interval must be a second, separately reported editor-to-push measure; it must
 not be hidden inside the ten-second pipeline budget.
 
-## OWNER DECISION REQUIRED
+The existing samples time push→first search hit; reads were confirmed afterward
+without recording their completion time. They therefore support choosing the
+bar, but do not prove the newly worded read-confirmation deadline. The rehearsal
+must time the final read completion and retain its unfilled result until then.
 
-The owner must choose Option A, B, C, or D; decide whether Obsidian-to-push is
-inside or outside the product claim; and approve, reject, or alter the proposed
-ten-second p95 bar. No option is selected here, and the shipped I-3 wording has
-not been changed.
+## Owner decisions recorded
+
+The interactive requests returned these exact choices on 2026-09-09:
+
+- `i3_criterion`: “10s p95 now (Recommended)”.
+- `e11_workflow`: “A: Daily clone (Recommended)”.
+- `e11_a_publishing`: “Manual Git first (Recommended)”.
+
+The owner subsequently authorized implementing the plan. This records a daily
+sparse checkout and manual pull/commit/push, with plugin automation deferred.
+The request explicitly excluded executing an E11 option against the vault in
+this task. The runbook remains for the owner to execute; selection alone is not
+the required demonstration.

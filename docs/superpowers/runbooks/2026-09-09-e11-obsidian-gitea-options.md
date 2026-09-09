@@ -1,9 +1,30 @@
 # E11 runbook — connect Obsidian to private Gitea
 
-**Status:** prepared for owner decision; no option has been selected or run
+**Status:** owner selected Option A with manual Git first on 2026-09-09;
+setup and demonstration remain pending
 
 **Primary path:** Option A, a sparse checkout whose `wiki/` directory Obsidian
 opens as the vault
+
+## Owner decision and access boundary
+
+The owner chose **“A: Daily clone (Recommended)”** and then **“Manual Git first
+(Recommended)”** through the interactive requests. These commands are for the
+owner, who is authorized for all departments in the private repository.
+
+A sparse checkout controls which paths appear locally; it is not an access
+control boundary. A clone of this shared repository grants access to its Git
+contents and history regardless of the department scope enforced by Scout's
+retrieval RLS. Do not use this runbook to onboard a department-limited colleague.
+The repository distribution boundary must be decided before a second person
+receives a clone. This owner setup does not choose a per-department repository
+design or implement a lock service.
+
+Manual staging and commits are the initial publication boundary: a saved draft
+is not automatically published. Plugin automation remains deferred; enabling it
+later also requires accepting that unfinished edits may be staged and exposed
+to readers. Concurrent human/agent editing coordination remains a separate
+unimplemented concern.
 
 ## What this changes
 
@@ -25,6 +46,11 @@ The setup below does **not** move, overwrite, or delete the current vault. It
 creates a second directory, checks out only `wiki/`, and lets the owner switch
 back simply by reopening the old folder. After the switch, edits in the two
 folders are independent; do not keep editing both.
+
+The new checkout starts from Gitea's canonical pages. It does not copy local-only
+notes, attachments, or unpublished changes from the old folder. Before switching
+daily work, compare the two vaults in your editor and preserve any local-only
+material deliberately; the old folder remains available throughout.
 
 Git's current [`clone --sparse`](https://git-scm.com/docs/git-clone#Documentation/git-clone.txt---sparse)
 starts a sparse checkout, and
@@ -68,12 +94,24 @@ machine's credential helper; do not put a token in the remote URL. The expected
 sparse-checkout output is exactly `wiki`, the remote must be the private local
 Gitea URL above, and status must name `main` with no changes.
 
-If Gitea rejects or ignores the partial-clone filter, remove the incomplete
-destination and repeat the clone without `--filter=blob:none`, retaining
-`--sparse --branch main`. Sparse checkout controls which paths appear in the
-working tree; the blob filter only reduces transfer size and is not required
-for correctness. Do not remove a destination that contains work—this fallback
-applies only to the failed initial clone.
+If Git warns that the filter was ignored but the clone succeeds, continue with
+that clone. The blob filter only reduces transfer size. If cloning fails because
+the server rejects the filter, retain the incomplete directory under a different
+name and retry without the filter:
+
+```bash
+SNP_OBSIDIAN_CHECKOUT="$HOME/Documents/memo-project/snp-vault-obsidian"
+test ! -e "${SNP_OBSIDIAN_CHECKOUT}.failed" &&
+  if test -e "$SNP_OBSIDIAN_CHECKOUT"; then
+    mv "$SNP_OBSIDIAN_CHECKOUT" "${SNP_OBSIDIAN_CHECKOUT}.failed"
+  fi &&
+  git clone --sparse --branch main \
+    http://127.0.0.1:3000/snp-admin/snp-memory.git "$SNP_OBSIDIAN_CHECKOUT" &&
+  git -C "$SNP_OBSIDIAN_CHECKOUT" sparse-checkout set wiki
+```
+
+Use this fallback only for the failed initial clone, then repeat the remote and
+status checks above. It preserves any incomplete directory for inspection.
 
 Obsidian creates local application state beneath the vault it opens. Keep that
 state out of commits without changing the shared repository ignore rules:
@@ -109,14 +147,20 @@ allows:
 
 ```bash
 SNP_OBSIDIAN_CHECKOUT="$HOME/Documents/memo-project/snp-vault-obsidian"
-git -C "$SNP_OBSIDIAN_CHECKOUT" pull --ff-only origin main
+test "$(git -C "$SNP_OBSIDIAN_CHECKOUT" branch --show-current)" = main &&
+  git -C "$SNP_OBSIDIAN_CHECKOUT" diff --cached --exit-code &&
+  git -C "$SNP_OBSIDIAN_CHECKOUT" pull --ff-only origin main
+
+# Stop if a check above fails. Resolve pre-existing staged work first.
 
 # Edit and save the page in Obsidian, then inspect the exact change.
 git -C "$SNP_OBSIDIAN_CHECKOUT" status --short -- wiki
 git -C "$SNP_OBSIDIAN_CHECKOUT" diff -- wiki/path-to-page.md
 
 git -C "$SNP_OBSIDIAN_CHECKOUT" add -- wiki/path-to-page.md
+git -C "$SNP_OBSIDIAN_CHECKOUT" diff --cached
 git -C "$SNP_OBSIDIAN_CHECKOUT" diff --cached --check
+# Review ALL staged changes; commit only if they are the intended publication.
 git -C "$SNP_OBSIDIAN_CHECKOUT" commit -m "docs(wiki): describe the edit"
 git -C "$SNP_OBSIDIAN_CHECKOUT" push origin main
 ```
@@ -124,12 +168,17 @@ git -C "$SNP_OBSIDIAN_CHECKOUT" push origin main
 Replace `wiki/path-to-page.md` with the one page actually edited. Never use
 `git add -A` from the vault: explicit staging prevents Obsidian settings,
 attachments, or unrelated notes from joining the push.
+Git commits the whole index, so explicit `add` alone does not exclude work
+already staged by another tool. The initial index check and final staged-diff
+review are part of every publication.
 
 After `git push` returns, the existing Gitea webhook, host-sync, and sync-job
 path handles publication and indexing. No SNP command is required. The current
 measured pipeline is 5.653 seconds p50 / 7.781 seconds p95 from successful push
-return to a query-confirmed read; editor time and manual Git commands precede
-that clock.
+return to the first search hit; each hit was read and confirmed afterward.
+The owner-approved I-3 criterion is 10 seconds p95 over ten warm one-page edits,
+including read confirmation. Read completion must be timed in the rehearsal;
+the historical samples did not record it. Report editor save→push separately.
 
 ### 5. Reversal
 
@@ -155,8 +204,8 @@ above are clean:
 
 ```bash
 SNP_OBSIDIAN_CHECKOUT="$HOME/Documents/memo-project/snp-vault-obsidian"
-mv "$SNP_OBSIDIAN_CHECKOUT" \
-  "$HOME/Documents/memo-project/snp-vault-obsidian.retired"
+test ! -e "${SNP_OBSIDIAN_CHECKOUT}.retired" &&
+  mv "$SNP_OBSIDIAN_CHECKOUT" "${SNP_OBSIDIAN_CHECKOUT}.retired"
 ```
 
 Opening the original folder restores the old workflow immediately. Any edit
@@ -164,8 +213,9 @@ made there after reversal again has no automatic path to Gitea.
 
 ## Obsidian Git variant of Option A
 
-Install the Obsidian Git community plugin only after Option A's manual
-pull/commit/push flow succeeds once. Configure it against the checkout Obsidian
+This variant is deferred by the owner's **manual Git first** decision. If the
+owner elects to enable it later, first demonstrate manual pull/commit/push.
+Configure the plugin against the checkout Obsidian
 already opened; do not let it initialize a second repository inside `wiki/`.
 
 The plugin's primary
@@ -235,10 +285,12 @@ the first hop of W-2:
 
 - edits saved in the current Obsidian vault do not reach private Gitea;
 - therefore they do not trigger host-sync or sync-job;
-- E11 remains open and abandoned pending owner action;
+- E11 remains unverified: the workflow choice is recorded, but setup and
+  demonstration still require owner action;
 - the rehearsal must either use Option C and say so, or record W-2 as
   unverified;
 - I-3 continues to measure only a synthetic pushed edit, not an edit from the
   owner's daily Obsidian workflow.
 
-No option has been selected or executed by this runbook.
+Option A with manual Git first is selected. No vault setup, migration, plugin
+installation, or demonstration was executed by this documentation task.

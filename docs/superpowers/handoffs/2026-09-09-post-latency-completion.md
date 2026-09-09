@@ -50,14 +50,16 @@ The runner retains each command's output, exit status, and SHA-256 digest in
 | `rm -rf .agents .codex` | 0 | Required root cleanup; no tracked harness files |
 | `env -u LITELLM_BASE_URL -u LITELLM_MASTER_KEY uv run pytest -m 'not integration' --disable-socket -q` | 0 | **1382 passed / 29 deselected**; complete run without fail-fast |
 | `uv run ruff check .` | 0 | All checks passed |
-| `uv run ruff format --check .` | 0 | **378 files already formatted** |
+| `uv run ruff format --check .` | 0 | **379 files already formatted** |
 | `uv run mypy scout scripts` | 0 | No issues in **75 source files** |
 | `.venv/bin/python /tmp/snp-post-latency/verify_snapshot_report.py` | 0 | Ten samples agree with retained timestamps and calculated percentiles |
 | `.venv/bin/python /tmp/snp-post-latency/verify_e11_runbook.py` | 0 | Approved criterion, owner-only workflow, pending demonstration, and Bash syntax checked |
 | `.venv/bin/python /tmp/snp-post-latency/verify_ledger_reporting.py` | 0 | **14 unique gates**, **13 checked**, E11 unchecked with an abandonment record |
 
-The suite remains at the 1382-test baseline. The formatter's current count is
-378; the earlier 356-file report is not reused as a measurement of this run.
+The suite remains at the 1382-test baseline. The first verification reported
+378 formatted files before this completion handoff was added; the final check
+reports 379. Checking this handoff alone also reports one formatted file.
+The earlier 356-file report is not reused as a measurement of this run.
 
 ## Ledger identity and remaining handoff
 

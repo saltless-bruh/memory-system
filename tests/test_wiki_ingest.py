@@ -522,6 +522,50 @@ async def test_an_edited_page_is_re_embedded(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_edited_page_reports_the_ingestion_stage_boundaries(
+    tmp_path: Path,
+) -> None:
+    """The sync watcher cannot time work hidden inside ``ingest_document``.
+
+    The observer receives metadata only: a page identity, counts, and the
+    committed document id. Page text and embedding vectors must never enter the
+    operational log stream.
+    """
+    wiki = _one_page_vault(tmp_path, body="PRIVATE_BODY_MUST_NOT_BE_OBSERVED")
+    stale = _manifest_row(wiki, content_hash="0" * 64)
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    def observe(stage: str, details: dict[str, object]) -> None:
+        observed.append((stage, dict(details)))
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, _ManifestConnection([stale])),
+        embedder=_CountingEmbedder(),
+        env={},
+        stage_observer=observe,
+    )
+
+    assert [r["status"] for r in results] == ["ingested_ok"]
+    assert [stage for stage, _details in observed] == [
+        "chunk_complete",
+        "embed_request_sent",
+        "embed_response_received",
+        "postgres_commit",
+        "row_visible",
+    ]
+    assert all(
+        details["source_uri"] == "concepts/indexed-page.md"
+        for _stage, details in observed
+    )
+    assert all(int(details["chunk_count"]) > 0 for _stage, details in observed)
+    assert all(
+        "PRIVATE_BODY_MUST_NOT_BE_OBSERVED" not in repr(details)
+        for _stage, details in observed
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_page_embedded_by_another_model_is_re_embedded(
     tmp_path: Path,
 ) -> None:

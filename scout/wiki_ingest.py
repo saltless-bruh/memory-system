@@ -27,7 +27,12 @@ from scout.capabilities import (
     describe_fingerprint_difference,
 )
 from scout.chunker import ContextualChunker, Embedder, LiteLLMBatchEmbedder
-from scout.ingest import embedder_model_stamp, get_pg_connection, ingest_document
+from scout.ingest import (
+    IngestStageObserver,
+    embedder_model_stamp,
+    get_pg_connection,
+    ingest_document,
+)
 from scout.parsers import ParsedDocument, ParsedSection
 
 WIKI_ALLOWED_DEPARTMENTS = ("redteam", "blueteam", "ai_eng", "infra")
@@ -559,6 +564,7 @@ async def ingest_wiki(
     embedder: Embedder | None = None,
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
+    stage_observer: IngestStageObserver | None = None,
 ) -> list[dict[str, object]]:
     """Ingest every vault page through the existing idempotent document upsert.
 
@@ -651,6 +657,7 @@ async def ingest_wiki(
                     base_dir=root,
                     dry_run=dry_run,
                     document_transform=prepare,
+                    stage_observer=stage_observer,
                 )
             except WikiIngestError as exc:
                 # A single unwritable page must not abort the corpus. The

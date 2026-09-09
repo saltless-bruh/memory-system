@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -59,6 +61,9 @@ VAULT_SUBDIR = "wiki"
 #: How long a change may take to travel push -> webhook -> replica -> index.
 PROPAGATION_TIMEOUT_SECONDS = 180.0
 PROPAGATION_POLL_SECONDS = 5.0
+#: A latency sample must not be quantized by the five-second correctness-gate
+#: poll. Each request still performs the real query embedding and served search.
+LATENCY_POLL_SECONDS = 0.25
 #: How long the deployment gate waits for a restarted container's health to
 #: settle. Measured cold start is about 90 seconds; this is that with room.
 HEALTH_SETTLE_SECONDS = 180.0
@@ -327,6 +332,15 @@ def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProce
 _PUSH_ATTEMPTS = 4
 
 
+@dataclass(frozen=True)
+class _PublishedChange:
+    """The Git identity and wall-clock bounds of one successful push."""
+
+    commit: str
+    push_started_at: float
+    push_completed_at: float
+
+
 def _probe_page(sentinel: str) -> tuple[str, str]:
     """A self-contained page carrying the sentinel, and its vault-relative path."""
     body = (
@@ -343,7 +357,9 @@ def _probe_page(sentinel: str) -> tuple[str, str]:
     return f"{sentinel}.md", body
 
 
-def _publish(clone: Path, relative: str, body: str | None, message: str) -> None:
+def _publish(
+    clone: Path, relative: str, body: str | None, message: str
+) -> _PublishedChange:
     """Write or delete one vault page and push it to the vault branch."""
     target = clone / VAULT_SUBDIR / relative
     if body is None:
@@ -361,10 +377,16 @@ def _publish(clone: Path, relative: str, body: str | None, message: str) -> None
         message,
         cwd=clone,
     )
-    _push_with_rebase(clone)
+    push_started_at = time.time()
+    commit = _push_with_rebase(clone)
+    return _PublishedChange(
+        commit=commit,
+        push_started_at=push_started_at,
+        push_completed_at=time.time(),
+    )
 
 
-def _push_with_rebase(clone: Path) -> None:
+def _push_with_rebase(clone: Path) -> str:
     """Push to the vault branch, re-basing onto whatever else landed.
 
     This gate pushes to the same branch the vault lane merges into, so `main`
@@ -379,7 +401,7 @@ def _push_with_rebase(clone: Path) -> None:
     for attempt in range(1, _PUSH_ATTEMPTS + 1):
         pushed = _git("push", "origin", f"HEAD:{VAULT_BRANCH}", cwd=clone, check=False)
         if pushed.returncode == 0:
-            return
+            return _git("rev-parse", "HEAD", cwd=clone).stdout.strip()
         stderr = pushed.stderr.strip()
         require(
             "non-fast-forward" in stderr
@@ -397,20 +419,50 @@ def _push_with_rebase(clone: Path) -> None:
         _git("rebase", f"origin/{VAULT_BRANCH}", cwd=clone)
 
 
-async def _await_sentinel(scout: _Scout, sentinel: str, budget: float) -> str | None:
+async def _await_sentinel(
+    scout: _Scout,
+    sentinel: str,
+    budget: float,
+    *,
+    poll_seconds: float = PROPAGATION_POLL_SECONDS,
+) -> str | None:
     """Poll the served surface for the sentinel, running no other command.
 
     Running anything else here -- an ingest, a compose restart, a manual sync --
     would make the result say nothing about whether the loop closes on its own.
     """
     deadline = time.monotonic() + budget
-    while time.monotonic() < deadline:
+    while True:
         for hit in await scout.search(sentinel, k=5):
             path = str(hit.get("path", ""))
             if sentinel in path or sentinel in str(hit.get("snippet", "")):
                 return path
-        await asyncio.sleep(PROPAGATION_POLL_SECONDS)
-    return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(poll_seconds, remaining))
+
+
+async def _await_sentinel_absent(
+    scout: _Scout,
+    sentinel: str,
+    budget: float,
+    *,
+    poll_seconds: float,
+) -> float | None:
+    """Return seconds to two consecutive misses after a cleanup push."""
+    started = time.monotonic()
+    deadline = started + budget
+    misses = 0
+    while True:
+        found = await _await_sentinel(scout, sentinel, 0.0)
+        misses = misses + 1 if found is None else 0
+        if misses >= 2:
+            return time.monotonic() - started
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(poll_seconds, remaining))
 
 
 def _compose(*args: str) -> None:
@@ -510,6 +562,502 @@ async def _vault_change_propagates() -> str:
 def group_vault_change_propagates() -> str:
     """An edit pushed to the vault repository reaches the served index."""
     return asyncio.run(_vault_change_propagates())
+
+
+# --------------------------------------------------------------------------
+# I-3 latency distribution and correlated stage breakdown
+# --------------------------------------------------------------------------
+
+
+_I3_REQUIRED_STAGES = (
+    "watcher_wake",
+    "chunk_complete",
+    "embed_request_sent",
+    "embed_response_received",
+    "postgres_commit",
+    "row_visible",
+)
+_I3_REQUIRED_METRICS = (
+    "cleanup_push_complete_to_absent",
+    "git_push",
+    "push_start_to_snapshot",
+    "push_complete_to_snapshot",
+    "push_complete_to_query",
+    "snapshot_to_watcher",
+    "watcher_to_chunk",
+    "chunk_to_embed_request",
+    "embed_round_trip",
+    "embed_to_commit",
+    "commit_to_row_visible",
+    "row_visible_to_query_observed",
+)
+_I3_RESULTS_DOC = (
+    REPO_ROOT
+    / "docs"
+    / "superpowers"
+    / "handoffs"
+    / "2026-09-08-codex-i3-latency-results.md"
+)
+
+
+def _parse_log_timestamp(value: str) -> float:
+    """Parse Docker and structured-log RFC 3339 timestamps as epoch seconds."""
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    return dt.datetime.fromisoformat(normalized).timestamp()
+
+
+def _docker_logs(container: str, *, since: float) -> str:
+    """Read both streams from one container without interpreting log text."""
+    completed = subprocess.run(
+        [
+            "docker",
+            "logs",
+            "--timestamps",
+            "--since",
+            str(max(0, math.floor(since) - 1)),
+            container,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    require(
+        completed.returncode == 0,
+        f"docker logs {container} failed: {completed.stderr.strip()[:200]}",
+    )
+    return "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+
+
+def _host_publications(logs: str) -> dict[str, list[float]]:
+    """Index host-sync publication timestamps by the commit it published."""
+    marker = "Published wiki snapshot at commit "
+    found: dict[str, list[float]] = {}
+    for line in logs.splitlines():
+        if marker not in line:
+            continue
+        stamp = line.split(maxsplit=1)[0]
+        commit = line.rsplit(marker, 1)[1].strip().split()[0]
+        if len(commit) not in {40, 64}:
+            continue
+        found.setdefault(commit, []).append(_parse_log_timestamp(stamp))
+    return found
+
+
+def _sync_stage_records(logs: str) -> dict[str, list[dict[str, object]]]:
+    """Index only the bounded sync-job stage records by correlation id."""
+    marker = "[sync-job] {"
+    found: dict[str, list[dict[str, object]]] = {}
+    for line in logs.splitlines():
+        if marker not in line:
+            continue
+        raw = "{" + line.split(marker, 1)[1]
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("event") != "wiki_sync_stage":
+            continue
+        correlation_id = record.get("correlation_id")
+        observed_at = record.get("observed_at")
+        if not isinstance(correlation_id, str) or not isinstance(observed_at, str):
+            continue
+        record["epoch_seconds"] = _parse_log_timestamp(observed_at)
+        found.setdefault(correlation_id, []).append(record)
+    return found
+
+
+def _nearest_rank(values: list[float], quantile: float) -> float:
+    """Return a distribution percentile by the explicit nearest-rank method."""
+    require(bool(values), "cannot calculate a percentile of no observations")
+    rank = max(1, math.ceil(quantile * len(values)))
+    return sorted(values)[rank - 1]
+
+
+def _latency_summary(samples: list[dict[str, object]]) -> dict[str, object]:
+    """Summarize every complete duration without hiding missing samples."""
+    duration_names = sorted(
+        {
+            name
+            for sample in samples
+            for name in dict(sample.get("durations_seconds", {}))
+        }
+    )
+    metrics: dict[str, dict[str, float | int]] = {}
+    for name in duration_names:
+        values = [
+            float(dict(sample["durations_seconds"])[name])
+            for sample in samples
+            if name in dict(sample.get("durations_seconds", {}))
+        ]
+        metrics[name] = {
+            "n": len(values),
+            "min": round(min(values), 6),
+            "p50": round(_nearest_rank(values, 0.50), 6),
+            "p95": round(_nearest_rank(values, 0.95), 6),
+            "max": round(max(values), 6),
+        }
+    return {"method": "nearest-rank", "metrics": metrics}
+
+
+async def _vault_change_latency() -> str:
+    """Measure fresh push-to-query latency and persist its stage distribution."""
+    raw_samples = os.environ.get("SNP_PROPAGATION_SAMPLES", "10")
+    try:
+        sample_count = int(raw_samples)
+    except ValueError as exc:
+        raise GateFailure(
+            f"SNP_PROPAGATION_SAMPLES is not an integer: {raw_samples}"
+        ) from exc
+    require(sample_count >= 10, f"latency distribution needs N>=10, got {sample_count}")
+
+    raw_poll = os.environ.get("SNP_PROPAGATION_POLL_SECONDS", str(LATENCY_POLL_SECONDS))
+    try:
+        poll_seconds = float(raw_poll)
+    except ValueError as exc:
+        raise GateFailure(
+            f"SNP_PROPAGATION_POLL_SECONDS is not numeric: {raw_poll}"
+        ) from exc
+    require(
+        0.05 <= poll_seconds <= 1.0,
+        f"latency poll must be 0.05..1.0s, got {poll_seconds}",
+    )
+
+    report_path = Path(
+        os.environ.get("SNP_I3_LATENCY_REPORT", "/tmp/snp-i3-latency/active.json")
+    )
+    scout = _Scout()
+    clone = Path(tempfile.mkdtemp(prefix="v3-vault-latency-"))
+    run_started_at = time.time()
+    samples: list[dict[str, object]] = []
+    live: dict[str, str] = {}
+    pending_absence: dict[str, str] = {}
+    try:
+        _git(
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            VAULT_BRANCH,
+            VAULT_REMOTE,
+            ".",
+            cwd=clone,
+        )
+        for index in range(sample_count):
+            sentinel = f"V3-PROP-LAT-{uuid.uuid4().hex}"
+            relative, body = _probe_page(sentinel)
+            require(
+                await _await_sentinel(scout, sentinel, 0.0) is None,
+                f"sample {index + 1}: {sentinel} existed before its push",
+            )
+            published = _publish(
+                clone,
+                relative,
+                body,
+                f"test(w2): latency probe {sentinel}",
+            )
+            live[sentinel] = relative
+            found = await _await_sentinel(
+                scout,
+                sentinel,
+                PROPAGATION_TIMEOUT_SECONDS,
+                poll_seconds=poll_seconds,
+            )
+            query_visible_at = time.time()
+            require(
+                found is not None,
+                f"sample {index + 1}: {sentinel} did not become queryable",
+            )
+            page = await scout.read(str(found))
+            require(
+                sentinel in json.dumps(page, ensure_ascii=False),
+                f"sample {index + 1}: search found {found}, but read omitted sentinel",
+            )
+
+            cleanup = _publish(
+                clone,
+                relative,
+                None,
+                f"test(w2): remove latency probe {sentinel}",
+            )
+            # The page is no longer live in Git once its deletion push returns,
+            # but it can remain queryable until the watcher handles that commit.
+            # Track those two states separately so an exception during the wait
+            # cannot make the finalizer try to create a second deletion commit.
+            live.pop(sentinel)
+            pending_absence[sentinel] = relative
+            cleanup_seconds = await _await_sentinel_absent(
+                scout,
+                sentinel,
+                PROPAGATION_TIMEOUT_SECONDS,
+                poll_seconds=poll_seconds,
+            )
+            require(
+                cleanup_seconds is not None,
+                f"sample {index + 1}: cleanup {cleanup.commit} stayed queryable",
+            )
+            pending_absence.pop(sentinel)
+            samples.append(
+                {
+                    "commit": published.commit,
+                    "cleanup_commit": cleanup.commit,
+                    "cleanup_seconds": round(cleanup_seconds, 6),
+                    "index": index + 1,
+                    "path": relative,
+                    "push_completed_at": published.push_completed_at,
+                    "push_started_at": published.push_started_at,
+                    "query_visible_at": query_visible_at,
+                    "sentinel": sentinel,
+                }
+            )
+    finally:
+        # A failed measurement must not leave its page in Git *or* in the
+        # served corpus. Cleanup failure is elevated above the measurement
+        # failure because a live probe contaminates the system agents query.
+        cleanup_failures: list[str] = []
+        for sentinel, relative in list(live.items()):
+            try:
+                _publish(
+                    clone,
+                    relative,
+                    None,
+                    f"test(w2): remove failed latency probe {sentinel}",
+                )
+                live.pop(sentinel)
+                pending_absence[sentinel] = relative
+            except Exception as exc:  # noqa: BLE001 - report every cleanup fault
+                cleanup_failures.append(
+                    f"{sentinel}: deletion push failed: {type(exc).__name__}: {exc}"
+                )
+
+        for sentinel in list(pending_absence):
+            try:
+                absent_after = await _await_sentinel_absent(
+                    scout,
+                    sentinel,
+                    PROPAGATION_TIMEOUT_SECONDS,
+                    poll_seconds=poll_seconds,
+                )
+                if absent_after is None:
+                    cleanup_failures.append(
+                        f"{sentinel}: deletion was pushed but remained queryable"
+                    )
+                else:
+                    pending_absence.pop(sentinel)
+            except Exception as exc:  # noqa: BLE001 - report every cleanup fault
+                cleanup_failures.append(
+                    f"{sentinel}: absence check failed: {type(exc).__name__}: {exc}"
+                )
+        shutil.rmtree(clone, ignore_errors=True)
+        require(
+            not cleanup_failures and not live and not pending_absence,
+            "latency probe cleanup incomplete: " + "; ".join(cleanup_failures),
+        )
+
+    host_by_commit = _host_publications(
+        _docker_logs("snp-memory-host-sync-1", since=run_started_at)
+    )
+    sync_by_commit = _sync_stage_records(
+        _docker_logs("snp-memory-sync-job-1", since=run_started_at)
+    )
+
+    for sample in samples:
+        commit = str(sample["commit"])
+        relative = str(sample["path"])
+        publications = host_by_commit.get(commit, [])
+        require(publications, f"{commit}: no host-sync publication record")
+        published_at = min(publications)
+        records = sync_by_commit.get(commit, [])
+        require(records, f"{commit}: no correlated sync-job stage records")
+
+        stage_times: dict[str, float] = {}
+        for stage in _I3_REQUIRED_STAGES:
+            matches = [
+                record
+                for record in records
+                if record.get("stage") == stage
+                and (stage == "watcher_wake" or record.get("source_uri") == relative)
+            ]
+            require(matches, f"{commit}: stage {stage!r} was not logged for {relative}")
+            stage_times[stage] = min(
+                float(record["epoch_seconds"]) for record in matches
+            )
+
+        ordered = [stage_times[stage] for stage in _I3_REQUIRED_STAGES]
+        require(
+            ordered == sorted(ordered),
+            f"{commit}: sync stages are out of order: {stage_times}",
+        )
+        query_visible_at = float(sample["query_visible_at"])
+        push_started_at = float(sample["push_started_at"])
+        push_completed_at = float(sample["push_completed_at"])
+        durations = {
+            "cleanup_push_complete_to_absent": float(sample["cleanup_seconds"]),
+            "git_push": push_completed_at - push_started_at,
+            "push_start_to_snapshot": published_at - push_started_at,
+            "push_complete_to_snapshot": published_at - push_completed_at,
+            "push_complete_to_query": query_visible_at - push_completed_at,
+            "snapshot_to_watcher": stage_times["watcher_wake"] - published_at,
+            "watcher_to_chunk": stage_times["chunk_complete"]
+            - stage_times["watcher_wake"],
+            "chunk_to_embed_request": stage_times["embed_request_sent"]
+            - stage_times["chunk_complete"],
+            "embed_round_trip": stage_times["embed_response_received"]
+            - stage_times["embed_request_sent"],
+            "embed_to_commit": stage_times["postgres_commit"]
+            - stage_times["embed_response_received"],
+            "commit_to_row_visible": stage_times["row_visible"]
+            - stage_times["postgres_commit"],
+            "row_visible_to_query_observed": query_visible_at
+            - stage_times["row_visible"],
+        }
+        require(
+            all(value >= -0.01 for value in durations.values()),
+            f"{commit}: clocks produced an invalid negative stage: {durations}",
+        )
+        sample["host_snapshot_published_at"] = published_at
+        sample["stage_epoch_seconds"] = stage_times
+        sample["durations_seconds"] = {
+            name: round(value, 6) for name, value in durations.items()
+        }
+
+    summary = _latency_summary(samples)
+    report = {
+        "measured_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+        "poll_seconds": poll_seconds,
+        "sample_count": len(samples),
+        "samples": samples,
+        "schema_version": 1,
+        "summary": summary,
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = report_path.with_suffix(f"{report_path.suffix}.tmp")
+    temporary.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    temporary.replace(report_path)
+
+    metrics = dict(summary["metrics"])
+    end_to_end = dict(metrics["push_complete_to_query"])
+    print(
+        f"  N={len(samples)} push-complete-to-query "
+        f"p50={float(end_to_end['p50']):.3f}s "
+        f"p95={float(end_to_end['p95']):.3f}s; "
+        f"report={report_path}"
+    )
+    return "VAULT CHANGE LATENCY MEASURED"
+
+
+def group_vault_change_latency() -> str:
+    """Ten or more live single-page pushes produce a latency distribution."""
+    return asyncio.run(_vault_change_latency())
+
+
+def group_i3_latency_report() -> str:
+    """The durable handoff agrees with the raw measurement and preserves I-3."""
+    report_path = Path(
+        os.environ.get("SNP_I3_LATENCY_REPORT", "/tmp/snp-i3-latency/active.json")
+    )
+    require(report_path.is_file(), f"latency report missing: {report_path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    require(isinstance(report, dict), "latency report is not an object")
+    sample_count = int(report.get("sample_count", 0))
+    require(sample_count >= 10, f"latency report has only {sample_count} samples")
+    samples = report.get("samples", [])
+    require(
+        isinstance(samples, list) and len(samples) == sample_count,
+        "latency report sample rows are incomplete",
+    )
+    summary = dict(report.get("summary", {}))
+    require(summary.get("method") == "nearest-rank", "unexpected percentile method")
+    metrics = dict(summary.get("metrics", {}))
+    for name in _I3_REQUIRED_METRICS:
+        metric = dict(metrics.get(name, {}))
+        require(
+            int(metric.get("n", 0)) == sample_count,
+            f"latency metric {name!r} is incomplete",
+        )
+        ordered = [float(metric[key]) for key in ("min", "p50", "p95", "max")]
+        require(
+            all(math.isfinite(value) and value >= 0 for value in ordered)
+            and ordered == sorted(ordered),
+            f"latency metric {name!r} has invalid bounds: {ordered}",
+        )
+    end_to_end = dict(metrics.get("push_complete_to_query", {}))
+    require(
+        all(
+            isinstance(sample, dict)
+            and isinstance(sample.get("cleanup_commit"), str)
+            and float(sample.get("cleanup_seconds", -1)) >= 0
+            for sample in samples
+        ),
+        "one or more samples lack confirmed cleanup evidence",
+    )
+
+    require(_I3_RESULTS_DOC.is_file(), f"written findings missing: {_I3_RESULTS_DOC}")
+    findings = _I3_RESULTS_DOC.read_text(encoding="utf-8")
+    required_text = (
+        f"Samples: **{sample_count}**",
+        f"p50: **{float(end_to_end['p50']):.3f} s**",
+        f"p95: **{float(end_to_end['p95']):.3f} s**",
+        "Option A — sparse checkout",
+        "Option B — manual sync script",
+        "Option C — separate demo checkout",
+        "Option D — sparse checkout plus Obsidian Git",
+        "OWNER DECISION REQUIRED",
+        "I-3 remains unchanged",
+        "Obsidian-to-push is not measured",
+    )
+    missing = [text for text in required_text if text not in findings]
+    require(not missing, f"written findings omit: {missing}")
+
+    demo = (REPO_ROOT / "docs" / "DEMO_OPENCODE.md").read_text(encoding="utf-8")
+    require(
+        "Human edit in Obsidian updates index in < 5s." in demo,
+        "the unapproved I-3 criterion was changed",
+    )
+    require(
+        "I-3 is currently expected to fail as written" in demo,
+        "the runbook no longer states the known I-3 failure",
+    )
+    print(f"  findings match N={sample_count} raw samples; I-3 remains unchanged")
+    return "I3 LATENCY REPORT VERIFIED"
+
+
+def group_i3_commit_scope() -> str:
+    """The final commit excludes private and unrelated working-tree paths."""
+    allowed = {
+        "CLAUDE.md",
+        "artifacts/v3/checks/engine_acceptance.py",
+        "docs/superpowers/handoffs/2026-09-08-codex-i3-latency-results.md",
+        "scout/ingest.py",
+        "scout/sync_job.py",
+        "scout/wiki_ingest.py",
+        "tests/test_engine_acceptance_publish.py",
+        "tests/test_ingest_v2.py",
+        "tests/test_sync_job.py",
+        "tests/test_wiki_ingest.py",
+    }
+    changed = {
+        line
+        for line in _git(
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "HEAD",
+            cwd=REPO_ROOT,
+        ).stdout.splitlines()
+        if line
+    }
+    require(bool(changed), "HEAD contains no paths to scope-check")
+    unexpected = sorted(changed - allowed)
+    require(not unexpected, f"I-3 commit includes undeclared paths: {unexpected}")
+    require(
+        "docs/DEMO_OPENCODE.md" not in changed,
+        "the owner-controlled I-3 criterion changed before approval",
+    )
+    print(f"  {len(changed)} committed path(s), all within the I-3 ownership set")
+    return "I3 COMMIT SCOPE VERIFIED"
 
 
 # --------------------------------------------------------------------------
@@ -978,6 +1526,9 @@ GROUPS: dict[str, Callable[[], str]] = {
     "ingest-integrity": group_ingest_integrity,
     "find-read-cite": group_find_read_cite,
     "vault-change-propagates": group_vault_change_propagates,
+    "vault-change-latency": group_vault_change_latency,
+    "i3-latency-report": group_i3_latency_report,
+    "i3-commit-scope": group_i3_commit_scope,
     "live-sql": group_live_sql,
     "deployment": group_deployment,
     "model-stamp": group_model_stamp,

@@ -21,10 +21,13 @@ core; only the concrete watchfiles/CLI wiring is untested (`# pragma`).
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import json
 import os
 import sys
+import time
 import urllib.error
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -36,6 +39,50 @@ from scout.wiki_ingest import ingest_wiki, reconcile_wiki_deletions
 
 if TYPE_CHECKING:
     from scout.chunker import LiteLLMBatchEmbedder
+
+
+SYNC_STAGE_EVENT = "wiki_sync_stage"
+
+
+def _wiki_snapshot_commit(wiki_dir: Path) -> str:
+    """Return the commit-addressed snapshot containing ``wiki_dir``.
+
+    Host-sync publishes ``current -> snapshots/<git-sha>/``. Operational
+    correlation may inspect that resolved path, but never the vault content.
+    Non-snapshot paths remain observable under an explicit fallback rather than
+    being mislabeled as a Git commit.
+    """
+    resolved = wiki_dir.resolve()
+    candidate = resolved.parent.name.lower()
+    if len(candidate) in {40, 64} and all(c in "0123456789abcdef" for c in candidate):
+        return candidate
+    return "unversioned"
+
+
+def _emit_wiki_sync_stage(
+    correlation_id: str,
+    stage: str,
+    *,
+    cycle_started: float,
+    details: Mapping[str, object] | None = None,
+) -> None:
+    """Emit one machine-readable, content-free wiki ingestion stage."""
+    record = dict(details or {})
+    # Fixed fields win over observer details so a future caller cannot silently
+    # corrupt the event identity or clock.
+    record.update(
+        {
+            "correlation_id": correlation_id,
+            "elapsed_ms": round((time.perf_counter() - cycle_started) * 1000, 3),
+            "event": SYNC_STAGE_EVENT,
+            "observed_at": dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds"),
+            "stage": stage,
+        }
+    )
+    print(
+        f"[sync-job] {json.dumps(record, ensure_ascii=True, sort_keys=True)}",
+        flush=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,8 +276,28 @@ class WikiIndexer:
 
     async def index(self) -> IndexOutcome:
         """Ingest every page, then purge rows whose file is gone."""
+        cycle_started = time.perf_counter()
+        correlation_id = _wiki_snapshot_commit(self.wiki_dir)
+        _emit_wiki_sync_stage(
+            correlation_id,
+            "watcher_wake",
+            cycle_started=cycle_started,
+        )
+
+        def observe(stage: str, details: Mapping[str, object]) -> None:
+            _emit_wiki_sync_stage(
+                correlation_id,
+                stage,
+                cycle_started=cycle_started,
+                details=details,
+            )
+
         try:
-            results = await ingest_wiki(self.wiki_dir, embedder=self.embedder)
+            results = await ingest_wiki(
+                self.wiki_dir,
+                embedder=self.embedder,
+                stage_observer=observe,
+            )
             deleted = await reconcile_wiki_deletions(self.wiki_dir)
         except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
             # A vault that is absent or unreadable is a configuration fault.
@@ -252,6 +319,16 @@ class WikiIndexer:
         # different amounts, and the log line is where an operator sees which
         # one happened.
         unchanged = sum(1 for r in results if r.get("status") == "unchanged")
+        _emit_wiki_sync_stage(
+            correlation_id,
+            "cycle_complete",
+            cycle_started=cycle_started,
+            details={
+                "deleted_count": len(deleted),
+                "indexed_count": indexed,
+                "unchanged_count": unchanged,
+            },
+        )
         return IndexOutcome(
             ok=True,
             status=(

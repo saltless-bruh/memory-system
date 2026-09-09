@@ -9,6 +9,7 @@ correct.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -79,7 +80,7 @@ def test_publish_survives_a_concurrent_push(
 
     _land_a_concurrent_commit(origin, tmp_path)
 
-    ea._publish(clone, "probe.md", "# probe\n", "test(w2): probe")
+    published = ea._publish(clone, "probe.md", "# probe\n", "test(w2): probe")
 
     listed = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", "main"],
@@ -91,6 +92,8 @@ def test_publish_survives_a_concurrent_push(
     # Both survive: the gate's probe, and the batch it must not have discarded.
     assert "wiki/probe.md" in listed
     assert "wiki/batch.md" in listed
+    assert published.commit == _head(origin)
+    assert published.push_started_at <= published.push_completed_at
 
 
 def test_publish_does_not_discard_the_other_lane(
@@ -112,3 +115,64 @@ def test_publish_does_not_discard_the_other_lane(
         check=True,
     ).stdout
     assert "vault: a batch from another lane" in subjects
+
+
+def _head(repository: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "main"],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_zero_budget_presence_check_still_queries_once() -> None:
+    """The preflight cannot pass merely because its deadline is already due."""
+
+    class Scout:
+        calls = 0
+
+        async def search(self, query: str, k: int = 5) -> list[dict[str, object]]:
+            self.calls += 1
+            return [{"path": f"{query}.md"}]
+
+    scout = Scout()
+    assert await ea._await_sentinel(scout, "V3-PROP-known", 0.0) == ("V3-PROP-known.md")
+    assert scout.calls == 1
+
+
+def test_latency_logs_are_correlated_without_using_page_content() -> None:
+    commit = "a" * 40
+    docker_stamp = "2026-09-08T12:00:00.125000000Z"
+    observed = "2026-09-08T12:00:00.250+00:00"
+    host_logs = f"{docker_stamp} Published wiki snapshot at commit {commit}\n"
+    record = {
+        "correlation_id": commit,
+        "event": "wiki_sync_stage",
+        "observed_at": observed,
+        "stage": "watcher_wake",
+    }
+    sync_logs = f"{docker_stamp} [sync-job] {json.dumps(record)}\n"
+
+    publications = ea._host_publications(host_logs)
+    stages = ea._sync_stage_records(sync_logs)
+
+    assert publications == {commit: [ea._parse_log_timestamp(docker_stamp)]}
+    assert stages[commit][0]["stage"] == "watcher_wake"
+    assert stages[commit][0]["epoch_seconds"] == ea._parse_log_timestamp(observed)
+    assert "snippet" not in stages[commit][0]
+
+
+def test_latency_summary_uses_nearest_rank_percentiles() -> None:
+    samples = [
+        {"durations_seconds": {"push_complete_to_query": float(value)}}
+        for value in range(1, 11)
+    ]
+
+    summary = ea._latency_summary(samples)
+    metric = summary["metrics"]["push_complete_to_query"]
+
+    assert summary["method"] == "nearest-rank"
+    assert metric == {"n": 10, "min": 1.0, "p50": 5.0, "p95": 10.0, "max": 10.0}

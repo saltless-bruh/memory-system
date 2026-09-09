@@ -71,6 +71,14 @@ publication; the current host log cannot separate those sub-stages. Embedding
 is not the first optimization target: its p95 is 0.974 seconds, while the
 combined host span is 3.900 seconds.
 
+A follow-up decomposition found that this label hid the real boundary. For the
+same ten edits, 3.736 seconds p95 elapsed before host-sync's first fetch reached
+Gitea, while fetch through atomic snapshot publication took only 0.256 seconds
+p95. Full archive plus extraction of all 433 files measured 0.209 seconds p95.
+The dominant delay is two polling persistent Gitea queues, not snapshot
+materialization; the evidence and recommendation are in
+[`2026-09-09-host-snapshot-investigation.md`](2026-09-09-host-snapshot-investigation.md).
+
 The watcher itself wakes within 0.100 seconds of publication. Reaching the
 changed page's chunk takes up to 0.691 seconds because the cycle still walks and
 hash-checks the warm 430-page indexed corpus before it reaches that page. The
@@ -148,6 +156,25 @@ pushes by default: [Obsidian Git feature documentation](https://github.com/Vinze
 Its interval is measured in minutes. Any nonzero interval therefore becomes a
 separate lower bound on editor-to-answer latency and makes a sub-five-second
 end-to-end claim impossible by construction.
+
+The executable setup, daily flow, safe reversal, and no-action consequences
+for every option are in
+[`2026-09-09-e11-obsidian-gitea-options.md`](../runbooks/2026-09-09-e11-obsidian-gitea-options.md).
+
+## Ledger identity
+
+The authoritative engine ledger is
+`.unlazy/v3-retrieval/gates/engine-2026-09-04.md`. It currently has **15 gate
+entries: 13 met, 1 open, and 1 abandoned**. The open gate and abandoned handoff
+are both E11: its acceptance box remains open and its `ABANDON` line records
+that the owner decision was deferred. Abandonment therefore does not mean E11
+closed.
+
+Earlier reports of “11 met, 0 abandoned” and “12 met, 0 abandoned” referred to
+the separate execution ledger `/tmp/snp-i3-latency/GATES.md`, but failed to name
+it. This post-latency work has another temporary execution ledger at
+`/tmp/snp-post-latency/GATES.md`. Future counts must name the ledger; only the
+engine ledger speaks for E11's product state.
 
 ## Proposed measurable replacement for I-3
 

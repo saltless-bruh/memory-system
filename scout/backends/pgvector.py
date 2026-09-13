@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import asyncpg
 
@@ -30,7 +30,88 @@ DEFAULT_CONTESTED_RANK_PENALTY = 30
 # shedding a genuinely dead embedding service quickly.
 DEFAULT_DENSE_TIMEOUT_SECONDS = 3.0
 
-_HYBRID_QUERY = """
+
+# The lexical arm is built in two tiers because it does a different job
+# depending on whether the dense arm is available, and measurement on
+# 2026-09-13 showed one form cannot serve both.
+#
+#   HYBRID (dense present) -- strict conjunction.
+#       The dense arm supplies recall; the lexical arm's value is precision on
+#       terms that must match exactly, such as `CVE-2026-7309`, a path, or a
+#       symbol. Relaxing it to a disjunction here cost recall@1 en 0.95 -> 0.85
+#       and vi 0.80 -> 0.60: topically adjacent pages with heavy lexical overlap
+#       displaced the correct page from rank 1 (`Concepts/Self-Hosted Mesh
+#       VPN.md` over `Entities/Headscale.md`). recall@3 stayed at 1.00, so the
+#       right pages were still found -- only the ordering was damaged. A per-arm
+#       RRF penalty was tried and rejected: adjacent RRF ranks differ by ~1/61
+#       vs ~1/62, so any comparable second signal reshuffles rank 1, and a
+#       constant large enough to prevent that simply silences the arm.
+#
+#   SPARSE-ONLY (dense unavailable) -- relaxed disjunction.
+#       With no dense arm there is nothing to supply recall, and a conjunction
+#       returns nothing at all: 35 of 40 benchmark queries matched zero chunks,
+#       leaving recall@1 0.10 overall and 0.00 for Vietnamese. The documented
+#       degradation path was therefore a placebo. Relaxing the conjunction here
+#       removed every empty result and raised recall@5 to 0.62 / en recall@3 to
+#       0.90, which is what a fallback has to deliver.
+#
+# Both tiers reuse PostgreSQL's own normalisation, stemming and stop-word
+# handling, so there is no hand-rolled tokenizer to drift and no injection
+# surface -- `plainto_tsquery` sanitises its input.
+
+
+def _strict_tsquery(config: str, param: str) -> str:
+    """Conjunctive query: every lexeme must be present. Precision-oriented."""
+    return f"plainto_tsquery('{config}', {param})"
+
+
+def _relaxed_tsquery(config: str, param: str) -> str:
+    """Disjunctive query: any lexeme may match, ranked by coverage.
+
+    `plainto_tsquery` only ever emits `&` between lexemes, so substituting `|`
+    cannot corrupt a phrase or negation operator, and an empty query stays an
+    empty tsquery that matches nothing rather than raising.
+    """
+    return f"replace(plainto_tsquery('{config}', {param})::text, '&', '|')::tsquery"
+
+
+_TsQueryBuilder = Callable[[str, str], str]
+
+
+def _match(build: _TsQueryBuilder, param: str) -> str:
+    """Predicate selecting chunks sharing lexemes with the query, either tier."""
+    return (
+        f"(c.tsv @@ {build('english', param)}"
+        f" OR c.tsv_simple @@ {build('simple', param)})"
+    )
+
+
+def _rank(build: _TsQueryBuilder, param: str) -> str:
+    """Lexical score summing the English and language-agnostic arms."""
+    return (
+        f"COALESCE(ts_rank(c.tsv, {build('english', param)}), 0)\n"
+        f"                      + COALESCE("
+        f"ts_rank(c.tsv_simple, {build('simple', param)}), 0)"
+    )
+
+
+def _strict_match(param: str) -> str:
+    return _match(_strict_tsquery, param)
+
+
+def _strict_rank(param: str) -> str:
+    return _rank(_strict_tsquery, param)
+
+
+def _sparse_match(param: str) -> str:
+    return _match(_relaxed_tsquery, param)
+
+
+def _sparse_rank(param: str) -> str:
+    return _rank(_relaxed_tsquery, param)
+
+
+_HYBRID_QUERY = f"""
 WITH vector_matches AS (
     SELECT c.chunk_id, c.doc_id, c.chunk_text, c.metadata, d.source_uri,
            ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS v_rank
@@ -44,18 +125,16 @@ WITH vector_matches AS (
 text_matches AS (
     SELECT c.chunk_id, c.doc_id, c.chunk_text, c.metadata, d.source_uri,
            ROW_NUMBER() OVER (
-               ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $4)), 0)
-                      + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $4)), 0)
+               ORDER BY {_strict_rank("$4")}
                       DESC,
                         c.chunk_id
            ) AS t_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.doc_id = c.doc_id
     WHERE ($9::text IS NULL OR c.metadata->>'corpus' = $9::text)
-      AND (c.tsv @@ plainto_tsquery('english', $4) OR c.tsv_simple @@ plainto_tsquery('simple', $4))
+      AND {_strict_match("$4")}
       AND ($2::text IS NULL OR d.source_uri = $2::text)
-    ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $4)), 0)
-           + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $4)), 0)
+    ORDER BY {_strict_rank("$4")}
            DESC, c.chunk_id
     LIMIT $3
 ),
@@ -99,22 +178,20 @@ ORDER BY rrf_score DESC, source_uri, chunk_id
 LIMIT $5;
 """
 
-_SPARSE_QUERY = """
+_SPARSE_QUERY = f"""
 WITH text_matches AS (
     SELECT c.chunk_id, c.doc_id, c.chunk_text, c.metadata, d.source_uri,
            ROW_NUMBER() OVER (
-               ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $3)), 0)
-                      + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $3)), 0)
+               ORDER BY {_sparse_rank("$3")}
                       DESC,
                         c.chunk_id
            ) AS t_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.doc_id = c.doc_id
     WHERE ($8::text IS NULL OR c.metadata->>'corpus' = $8::text)
-      AND (c.tsv @@ plainto_tsquery('english', $3) OR c.tsv_simple @@ plainto_tsquery('simple', $3))
+      AND {_sparse_match("$3")}
       AND ($1::text IS NULL OR d.source_uri = $1::text)
-    ORDER BY COALESCE(ts_rank(c.tsv, plainto_tsquery('english', $3)), 0)
-           + COALESCE(ts_rank(c.tsv_simple, plainto_tsquery('simple', $3)), 0)
+    ORDER BY {_sparse_rank("$3")}
            DESC, c.chunk_id
     LIMIT $2
 ),

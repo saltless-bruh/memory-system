@@ -93,6 +93,9 @@ exclude = [
     "artifacts/audits/",
     # The vault is canonical authored content, not formatter-owned source.
     "wiki/",
+    # Proposals are authored documents; ruff formats Python inside their fenced
+    # blocks, which would rewrite quoted design sketches the author owns.
+    "docs/proposal/",
 ]
 
 [tool.ruff.lint]

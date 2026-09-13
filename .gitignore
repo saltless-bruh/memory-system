@@ -27,6 +27,8 @@ config/litellm/.litellm_secrets.yaml
 spikes/**/out/
 spikes/**/*.tmp
 spikes/**/scratch/
+artifacts/architecture-research/
+
 
 # ── Python ───────────────────────────────────────────────────────────
 __pycache__/
@@ -87,3 +89,7 @@ derived/
 # carries no meaning for the index or for another reader.
 .obsidian/graph.json
 wiki/.obsidian/
+
+# Throwaway runtime probe scripts from rehearsal diagnostics. Kept out of the
+# tree and out of the linter's scope: they are scratch evidence, not source.
+.runtime-feature-audit/

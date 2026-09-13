@@ -19,10 +19,20 @@ LABEL org.opencontainers.image.source=https://github.com/saltless-bruh/memory-sy
 #
 # The trade is accepted knowingly: a pin that stops resolving fails LOUDLY,
 # where the unpinned range drifted silently for months.
+#
+# 2026-09-13: the predicted expiry happened. `curl=8.14.1-2+deb13u4` stopped
+# resolving ("Version ... was not found", apt exit 100) because Debian published
+# deb13u5 and dropped the superseded build from the pool. Refreshed to the
+# current security build of the same upstream version -- 8.14.1 throughout, so
+# this moves forward within a security point release rather than changing curl.
+# The strategy is deliberately unchanged: still an exact pin, still failing
+# loudly on the next expiry. snapshot.debian.org remains the durable fix and
+# remains an acceptance criterion for the clean release build, not a change
+# smuggled in during a rebuild.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git=1:2.47.3-0+deb13u1 \
-        curl=8.14.1-2+deb13u4 \
+        curl=8.14.1-2+deb13u5 \
     && rm -rf /var/lib/apt/lists/*
 RUN git config --global --add safe.directory /vault-replica/repository
 # Was `pip install fastapi uvicorn` — no versions at all, so every rebuild

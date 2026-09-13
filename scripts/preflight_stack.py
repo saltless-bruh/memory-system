@@ -292,8 +292,8 @@ SIBLING_IMAGES: tuple[str, ...] = ("snp-host-sync",)
 def _image_revision_finding(
     *,
     images: tuple[str, ...],
-    head_revision: str,
-    head_committed: str,
+    head_revision: str | None,
+    head_committed: str | None,
     project: str,
     compose_files: tuple[str, ...],
 ) -> Finding:
@@ -302,6 +302,16 @@ def _image_revision_finding(
     Consumers read one finding under this name, so every image is inspected but
     the worst answer wins: the stack is only current when all of them are.
     """
+    if not head_revision:
+        # Nothing to compare against; say so rather than inspect images pointlessly.
+        return Finding(
+            check="image-revision",
+            ok=False,
+            detail="could not inspect the git checkout",
+            remedy=_rebuild_remedy(project, images[0], compose_files=compose_files),
+            available=False,
+        )
+
     problems: list[tuple[str, Finding]] = []
     unavailable: list[str] = []
     for name in images:
@@ -331,8 +341,8 @@ def _image_revision_finding(
         if not finding.ok:
             problems.append((name, finding))
 
-    if not head_revision or unavailable:
-        missing = ", ".join(unavailable) if unavailable else "the git checkout"
+    if unavailable:
+        missing = ", ".join(unavailable)
         return Finding(
             check="image-revision",
             ok=False,
@@ -343,7 +353,9 @@ def _image_revision_finding(
     if problems:
         name, first = problems[0]
         detail = "; ".join(f"{n}: {f.detail}" for n, f in problems)
-        return Finding(check="image-revision", ok=False, detail=detail, remedy=first.remedy)
+        return Finding(
+            check="image-revision", ok=False, detail=detail, remedy=first.remedy
+        )
     return Finding(
         check="image-revision",
         ok=True,

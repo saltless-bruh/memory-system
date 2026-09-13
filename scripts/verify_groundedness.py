@@ -71,9 +71,6 @@ from typing import Any, Protocol
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-import dotenv  # noqa: E402
-
-dotenv.load_dotenv(REPO_ROOT / ".env")
 
 from scout import vault
 from scout.core import rag_fetch  # noqa: E402
@@ -803,6 +800,22 @@ def _probe_exit(judge_factory: JudgeFactory) -> int:
     return 0
 
 
+def _load_env_for_command_line() -> None:
+    """Read `.env` for standalone use, from `main()` and never on import.
+
+    At module scope this ran on `import`, putting ~41 variables into
+    `os.environ` -- GEMINI_API_KEY, OPENROUTER_API_KEY, GITEA_TOKEN,
+    LITELLM_MASTER_KEY and WEBHOOK_SECRET among them -- which every subprocess
+    then inherited. `scout/cli/config.py` documents the hazard; measured
+    2026-09-14 it also broke the suite, because `mint` imports this module
+    lazily and eleven `tests/test_host_sync.py` tests then saw a
+    half-configured credential pair while passing in isolation.
+    """
+    import dotenv
+
+    dotenv.load_dotenv(REPO_ROOT / ".env")
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -812,6 +825,7 @@ def main(
     changed_paths_getter: ChangedPathsGetter = _default_changed_paths,
 ) -> int:
     """Return 0 grounded, 1 unsupported claims found, 2 infrastructure failure."""
+    _load_env_for_command_line()
     parser = argparse.ArgumentParser(
         description="Judge wiki pages against the sources they cite (M7)."
     )

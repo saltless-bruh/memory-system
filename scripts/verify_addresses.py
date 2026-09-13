@@ -26,9 +26,6 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-import dotenv  # noqa: E402
-
-dotenv.load_dotenv(REPO_ROOT / ".env")
 
 from scout import vault  # noqa: E402
 from scout.core import normalize_path, post_filter  # noqa: E402
@@ -448,12 +445,29 @@ def _default_backend_factory() -> RagBackend | None:
     return PgVectorRlsBackend()
 
 
+def _load_env_for_command_line() -> None:
+    """Read `.env` for standalone use, from `main()` and never on import.
+
+    At module scope this ran on `import`, putting ~41 variables into
+    `os.environ` -- GEMINI_API_KEY, OPENROUTER_API_KEY, GITEA_TOKEN,
+    LITELLM_MASTER_KEY and WEBHOOK_SECRET among them -- which every subprocess
+    then inherited. `scout/cli/config.py` documents the hazard; measured
+    2026-09-14 it also broke the suite, because `mint` imports this module
+    lazily and eleven `tests/test_host_sync.py` tests then saw a
+    half-configured credential pair while passing in isolation.
+    """
+    import dotenv
+
+    dotenv.load_dotenv(REPO_ROOT / ".env")
+
+
 def main(
     *,
     backend_factory: BackendFactory = _no_backend_configured,
     pages_loader: PagesLoader = vault.load_pages,
 ) -> int:
     """Return 0 PASS, 1 semantic drift/failure, or 2 infrastructure failure."""
+    _load_env_for_command_line()
     try:
         backend = backend_factory()
     except Exception:  # noqa: BLE001 - configuration errors are redacted

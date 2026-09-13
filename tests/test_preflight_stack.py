@@ -245,3 +245,38 @@ def test_staging_revision_remedy_rebuilds_the_selected_unique_image() -> None:
         "SNP_SCOUT_IMAGE=snp-v021-scout:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         in (finding.remedy)
     )
+
+
+def test_every_built_image_is_inspected_not_just_scout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale sibling image must not hide behind a current `snp-scout`.
+
+    Measured 2026-09-13: `snp-host-sync` was rebuilt without SNP_GIT_REVISION and
+    carried `revision: unknown`, while `snpmemory status` still reported `ok`
+    because only `snp-scout` was inspected.
+    """
+    inspected: list[str] = []
+
+    def fake_run(command: list[str]) -> str:
+        if command[-1] == "/etc/resolv.conf":
+            return HEALTHY_RESOLV
+        if command[:3] == ["docker", "image", "inspect"]:
+            image = command[3]
+            inspected.append(image)
+            # scout is current; host-sync carries no revision label at all.
+            if image == "snp-host-sync":
+                return "2026-08-26T10:00:00+00:00|"
+            return "2026-08-26T10:00:00+00:00|" + "a" * 40
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return "a" * 40
+        return "2026-08-26T09:00:00+00:00"
+
+    monkeypatch.setattr("scripts.preflight_stack._run", fake_run)
+    findings = collect_findings()
+
+    assert "snp-host-sync" in inspected, "host-sync image was never inspected"
+    revision = [f for f in findings if f.check == "image-revision"]
+    assert len(revision) == 1, "consumers read a single image-revision finding"
+    assert not revision[0].ok, "an unlabelled sibling image must not report healthy"
+    assert "snp-host-sync" in revision[0].detail

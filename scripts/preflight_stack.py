@@ -283,6 +283,74 @@ def _run(command: list[str]) -> str | None:
     return completed.stdout.strip()
 
 
+# `sync-job` runs the same image as `scout`, so these two cover all three built
+# services. Checking only `snp-scout` let a sibling rebuilt without
+# SNP_GIT_REVISION sit at `revision: unknown` while the stack reported healthy.
+SIBLING_IMAGES: tuple[str, ...] = ("snp-host-sync",)
+
+
+def _image_revision_finding(
+    *,
+    images: tuple[str, ...],
+    head_revision: str,
+    head_committed: str,
+    project: str,
+    compose_files: tuple[str, ...],
+) -> Finding:
+    """Collapse per-image drift into the single `image-revision` finding.
+
+    Consumers read one finding under this name, so every image is inspected but
+    the worst answer wins: the stack is only current when all of them are.
+    """
+    problems: list[tuple[str, Finding]] = []
+    unavailable: list[str] = []
+    for name in images:
+        inspected = _run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                name,
+                "--format",
+                '{{.Created}}|{{index .Config.Labels "org.opencontainers.image.revision"}}',
+            ]
+        )
+        if inspected is None:
+            unavailable.append(name)
+            continue
+        created, _, revision = inspected.partition("|")
+        finding = classify_image_revision(
+            image_revision=revision.strip() or None,
+            head_revision=head_revision,
+            image_created=created.strip() or None,
+            head_committed=head_committed,
+            compose_project=project,
+            image=name,
+            compose_files=compose_files,
+        )
+        if not finding.ok:
+            problems.append((name, finding))
+
+    if not head_revision or unavailable:
+        missing = ", ".join(unavailable) if unavailable else "the git checkout"
+        return Finding(
+            check="image-revision",
+            ok=False,
+            detail=f"could not inspect {missing}",
+            remedy=_rebuild_remedy(project, images[0], compose_files=compose_files),
+            available=False,
+        )
+    if problems:
+        name, first = problems[0]
+        detail = "; ".join(f"{n}: {f.detail}" for n, f in problems)
+        return Finding(check="image-revision", ok=False, detail=detail, remedy=first.remedy)
+    return Finding(
+        check="image-revision",
+        ok=True,
+        detail=f"{', '.join(images)} built from {head_revision[:7]}",
+    )
+
+
 def collect_findings(
     service: str = "litellm",
     image: str = "snp-scout",
@@ -334,42 +402,17 @@ def collect_findings(
             )
         )
 
-    inspected = _run(
-        [
-            "docker",
-            "image",
-            "inspect",
-            image,
-            "--format",
-            '{{.Created}}|{{index .Config.Labels "org.opencontainers.image.revision"}}',
-        ]
-    )
     head_revision = _run(["git", "rev-parse", "HEAD"])
     head_committed = _run(["git", "log", "-1", "--format=%cI"])
-    if inspected is None or not head_revision:
-        missing = "the image" if inspected is None else "the git checkout"
-        findings.append(
-            Finding(
-                check="image-revision",
-                ok=False,
-                detail=f"could not inspect {missing}",
-                remedy=_rebuild_remedy(project, image, compose_files=compose_files),
-                available=False,
-            )
+    findings.append(
+        _image_revision_finding(
+            images=(image, *SIBLING_IMAGES),
+            head_revision=head_revision,
+            head_committed=head_committed,
+            project=project,
+            compose_files=compose_files,
         )
-    else:
-        created, _, revision = inspected.partition("|")
-        findings.append(
-            classify_image_revision(
-                image_revision=revision.strip() or None,
-                head_revision=head_revision,
-                image_created=created.strip() or None,
-                head_committed=head_committed,
-                compose_project=project,
-                image=image,
-                compose_files=compose_files,
-            )
-        )
+    )
 
     return findings
 

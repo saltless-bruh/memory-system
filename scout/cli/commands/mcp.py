@@ -1,5 +1,5 @@
 """`snpmemory mcp` — serve this repository's operations over stdio MCP, and
-`snpmemory mcp-config` — emit the client configuration that reaches it.
+`snpmemory mcp-config` — emit client configuration for this stack.
 
 The server carries the authority of whoever launches it. That is deliberate and
 documented in `scout/mcp/local_server.py`; it is also why this command offers no
@@ -126,10 +126,12 @@ def mcp_config(
     from scripts.export_mcp_config import (
         CLIENT_CONFIG_PATHS,
         SUPPORTED_CLIENTS,
+        ConfigTargetConflict,
         _load_existing,
         _write_exports,
         generate_config,
         merge_configs,
+        validate_config_target,
     )
 
     cfg: Config = config
@@ -141,10 +143,10 @@ def mcp_config(
             supported=list(SUPPORTED_CLIENTS),
         )
 
-    # The exported local-server entry pins this checkout, so a client launched
-    # from anywhere reaches the tree the config was generated from.
+    # The legacy clients' local-server entry pins this checkout. OpenCode uses
+    # only Scout's native remote connection and has no local authoring server.
     generated = generate_config(client, root=cfg.require_repo())
-    server_key = "servers" if "servers" in generated else "mcpServers"
+    server_key = {"opencode": "mcp", "vscode": "servers"}.get(client, "mcpServers")
     servers = sorted(generated[server_key])
     conventional = CLIENT_CONFIG_PATHS[client]
 
@@ -167,6 +169,15 @@ def mcp_config(
         )
 
     target = Path(out).expanduser()
+    try:
+        validate_config_target(client, target)
+    except ConfigTargetConflict as exc:
+        raise conflict_error(
+            str(exc),
+            hint="reconcile the JSONC configuration explicitly; nothing was written",
+            path=str(target),
+        ) from exc
+
     if target.exists() and not confirm:
         raise CliError(
             ErrorKind.CONFIRMATION_REQUIRED,
@@ -179,7 +190,9 @@ def mcp_config(
         )
 
     try:
-        merged = merge_configs(_load_existing(target), generated)
+        merged = merge_configs(
+            _load_existing(target, strict=client == "opencode"), generated
+        )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         # Only the exception class is reported: the file being complained about
         # is the one that may hold somebody's token.

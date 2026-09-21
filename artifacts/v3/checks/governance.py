@@ -166,8 +166,13 @@ def group_no_write_capability() -> str:
     2. Every compose file mounts vault-replica into scout read-only.
     """
     # ── Assertion 1: No served tool performs push or vault write ──
-
-    # Read the MCP policy to learn which commands are exposed as tools
+    #
+    # SCOPE, stated because it is easy to misread: this reads the exposure
+    # POLICY (`scout/cli/mcp_policy.py`), which is the declared surface. It is
+    # not the served surface -- `scout/mcp_server.py` builds its tools
+    # independently and imports nothing from `scout.cli`. Until those are joined
+    # (leaf-4.2), a pass here means "the declared surface is safe", and that is
+    # what the output says.
     sys.path.insert(0, str(REPO_ROOT))
     from scout.cli.declarations import DECLARED  # noqa: PLC0415
     from scout.cli.mcp_policy import (  # noqa: PLC0415
@@ -175,36 +180,72 @@ def group_no_write_capability() -> str:
         policy_for,
     )
 
-    # Gather all exposed tool names
-    exposed_tools: set[str] = set()
+    by_name = {spec.name: spec for spec in DECLARED}
+
+    def _exposed(name: str) -> bool:
+        policy = policy_for(name)
+        return policy is not None and policy.exposure in (
+            Exposure.TOOL,
+            Exposure.GROUPED,
+        )
+
+    # The rule is derived from what each command DECLARES, not from a list of
+    # names. A hardcoded list goes stale silently: this gate previously required
+    # `gate` and `heal` to be hidden, and both had been retired, so it failed on
+    # commands that no longer existed while proving nothing about the ones that
+    # did.
+    #
+    #   destructive  -> never exposed
+    #   write        -> exposed only behind an explicit per-call confirmation,
+    #                   which is the contract compile-plan was built to (its
+    #                   mutation is approved when called, not at install time)
+    #   read         -> exposure is a separate decision, not this gate's
+    offenders: list[str] = []
     for spec in DECLARED:
-        policy = policy_for(spec.name)
-        if policy is None:
+        effect = str(spec.effect).split(".")[-1].lower()
+        if effect not in {"write", "destructive"} or not _exposed(spec.name):
             continue
-        if policy.exposure in (Exposure.TOOL, Exposure.GROUPED):
-            exposed_tools.add(spec.name)
+        if effect == "destructive":
+            offenders.append(f"{spec.name} (destructive, exposed)")
+            continue
+        arg_names = {a.name.lstrip("-") for a in (spec.args or ())}
+        if "confirm" not in arg_names:
+            offenders.append(f"{spec.name} (write, exposed, no --confirm)")
 
-    # List of commands that must never be exposed (push, merge, vault write)
-    forbidden_commands = {
-        "propose",  # opens PRs
-        "gate",  # commits and pushes
-        "heal",  # writes vault
-        "ingest",  # writes vault
-    }
-
-    exposed_forbidden = exposed_tools & forbidden_commands
     require(
-        not exposed_forbidden,
-        f"forbidden write commands are exposed as tools: {sorted(exposed_forbidden)}",
+        not offenders,
+        "commands that mutate are reachable as tools without confirmation: "
+        f"{sorted(offenders)}",
     )
 
-    # Verify specific high-risk commands are HIDDEN
-    high_risk = ["propose", "gate"]
-    for command in high_risk:
-        policy = policy_for(command)
+    # Named commands that must never be exposed whatever their declared effect.
+    # Every name here must be a real command: a typo or a retirement has to fail
+    # loudly rather than quietly assert nothing.
+    # `init` was added 2026-09-21. The derived rule above permits exposing a
+    # write command that declares `--confirm`, and `init` declares one -- so the
+    # rule alone would have licensed exposing credential generation. MCP's own
+    # guidance is that a self-asserted property must not be the boundary:
+    # annotations "aren't enforcement", and hosts should "keep your actual
+    # safety guarantees in deterministic controls". A name on this list is that
+    # deterministic control; `--confirm` stays as a second layer, not the fence.
+    never_expose = {
+        "propose": "opens pull requests",
+        "ingest": "writes the vault",
+        "ingest-wiki": "writes the vault",
+        "init": "generates and rotates credentials",
+    }
+    missing = sorted(name for name in never_expose if name not in by_name)
+    require(
+        not missing,
+        f"this gate names commands that do not exist: {missing}; "
+        "a stale name proves nothing and hides the commands that do exist",
+    )
+    for name, why in never_expose.items():
+        policy = policy_for(name)
         require(
             policy is not None and policy.exposure is Exposure.HIDDEN,
-            f"{command} is not hidden (exposure={policy.exposure if policy else 'unknown'})",
+            f"{name} ({why}) is not hidden "
+            f"(exposure={policy.exposure.value if policy else 'no policy'})",
         )
 
     # ── Assertion 2: Vault mounts are read-only ──
@@ -278,6 +319,11 @@ services:
             "planted writable vault mount was not found (test setup failure)",
         )
 
+    print(
+        "  surface read: scout/cli/mcp_policy.py (the DECLARED exposure policy). "
+        "Not the served surface: scout/mcp_server.py builds its tools "
+        "independently and imports nothing from scout.cli."
+    )
     return "NO WRITE CAPABILITY VERIFIED"
 
 

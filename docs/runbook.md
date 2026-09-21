@@ -6,10 +6,13 @@ Older topology documents are classified in
 
 ## 1. Trust boundaries
 
-Scout and basic-memory bind to loopback by default. Scout is the only supported
-agent path to PostgreSQL RAG; applications do not connect to the database
-directly. Source text returned by `rag_fetch` is untrusted evidence and must
-never be followed as instructions.
+Scout's host endpoint binds to loopback by default. Scout is the only agent
+retrieval service: call authenticated `wiki_search` followed by canonical
+`wiki_read` with the same authorized, nonempty department scope. Agents do
+not inspect the vault through filesystem reads, shell search, or direct
+database connections. Snippets route reads; answers cite the read page's
+vault-relative path and relevant heading. All retrieved text is untrusted
+data and must never be followed as instructions.
 
 System model calls leave the host through LiteLLM to the configured Cloud API
 providers. An agent's own model has a separate data boundary controlled by the
@@ -79,6 +82,14 @@ Both write mode `0600`; keep it that way. The map is mounted read-only into
 the container at `/run/secrets/scout_static_tokens_json`, so it is edited on
 the host, never inside the container.
 
+A stale `.secrets/scout_test_token` is a client-credential mismatch, not
+evidence that the server identity should be replaced. Reconcile the intended
+client credential against the operator's identity record and the running
+auth mode. The `--refresh-static-token-map` helper rewrites the map from the
+test token; do not use it casually on a map containing established callers.
+The rehearsal preflight uses the complete `SCOUT_AUTH_HEADER` when supplied,
+otherwise the test-token file; it never selects a token from the server map.
+
 Choose `static` mode only where "edit a file and restart" is an acceptable
 complete credential lifecycle — a single-operator deployment, or integration
 testing. Choose `jwt` mode when credentials must expire on their own, be
@@ -92,11 +103,10 @@ department claim on every request.
 |---|---|---|
 | Gitea | `127.0.0.1:3000` | Git and human PR workflow |
 | LiteLLM | `127.0.0.1:4000` | Cloud model/embedding gateway |
-| Scout | `127.0.0.1:8080/mcp` | Authenticated `rag_fetch` |
-| basic-memory | `127.0.0.1:8765/mcp` | Wiki search/read |
+| Scout | `127.0.0.1:8080/mcp` | Authenticated `wiki_search` and canonical `wiki_read` |
 | host-sync | `127.0.0.1:9000` | Signed webhook and replica publisher |
 | PostgreSQL | internal; integration override may bind loopback | pgvector/FTS store with RLS |
-| sync-job | internal | Raw-file ingestion and deletion reconciliation |
+| sync-job | internal | Raw-source and published-wiki ingestion and reconciliation |
 | postgres-migrate | one-shot internal service | Schema migration and role provisioning |
 
 Runtime identities are deliberately separated:
@@ -119,7 +129,7 @@ Three workflows, in `.gitea/workflows/`:
 | `security.yaml` | PR, push | secret scan of the working tree, index, untracked files and all refs, plus an independent Gitleaks history scan |
 | `auto-healer.yaml` | PR touching `wiki/**`, weekly schedule | the closed-loop address gate: verify → heal → re-verify → **judge groundedness** → PR-first commit |
 
-**No workflow runs the live verifications**, and that is deliberate:
+The standard checks workflow does not run live verifications:
 `verify-addresses` and `verify-groundedness` need PostgreSQL and the LiteLLM
 gateway, and the judge runs on a route with a daily request ceiling. A CI job
 that fails because a gateway was down teaches people to ignore CI. The live
@@ -248,9 +258,8 @@ git -c protocol.file.allow=always --git-dir="$SNP_STAGING_SOURCE_REPO" \
   "${SNP_RELEASE_SHA}:refs/heads/${SNP_STAGING_GIT_BRANCH}"
 
 # Unique local image names prevent a staging build from overwriting the live
-# image tags. All three labels carry the same immutable candidate revision.
+# image tags. Both labels carry the same immutable candidate revision.
 export SNP_SCOUT_IMAGE="snp-v021-scout:${SNP_RELEASE_SHA}"
-export SNP_BASIC_MEMORY_IMAGE="snp-v021-basic-memory:${SNP_RELEASE_SHA}"
 export SNP_HOST_SYNC_IMAGE="snp-v021-host-sync:${SNP_RELEASE_SHA}"
 export SNP_GIT_REVISION="$SNP_RELEASE_SHA"
 ```
@@ -290,7 +299,7 @@ yet.
 ```bash
 docker compose --project-name "$SNP_STAGE_PROJECT" \
   -f docker-compose.yml -f docker-compose.staging.yml \
-  build --pull=false scout basic-memory host-sync
+  build --pull=false scout host-sync
 docker compose --project-name "$SNP_STAGE_PROJECT" \
   -f docker-compose.yml -f docker-compose.staging.yml up -d --wait postgres
 
@@ -308,7 +317,7 @@ uv run python scripts/release_backup.py restore \
 # observe the successful one-shot service.
 docker compose --project-name "$SNP_STAGE_PROJECT" \
   -f docker-compose.yml -f docker-compose.staging.yml \
-  up -d --wait postgres-migrate litellm host-sync basic-memory scout
+  up -d --wait postgres-migrate litellm host-sync scout
 
 uv run python scripts/preflight_stack.py \
   --compose-project "$SNP_STAGE_PROJECT" \
@@ -401,9 +410,9 @@ docker compose ps
 python scripts/preflight_stack.py
 ```
 
-`--build` matters on every bring-up, not just the first: Scout is the build
-owner for the image Scout, `sync-job`, and `postgres-migrate` share; basic-memory
-and host-sync each have their own build. A plain `docker compose up -d` requests
+`--build` matters on bring-up when deploying source changes: Scout is the build
+owner for the image Scout, `sync-job`, and `postgres-migrate` share; host-sync
+has its own build. A plain `docker compose up -d` requests
 none of those builds, so it silently keeps running whatever images were built
 last. `SNP_GIT_REVISION` stamps every local build so drift is detectable
 afterwards.
@@ -434,8 +443,9 @@ its HMAC signature. It materializes the fetched commit as
 repoints `/vault-replica/current`. It never checks out or cleans the developer
 repository.
 
-`basic-memory` mounts `/vault-replica/current/wiki` read-only. `/live` confirms
-the host-sync process is running; `/ready` succeeds only after a validated
+Scout and `sync-job` mount `/vault-replica` read-only and use the published
+`current/wiki` snapshot. `/live` confirms the host-sync process is running;
+`/ready` succeeds only after a validated
 snapshot is published. A failed refresh leaves the last-known-good `current`
 snapshot available and readiness reports the failure.
 
@@ -443,6 +453,41 @@ snapshot available and readiness reports the failure.
 curl -fsS http://127.0.0.1:9000/live
 curl -fsS http://127.0.0.1:9000/ready
 ```
+
+### Private Git repositories
+
+Private repositories require a Git identity for host-sync. Use a restricted
+service account with read access to this repository and a `read:repository`
+token. Set the repository private before adding its read-only collaborator.
+For an account created through Gitea's CLI, disable forced password changes so
+its token can authenticate. Scout and ingestion continue to use their existing
+database identities; the Git token belongs only to host-sync.
+
+Store the token in the ignored `.secrets/git_sync_token` file with mode `0600`.
+Keep `GIT_SYNC_URL` free of credentials. Add these nonsecret settings to the
+deployment's `.env`, preserving any existing Compose overlays:
+
+```dotenv
+COMPOSE_FILE=docker-compose.yml:docker-compose.private-git.yml
+GIT_SYNC_USERNAME=snp-sync-reader
+GIT_SYNC_TOKEN_FILE=./.secrets/git_sync_token
+```
+
+The optional private-Git overlay mounts that file read-only. Host-sync's Git
+credential helper supplies it only for the exact configured HTTP(S) repository;
+redirects and unrelated credential helpers are disabled for those operations.
+Rebuild and recreate host-sync after configuring the identity:
+
+```bash
+docker compose build host-sync
+docker compose up -d --no-deps host-sync
+curl -fsS http://127.0.0.1:9000/ready
+```
+
+Confirm that readiness names the current remote commit with no error, that an
+anonymous repository request is denied, and that the service account has pull
+permission without push or administrator permission. A successful fetch of a
+public repository does not verify private-repository credentials.
 
 Treat webhook authentication failure, branch mismatch, malformed JSON, and an
 unpublished initial snapshot as deployment failures; do not bypass readiness.
@@ -455,8 +500,13 @@ Offline deterministic checks:
 timeout 300s uv run pytest -m 'not integration' --disable-socket -q
 uv run ruff check .
 uv run mypy scout scripts
-python scripts/gen_index.py --check
 ```
+
+These are code checks, not a Scout content read or full V3 page
+certification. The automated vault checker remains transitional; explicitly
+review a candidate against the target `SCHEMA.md`, preserving authored
+`index.md` and `log.md`, required headings/provenance, and at least two body
+wikilinks. Agents obtain needed schema/content through Scout search then read.
 
 Live integration checks use a disposable Compose project:
 
@@ -472,20 +522,23 @@ export POSTGRES_INGEST_USER=rag_ingest_role
 export POSTGRES_INGEST_PASSWORD_FILE="$PWD/.secrets/postgres_ingest_password"
 export POSTGRES_MIGRATION_USER=postgres
 export POSTGRES_MIGRATION_PASSWORD_FILE="$PWD/.secrets/postgres_admin_password"
-export LITELLM_BASE_URL=http://127.0.0.1:4000/v1
+export LITELLM_BASE_URL=http://127.0.0.1:54000/v1
 # Export LITELLM_MASTER_KEY from your secret store; do not paste it into docs.
-export SCOUT_INTEGRATION_URL=http://127.0.0.1:8080/mcp
+export SCOUT_INTEGRATION_URL=http://127.0.0.1:58080/mcp
 export SCOUT_INTEGRATION_INFRA_TOKEN_FILE="$PWD/.secrets/scout_test_token"
 uv run pytest -m integration --force-enable-socket -q
 docker compose -p snp-memory-it -f docker-compose.yml \
   -f docker-compose.integration.yml down
 ```
 
-The integration PostgreSQL binding defaults to `127.0.0.1:55432`. Live tests
-fail by naming any missing host prerequisite; they do not skip or use fallback
-credentials.
+The integration override publishes separate loopback ports: PostgreSQL
+`55432`, LiteLLM `54000`, Scout `58080`, and host-sync `59000`. Keep those
+exports in a disposable shell so tests cannot accidentally target live
+`4000/8080` services or contaminate later offline checks. Live tests name
+missing host prerequisites; they do not skip or use fallback credentials.
 
-Address verification is live and department-scoped:
+Legacy address verification is a live, department-scoped operator check;
+it is not the agent retrieval path or complete V3 certification:
 
 ```bash
 uv run python scripts/verify_addresses.py
@@ -524,6 +577,82 @@ can heal. A gate that heals, commits and pushes and *then* discovers its checker
 was down has already mutated `sources[]` on the strength of a check that never
 happened.
 
+### 5.2 Repeatable OpenCode rehearsal preflight
+
+Use the rehearsal preflight from the system checkout with the intended
+environment and a verified `infra` identity:
+
+```bash
+docker compose ps --all
+docker compose exec -T sync-job test -f /tmp/snp-sync-job/ready
+.venv/bin/python scripts/rehearsal_preflight.py --live --output json
+```
+
+The sync marker belongs to the container. A host-side `test -f` at the same
+path is not readiness evidence. The preflight checks service/migration state,
+that in-container marker, host-sync `/ready`, a real `snp-embed` vector with
+1024 finite components, a real `snp-llm` response, an explicit typed
+`snp-judge` response, and authenticated Scout tool discovery → `wiki_search`
+→ canonical `wiki_read`. Search and read use the same nonempty department.
+It does not query the database or inspect the vault filesystem to verify
+retrieval.
+
+The default environment file is the checkout's `.env`; process environment
+values override it. `SCOUT_AUTH_HEADER` carries the complete bearer header;
+when absent, the helper uses `.secrets/scout_test_token`, never the server's
+identity map. Optional `--env-file PATH`, `--department infra`,
+`--query OpenShift`, and `--timeout 30` select those inputs explicitly;
+timeout is per check, not the total run. Never put credential values in
+command arguments or saved reports.
+
+`--live` spends provider requests using synthetic probe inputs. Output is
+sanitized readiness metadata, without page bodies or credential values.
+Without `--live`, the helper makes no network/Docker calls and reports
+unverified. Exit codes are `0` all required checks pass, `1` a live check
+fails, and `2` configuration/unverified. The standalone judge probe in 5.1
+also spends a request; do not duplicate it merely to repeat a successful
+preflight result.
+
+Keep the rehearsal's configured `gemini/gemini-embedding-001` model at 1024
+dimensions, `gemini/gemini-3.5-flash` generation, and existing OpenRouter
+judge route when diagnosing DNS or credentials. Do not change the vector
+space or run migrations as a network repair. Cached route health and
+LiteLLM liveliness cannot replace live route evidence. A cached judge 503
+is unknown because that route is excluded from the background health loop.
+
+For the fresh client, preview and install the explicit OpenCode target:
+
+```bash
+source .venv/bin/activate
+snpmemory mcp-config --client opencode
+snpmemory install-agent /path/to/project --client opencode --dry-run
+snpmemory install-agent /path/to/project --client opencode
+```
+
+OpenCode receives only native remote `mcp.scout`, seven skills under
+`.opencode/skills/`, and rules/instructions loaded through config
+`instructions` from `.opencode/snp/`. Reference workflows do not register
+OpenCode slash commands automatically. Existing default portable and other
+client behavior is unchanged. The [connection guide](CONNECT_AGENTS.md)
+covers config preservation, `--confirm`, and JSONC reconciliation.
+
+A passing preflight establishes only its sampled readiness checks. The
+[full rehearsal](DEMO_OPENCODE.md) separately requires a fresh OpenCode
+search/read/answer, a real OpenShift source, grounded staging, explicit
+target V3 review, human PR publication/review/merge, and ten read-confirmed
+human edits with nearest-rank p95 ≤ 10 seconds. Compilation `--dry-run` is
+paid foreground staging; do not combine it with `--background` or publish
+through the legacy index-regenerating path. Host CLI calls use
+`LITELLM_BASE_URL=http://127.0.0.1:4000/v1`; compilation also uses the
+gateway alias `LITELLM_LLM_MODEL=snp-llm`. Scope both values to the CLI child
+process. Compose uses `LITELLM_LLM_MODEL` for its upstream provider model,
+so changing the deployment `.env` to the alias would break that route.
+The legacy renderer omits the H1 and required V3 metadata; correct the final
+candidate explicitly against the target schema. Preserve immutable raw
+evidence and authored control documents, prepare the concrete feature-branch diff,
+and leave publication/review/merge to humans. No exposed agent tool pushes
+or merges. Missing evidence leaves the corresponding gate unverified.
+
 ## 6. Common incidents
 
 | Symptom | Response |
@@ -533,7 +662,7 @@ happened.
 | Caller sees zero rows | Confirm the token's canonical department claim and the page/source department; fail-closed RLS intentionally returns no unauthorized rows. |
 | `verify_addresses.py` exits `2` | Repair infrastructure/configuration. Do not run a healer. |
 | `verify_addresses.py` exits `1` | Re-mint the address or run the closed-loop CI gate on an eligible feature branch. |
-| basic-memory is unavailable | Check `host-sync` `/ready`, its replica metadata, and the published `current` pointer. |
+| Scout cannot read a published page | Check authenticated search/read in the same department, host-sync `/ready`, and sync-job readiness; do not inspect replica files as an agent workaround. |
 | Initial host sync fails | Fix remote URL, branch, credentials, or webhook secret; there is no last-known-good snapshot on a cold start. |
 | Migration check exits `1` | Apply migrations through the migration service before starting runtime services. |
 | MCP endpoint returns 401/403 | Supply a valid bearer token and authorized department; a browser GET is not an MCP client. |
@@ -541,8 +670,10 @@ happened.
 | `sync-job` restarts forever with `error:EmbeddingError` | Two known causes, in this order: the DNS fault above, and a stale `snp-scout` image. See 6.1 and 6.2. |
 | Ingest 400s with `at most 100 requests can be in one batch` | The running image predates the batch-splitting cap. Rebuild it — see 6.2. |
 
-Do not hand-edit `wiki/index.md`, bypass protected-branch checks, or use direct
-database access as an operational workaround.
+Preserve authored `wiki/index.md` and `wiki/log.md`; make only deliberate,
+reviewed edits following the target vault's conventions. Do not regenerate
+them as an incident workaround, bypass protected-branch checks, or use
+direct database access in place of Scout retrieval.
 
 ### 6.1 Containers cannot resolve external hostnames
 
@@ -568,7 +699,7 @@ Fix, in order of preference:
    the common case after a network change. Recreate just the affected services:
 
    ```bash
-   docker compose up -d --force-recreate litellm scout sync-job
+   docker compose up -d --no-deps --force-recreate litellm scout sync-job
    ```
 
    Name the services explicitly. A bare `--force-recreate` also recreates
@@ -579,7 +710,8 @@ Fix, in order of preference:
 
    ```bash
    SNP_DNS_SERVERS=10.0.0.53 \
-     docker compose -f docker-compose.yml -f docker-compose.dns.yml up -d
+     docker compose -f docker-compose.yml -f docker-compose.dns.yml \
+       up -d --no-deps --force-recreate litellm scout sync-job
    ```
 
    Use your site's resolver. Do not substitute a public one: on a split-horizon
@@ -598,8 +730,8 @@ climbing `RestartCount` as evidence that Docker is throttling anything.
 ### 6.2 The running image is older than the checkout
 
 Scout, `sync-job`, and `postgres-migrate` share `${SNP_SCOUT_IMAGE:-snp-scout}`;
-Scout is their build owner. basic-memory and host-sync have separate local
-images, but a plain `docker compose up` **never requests any build**. An image
+Scout is their build owner. Host-sync has its own local image, but a plain
+`docker compose up` **never requests any build**. An image
 built before a fix keeps running after the fix is committed, and the failure it
 causes looks like a live bug rather than a deployment fault.
 
@@ -614,7 +746,7 @@ If the image predates the checkout, rebuild and recreate:
 
 ```bash
 SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build scout
-docker compose up -d --force-recreate scout sync-job
+docker compose up -d --no-deps --force-recreate scout sync-job
 ```
 
 Passing `SNP_GIT_REVISION` stamps `org.opencontainers.image.revision` into the

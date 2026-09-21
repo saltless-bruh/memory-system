@@ -93,10 +93,22 @@ services:
       #
       # Gate on the routes the stack cannot run without, and only those.
       # `sync-job` waits on `condition: service_healthy` here, so every group
-      # named below can stop ingestion. snp-vlm is optional (nothing consumes it
-      # yet) and snp-judge runs on a free-tier key: gating on either would let a
-      # route nobody is calling take down the corpus. Both are still visible in
-      # `GET /health` — reported, not load-bearing.
+      # named below can stop ingestion. snp-judge runs on a free-tier key:
+      # gating on it would let a route nobody is calling take down the corpus.
+      #
+      # CORRECTED 2026-09-21: snp-vlm is NOT unconsumed — the figure describer
+      # calls it on every PDF, and this healthcheck's silence about it is how a
+      # cold start ingested a 7-figure paper with zero figures described and
+      # still reported success. It is deliberately still absent from REQUIRED,
+      # because a dead vision route must not stop the Markdown vault, which
+      # never calls it. The wait moved into the process that knows which routes
+      # its own corpus needs: `scout/sync_job.py::probe_gateway`, per watcher
+      # (raw waits for snp-embed + snp-vlm, the vault for snp-embed alone).
+      #
+      # That in-process wait is also what covers the restart case this
+      # `depends_on` cannot: compose applies `condition: service_healthy` on
+      # `up`, not when the daemon starts every container together.
+      # Both remain visible in `GET /health` — reported, not load-bearing.
       #
       # With `background_health_checks` on, `?model=` filters the cached result
       # rather than issuing a live request, so this probe costs no tokens at any
@@ -180,9 +192,26 @@ services:
       - "127.0.0.1:${SCOUT_PORT:-8080}:8080"
     volumes:
       # V3: wiki_read serves page bodies from the vault, never from the index.
-      # Chunk text is stripped at split (chunker.py:184), so a page cannot be
-      # reassembled byte-exact from its chunks. Read-only by construction --
-      # nothing writes back up the chain (INV-1).
+      #
+      # Read-only by construction, which is INV-1 as the V3 blueprint defines
+      # it: "truth flows one direction: git vault -> sync -> index. No write
+      # path terminates in the index." Only host-sync holds a writable mount of
+      # this volume; scout and sync-job read it.
+      #
+      # It does NOT follow that page text is unrecoverable from the index, and
+      # this comment used to say it did. `rag_chunks.chunk_text` is
+      # `text NOT NULL`; measured 2026-09-15,
+      # `string_agg(chunk_text ORDER BY chunk_index)` reconstructed 13,644 of
+      # 13,828 bytes of a real page -- its entire body, minus frontmatter. The
+      # old claim that chunk text is "stripped at split (chunker.py:184)" was
+      # false in every part: nothing strips it, and that line is a table-span
+      # scan. Anyone reading this to understand the threat model was misled.
+      #
+      # What protects page CONTENT is RLS department scoping, not this mount.
+      # scripts/demo/rls_scope.sql measures it; the empty-department row
+      # returning zero is the fail-closed proof. leaf-2.2:G2 asserts it and
+      # fails when the scoping is removed, so the claim and its evidence stay
+      # joined.
       - vault-replica:/vault-replica:ro
     secrets:
       - postgres_query_password

@@ -70,6 +70,12 @@ POLICIES: tuple[ToolPolicy, ...] = (
     ToolPolicy(
         "verify-groundedness", Exposure.GROUPED, tool=VERIFY_TOOL, stage="groundedness"
     ),
+    # Read-only, and a stage of the verify tool rather than a new one: the
+    # surface stays the size it was while gaining the question "did the corpus
+    # arrive whole?", which nothing could ask before.
+    ToolPolicy(
+        "verify-extraction", Exposure.GROUPED, tool=VERIFY_TOOL, stage="extraction"
+    ),
     ToolPolicy(
         "mcp",
         Exposure.HIDDEN,

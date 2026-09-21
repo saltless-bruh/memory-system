@@ -1,61 +1,124 @@
-# Release-candidate re-review — v0.2.1
+# Architecture & Flow Review — SNP Memory System V3
 
-Date: 2026-08-26
-Scope: complete pre-commit candidate after correcting the initial release review
-findings and applying the approved staging/backup practices.
+**Date:** 2026-09-10  
+**Context:** Review of architectural topology, data flows, and invariants following visual diagramming with `/archify` and `/diagram-design`.
 
-## Blockers
+---
 
-None found in the repository candidate.
+## Architectural Shape & Invariant Mismatch
 
-The two previous blockers are resolved:
+```
+                   ┌──────────────────────────────────────────────────┐
+                   │               Human Author (Obsidian)            │
+                   └─────────────────────────┬────────────────────────┘
+                                             │
+                                             │ git push (W-2)
+                                             ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ The Git vs RLS Disconnect:                                                             │
+│                                                                                        │
+│   Gitea Repository (snp-memory) ──────────────▶ All 432 Markdown Notes                 │
+│   (ONE monolithic Git repo clone)               (Git boundary gates NOTHING)           │
+│                                                          ▲                             │
+│                                                          │                             │
+│   PostgreSQL 16 + pgvector      ──────────────▶ Department RLS Gates                   │
+│   (Strict rag_app_role RLS)                     (redteam, blueteam, ai_eng, infra)     │
+│                                                                                        │
+│   CRITICAL GAP: RLS strictly filters queries in PostgreSQL, but any user with Git       │
+│   access in Obsidian possesses the full plaintext vault across all departments.         │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 
-1. Manifest, release preflight, and stack preflight now require or propagate an
-   explicit Compose project. They preserve the ordered Compose overlay files in
-   both observed evidence and failure remedies; staging therefore does not fall
-   back to the live default configuration.
-2. Scout, basic-memory, and host-sync now all receive `SNP_GIT_REVISION`, carry
-   the same OCI revision label, and use explicit overridable local image names.
-   The supply-chain tests pin this contract.
+                                             │
+                                             ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ The Two-Store Asynchronous Sync Window:                                                │
+│                                                                                        │
+│   Gitea Push ──▶ Webhook ──▶ Host-Sync ──▶ Vault Replica (/current)                    │
+│                                                  │                                     │
+│                                                  ├─▶ Scout reads immediately (mount ro)│
+│                                                  │                                     │
+│                                                  ▼ inotify trigger                     │
+│                                              Sync-Job ──▶ LiteLLM ──▶ PostgreSQL       │
+│                                                                       (Delayed Index)  │
+│                                                                                        │
+│   RACE CONDITION: A page updated on disk is immediately readable via wiki_read          │
+│   before its embeddings are indexed, while deleted pages remain searchable in vector   │
+│   indexes until sync-job reconciles.                                                   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-## Majors
+---
 
-None found.
+## 1. Blockers
 
-## Minors
+### B-1: Git Layer vs RLS Security Disconnect (Defect #29)
+* **Finding:** The architecture advertises strict department isolation (`redteam`, `blueteam`, `ai_eng`, `infra`), enforced via PostgreSQL Row-Level Security (`rag_app_role`) and Scout caller scope tokens. However, the underlying vault is stored in **one single Git repository** (`snp-admin/snp-memory`) containing all 432 pages.
+* **Impact:** The pluralism principle ("humans edit on their own clone in Obsidian") means that any human developer with Git clone access has full, unrestricted read access to all confidential markdown pages from every department on their local filesystem. RLS gates the search index, but Git gates nothing.
+* **Resolution:** If multi-department confidentiality is required, the vault must be partitioned into per-department Git repositories with separate access controls, or client-side vault encryption must be introduced.
 
-1. The current wiki index reports two orphan-page warnings. They remain warnings
-   under the repository contract and do not invalidate source links or the
-   generated index, but should be cross-linked before a larger corpus release.
+---
 
-2. The custom archive/restore workflow is unit-tested but has not yet been run
-   against the actual staging PostgreSQL instance. This is an intentional next
-   release gate, not a completed claim: the candidate must still be built,
-   restored, and preflighted in `snp-v021-staging` before it can be promoted.
+## 2. Majors
 
-## Nits
+### M-1: Two-Store Asynchronous Sync Divergence
+* **Finding:** Scout retrieves search hits from PostgreSQL 16 + pgvector, but fulfills `wiki_read` directly from the `vault-replica` filesystem mount (`/vault-replica/current/wiki`). 
+* **Impact:** Because `host-sync` updates the filesystem mount in milliseconds while `sync-job` asynchronously chunks, embeds (via remote LiteLLM), and inserts into PostgreSQL, there is an observable divergence window:
+  - A newly committed page can be read by path via `wiki_read` before it is discoverable via `wiki_search`.
+  - A deleted or renamed page will still appear in `wiki_search` results until the reconciliation loop finishes, but `wiki_read` will return a 404/failure when attempting to read the file from disk.
+* **Resolution:** Ensure query results cross-check the mounted replica or enforce read-after-write consistency tokens across the sync pipeline.
 
-- Release evidence and temporary test logs belong outside the repository. The
-  new tools enforce this for manifest, backup, and restore-result outputs.
+### M-2: Ingestion Latency Ceiling on Acceptance Workflow W-2 (Defects #36, #37)
+* **Finding:** The measured W-2 latency from Obsidian `git push` to searchable index hits a p50 of 5.65s and p95 of 7.78s against a 5.0s target.
+* **Analysis:** Profiling shows that `git archive` + `tar extract` of all 433 files takes only **0.109s**, and embedding takes **0.974s**. The dominant bottleneck (~3.9s p95, ~50% of the entire budget) is trapped in Gitea webhook dispatch, network delivery on the Docker bridge, and `host-sync` loop latency.
+* **Resolution:** Optimize webhook delivery in Gitea and eliminate unnecessary polling loops in `host-sync`.
 
-## Verification reviewed
+### M-3: Missing `## TL;DR` Heading on 86% of the Vault (Defect #38)
+* **Finding:** The retrieval contract strictly defines `## TL;DR` as **Chunk 0**—the primary text scored during page-level hybrid retrieval. In practice, 371 out of 433 pages (85.7%) lack a `## TL;DR` section.
+* **Impact:** For 86% of the vault, retrieval queries match arbitrary paragraph fragments rather than the canonical topic abstract, degrading precision and routing accuracy.
+* **Resolution:** Run a batch lint/enrichment workflow to author grounded `## TL;DR` summaries across the remaining 371 pages.
 
-- `timeout 300s uv run pytest -m 'not integration' --disable-socket -q` —
-  **1446 passed, 29 deselected**, exit 0 (151.13 seconds).
-- `uv run ruff check .` — pass.
-- `uv run ruff format --check .` — **356 files already formatted**.
-- `uv run mypy scout scripts` — **77 source files, success**.
-- `uv run python scripts/gen_index.py --check` — 7 pages, 0 errors, 2 orphan
-  warnings, index current.
-- `uv run python scripts/scan_secrets.py --worktree --untracked` — pass.
-- `git diff --check` — pass.
-- Base and explicit staging Compose configurations — pass.
-- Focused staging/backup/manifest/preflight/supply-chain tests — pass.
+---
 
-## Overall summary and next actions
+## 3. Minors
 
-**Approved for the clean v0.2.1 candidate commit and annotated tag.** This is
-not yet a production-promotion approval: after the tag, build only the tagged
-candidate in `snp-v021-staging`, take and restore the verified PostgreSQL
-archive, record the container capability/manifest, then require release
-preflight to pass before any controlled ingest or production transition.
+### m-1: Unencrypted Internal Bearer Tokens (Defect #31)
+* **Finding:** Emitted configurations default to cleartext HTTP (`http://scout:8080/mcp`, `http://litellm:4000/v1`). Static bearer tokens and request bodies cross the Docker network unencrypted.
+* **Impact:** Acceptable on loopback and isolated Docker bridges, but violates zero-trust transit if services are deployed across distributed nodes.
+* **Resolution:** Enable TLS termination or reverse proxy encryption before expanding beyond localhost.
+
+### m-2: Concurrency & Lock Service Omission (Defect #30)
+* **Finding:** There is no distributed locking service between concurrent human Obsidian writers and agent PR branches.
+* **Impact:** Concurrent pushes to the same markdown pages create Git merge conflicts that require manual developer resolution.
+* **Resolution:** Keep human authorship single-writer per note or introduce optimistic locking headers during automated generation.
+
+### m-3: Inotify Inode Binding Fragility
+* **Finding:** `sync-job` watches the directory `/vault-replica` rather than `/vault-replica/current` because inotify binds to the underlying inode, not the symlink.
+* **Impact:** Watching the parent directory triggers on any file mutation inside `/vault-replica`, requiring careful debouncing to prevent spurious re-index cycles.
+
+---
+
+## 4. Nits
+
+### n-1: Dead `basic-memory/` References in Manifest (Defect #32)
+* **Finding:** `basic-memory/` is no longer built or deployed in Compose, yet its `requirements.lock` remains tracked as a release-manifest input.
+* **Resolution:** Purge orphaned lockfile references from `write_release_manifest.py`.
+
+### n-2: Vietnamese vs English Recall Disparity (Defect #39)
+* **Finding:** Empirical recall on English queries is `recall@1 0.95`, whereas Vietnamese queries score `recall@1 0.70` across the 276 bilingual pages.
+* **Resolution:** Evaluate multilingual embedding checkpoints or tune sparse tokenization weights in pg_trgm.
+
+---
+
+## Overall Summary & Next Actions
+
+| Severity | Count | Primary Areas |
+|---|---|---|
+| **Blocker** | 1 | Git repo monolithic access vs PostgreSQL RLS scope |
+| **Major** | 3 | Two-store sync latency, W-2 webhook delay, 86% missing `## TL;DR` |
+| **Minor** | 3 | Cleartext HTTP, lock service absence, inotify symlink watch |
+| **Nit** | 2 | Manifest debris, Vietnamese embedding recall gap |
+
+### Recommended Sequencing:
+1. **Architectural Decision (Owner Action):** Acknowledge or decide whether the single monolithic Git repository is acceptable for internal trust, or if per-department repos must be created.
+2. **Quality Sprint:** Execute a targeted compilation/backfill pass to add required `## TL;DR` summaries to the 371 ungrounded wiki pages.
+3. **Performance Profiling:** Instrument the Gitea webhook dispatch span to reduce the unexplained ~3.9s gap in the W-2 acceptance loop.

@@ -26,7 +26,7 @@ from scout.chunker import (
     LiteLLMBatchEmbedder,
 )
 from scout.config import postgres_settings
-from scout.parsers import ParsedDocument, parse_file
+from scout.parsers import ParsedDocument, extraction_state, parse_file
 from scout.policy import PolicyValidationError, validate_document_acl
 
 # Optional instrumentation hook used by the live sync-job. The ingestion layer
@@ -343,6 +343,7 @@ async def ingest_document(
             "chunks_count": len(chunks),
             "allowed_depts": allowed_depts,
             "status": "dry_run_ok",
+            "extraction_status": extraction_state(parsed_doc.metadata),
         }
 
     if not chunks:
@@ -365,6 +366,8 @@ async def ingest_document(
             "chunks_count": 0,
             "status": "purged_empty" if purged else "skipped_empty",
         }
+
+    extraction = extraction_state(parsed_doc.metadata)
 
     # 2. Batch generate dense embeddings
     texts_to_embed = [c.contextual_text for c in chunks]
@@ -403,19 +406,25 @@ async def ingest_document(
                 """
                 INSERT INTO rag_documents
                     (source_uri, allowed_depts, title, ingested_at,
-                     capability_fingerprint)
-                VALUES ($1, $2, $3, now(), $4)
+                     capability_fingerprint, extraction_status)
+                VALUES ($1, $2, $3, now(), $4, $5)
                 ON CONFLICT (source_uri) DO UPDATE
                 SET allowed_depts = EXCLUDED.allowed_depts,
                     title = EXCLUDED.title,
                     ingested_at = EXCLUDED.ingested_at,
-                    capability_fingerprint = EXCLUDED.capability_fingerprint
+                    capability_fingerprint = EXCLUDED.capability_fingerprint,
+                    extraction_status = EXCLUDED.extraction_status
                 RETURNING doc_id;
                 """,
                 parsed_doc.source_uri,
                 allowed_depts,
                 parsed_doc.title,
                 json.dumps(capability_fingerprint()),
+                # What this parse produced, beside what the environment could
+                # have produced. A figure lost to a refused gateway is invisible
+                # in the fingerprint by design -- the extractor was available --
+                # so the outcome is recorded separately (migration 008).
+                json.dumps(extraction, default=str),
             )
             if not row:
                 raise RuntimeError(f"Failed to upsert document {parsed_doc.source_uri}")
@@ -478,6 +487,10 @@ async def ingest_document(
             "doc_id": str(doc_id),
             "chunks_count": len(chunks),
             "status": "ingested_ok",
+            # `ingested_ok` stays the status a caller counts: the write did
+            # succeed. What it cannot say is that the document arrived whole,
+            # so that travels beside it rather than inside it.
+            "extraction_status": extraction,
         }
     finally:
         if close_conn:

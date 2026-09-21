@@ -14,8 +14,10 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -195,13 +197,40 @@ def _git_timeout() -> float:
     return value
 
 
+def _credential_options() -> list[str]:
+    """Configure optional file-backed auth without putting a secret in Git argv."""
+    username = os.environ.get("GIT_SYNC_USERNAME", "").strip()
+    password_file = os.environ.get("GIT_SYNC_PASSWORD_FILE", "").strip()
+    if not username and not password_file:
+        return []
+    if not username or not password_file:
+        raise SyncConfigurationError(
+            "GIT_SYNC_USERNAME and GIT_SYNC_PASSWORD_FILE must be configured together"
+        )
+    password_path = Path(password_file)
+    if password_path.is_symlink() or not password_path.is_file():
+        raise SyncConfigurationError("Git sync credential file is unavailable")
+    helper = _SCRIPT_DIR / "git_sync_credentials.py"
+    command = f"!{shlex.quote(sys.executable)} {shlex.quote(str(helper))}"
+    return [
+        "-c",
+        "credential.helper=",
+        "-c",
+        f"credential.helper={command}",
+        "-c",
+        "credential.useHttpPath=true",
+        "-c",
+        "http.followRedirects=false",
+    ]
+
+
 def _run_git(args: Sequence[str], *, cwd: Path) -> str:
     """Run one bounded, non-interactive Git operation without logging credentials."""
     environment = os.environ.copy()
     environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
-            ["git", "-c", f"safe.directory={cwd}", *args],
+            ["git", "-c", f"safe.directory={cwd}", *_credential_options(), *args],
             cwd=cwd,
             check=True,
             capture_output=True,

@@ -148,14 +148,50 @@ def test_installer_idempotent(tmp_path: Path) -> None:
     assert "Successfully Installed" in res2.stdout
 
 
-def test_installer_nested_path(tmp_path: Path) -> None:
-    """Test installer against deeply nested directory that does not exist yet."""
+def test_installer_accepts_an_existing_nested_target(tmp_path: Path) -> None:
+    """A deeply nested target that exists installs normally.
+
+    This replaces a test that required the installer to CREATE the nested path.
+    That was the committed behaviour -- `mkdir -p` built the whole chain -- and
+    it is no longer the contract: the installer now canonicalises its target
+    with `cd -- "${TARGET_DIR}" && pwd`, which needs the directory to exist, and
+    refuses otherwise. Owner ruling 2026-09-15: keep the refusal, update the
+    test. Silently building a tree at a typo'd path is a poor default for a
+    command that writes an operating contract into a directory the user owns.
+    """
     deep_path = tmp_path / "deeply" / "nested" / "target" / "workspace"
-    subprocess.run(
-        [str(INSTALLER_SCRIPT), str(deep_path)], check=True, capture_output=True
+    deep_path.mkdir(parents=True)
+
+    res = subprocess.run(
+        [str(INSTALLER_SCRIPT), str(deep_path)],
+        capture_output=True,
+        text=True,
+        check=True,
     )
+
+    assert "Successfully Installed" in res.stdout
     assert (deep_path / ".agent" / "rules" / "snp-memory.md").is_file()
     assert (deep_path / ".mcp.json").is_file()
+
+
+def test_installer_refuses_a_target_that_does_not_exist(tmp_path: Path) -> None:
+    """The shell refuses a missing target, and creates nothing on the way out.
+
+    `test_cli_install_agent.py::test_a_missing_target_is_refused` covers the
+    Python wrapper, which rejects before ever calling the shell. This covers the
+    shell's own guard, which nothing else reaches.
+    """
+    absent = tmp_path / "deeply" / "nested" / "absent"
+
+    res = subprocess.run(
+        [str(INSTALLER_SCRIPT), str(absent)], capture_output=True, text=True
+    )
+
+    assert res.returncode == 3, res.stderr
+    assert "existing directory" in res.stderr
+    # A refusal that half-installs is not a refusal.
+    assert not absent.exists()
+    assert not (tmp_path / "deeply").exists()
 
 
 def test_package_and_root_skills_synchronized() -> None:

@@ -251,6 +251,18 @@ class PgVectorDirectIndexer:
             )
 
 
+def _vault_root_is_usable(wiki_dir: Path) -> bool:
+    """Whether the vault ROOT is still a directory this process may read.
+
+    Separates the two faults that both surface as `FileNotFoundError`: a vault
+    that is not there (permanent -- waiting cannot fix a configuration fault)
+    from a file that vanished inside one that is (transient -- a publish race
+    the next cycle absorbs).
+    """
+    root = os.fspath(wiki_dir)
+    return os.path.isdir(root) and os.access(root, os.R_OK | os.X_OK)
+
+
 @dataclass(slots=True)
 class WikiIndexer:
     """`RagIndexer` that ingests the knowledge vault into PostgreSQL.
@@ -300,8 +312,24 @@ class WikiIndexer:
             )
             deleted = await reconcile_wiki_deletions(self.wiki_dir)
         except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
-            # A vault that is absent or unreadable is a configuration fault.
-            # Waiting cannot fix it, so it must not be retried forever.
+            # A vault whose ROOT is absent or unreadable is a configuration
+            # fault: waiting cannot fix it, so it must not be retried forever.
+            #
+            # A file that vanished *inside* a still-readable tree is the
+            # opposite. `host-sync` publishes by materialising
+            # `snapshots/<commit>/` and retargeting `current`, so a walk can
+            # legitimately race a swap, and a vault page can be deleted while
+            # the cycle that listed it is still reading. Measured 2026-09-21:
+            # the propagation gate's own probe page was removed mid-cycle, this
+            # handler called it permanent, and the vault watcher stopped for
+            # good -- the service read unhealthy until a human restarted the
+            # container, for an event the next cycle would have absorbed.
+            if await asyncio.to_thread(_vault_root_is_usable, self.wiki_dir):
+                return IndexOutcome(
+                    ok=False,
+                    status=f"vault changed under the walk: {exc}",
+                    retryable=True,
+                )
             return IndexOutcome(
                 ok=False, status=f"vault unreadable: {exc}", retryable=False
             )
@@ -493,6 +521,64 @@ class _PermanentSyncFailure(Exception):
     """
 
 
+#: Model groups an ingest cycle actually calls. `snp-embed` vectorises every
+#: chunk; `snp-vlm` describes PDF figures, which the raw tier consumes and the
+#: vault tier (Markdown) does not. Waiting on a route a corpus never calls
+#: would let an unused deployment stop that corpus, so this is per-watcher.
+RAW_INGEST_ROUTES = ("snp-embed", "snp-vlm")
+WIKI_INGEST_ROUTES = ("snp-embed",)
+
+
+async def probe_gateway(
+    routes: Sequence[str],
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    request_timeout: float = 10.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> str:
+    """Ask the gateway whether `routes` resolve. Returns "" when they all do.
+
+    This is a **call**, not a configuration read. `depends_on:
+    condition: service_healthy` orders containers on `docker compose up` and is
+    not applied when the daemon restarts them all together, so a cold start can
+    reach ingestion with the gateway not yet listening; and the healthcheck it
+    would have waited for deliberately omits `snp-vlm`, the route the figure
+    describer calls. Both gaps are invisible to anything that reads
+    `LITELLM_BASE_URL` and concludes the gateway is there.
+
+    `GET /health?model=<group>` runs the real per-deployment check and answers
+    503 when a group has no healthy deployment -- the same contract the compose
+    healthcheck probes, so readiness here means what it means there.
+    """
+    resolved = (base_url or os.environ.get("LITELLM_BASE_URL") or "").strip()
+    if not resolved:
+        return "LITELLM_BASE_URL is unset"
+    key = api_key or os.environ.get("LITELLM_MASTER_KEY") or ""
+    root = resolved.rstrip("/").removesuffix("/v1")
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+    async with httpx.AsyncClient(
+        base_url=root, timeout=request_timeout, headers=headers, transport=transport
+    ) as client:
+        for group in routes:
+            try:
+                response = await client.get("/health", params={"model": group})
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                return f"{group}: gateway unreachable ({type(exc).__name__}: {exc})"
+            if response.status_code == 503:
+                return f"{group}: no healthy deployment"
+            if response.status_code >= 400:
+                return f"{group}: /health returned {response.status_code}"
+            try:
+                data = response.json()
+            except ValueError:
+                return f"{group}: /health did not return JSON"
+            if data.get("unhealthy_count") or not data.get("healthy_count"):
+                return f"{group}: {data.get('unhealthy_endpoints') or 'no healthy endpoint'}"
+    return ""
+
+
 async def _supervise(
     indexer: RagIndexer,
     source_dir: Path,
@@ -502,6 +588,7 @@ async def _supervise(
     base_delay: float = COLD_START_BASE_DELAY,
     max_delay: float = COLD_START_MAX_DELAY,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    gateway_probe: Callable[[], Awaitable[str]] | None = None,
 ) -> None:
     """Index this watcher's corpus, then watch `source_dir`, surviving an outage.
 
@@ -550,6 +637,17 @@ async def _supervise(
             file=sys.stderr,
         )
         await sleep(delay)
+
+    # Parsing before the gateway answers does not fail loudly -- it produces a
+    # corpus that is quietly missing whatever needed the model. On 2026-09-15
+    # that cost all seven figures of the one PDF in the corpus, ingested inside
+    # litellm's boot window and then reported `ingested_ok`. So the first cycle
+    # waits for a real answer rather than for an orchestration promise.
+    while gateway_probe is not None:
+        reason = await gateway_probe()
+        if not reason:
+            break
+        await back_off(f"gateway not ready: {reason}")
 
     while True:
         outcome = await sync_once(indexer)
@@ -617,6 +715,7 @@ async def _async_main(
     base_delay: float = COLD_START_BASE_DELAY,
     max_delay: float = COLD_START_MAX_DELAY,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    gateway_probe: Callable[[Sequence[str]], Awaitable[str]] | None = None,
 ) -> None:
     """Supervise the raw watcher, and the vault watcher when one is configured.
 
@@ -633,6 +732,12 @@ async def _async_main(
     Readiness is the conjunction: the service is ready only when every
     configured watcher has completed a cycle, so a half-working sync reports
     unhealthy rather than ready.
+
+    Each watcher waits for the model routes *its own corpus* calls before its
+    first cycle (`probe_gateway`). The routes differ -- the raw tier describes
+    PDF figures through `snp-vlm`, the vault tier is Markdown and never does --
+    and gating a corpus on a route it never calls is how an unused deployment
+    takes down a working pipeline.
     """
     marker = readiness_path or Path(
         os.environ.get("SYNC_READY_FILE", "/tmp/snp-sync-job/ready")
@@ -641,6 +746,27 @@ async def _async_main(
     # on the aggregator's first tick: a permanent cold-start failure exits
     # before that tick would ever run.
     _set_readiness(marker, False)
+
+    # A gateway can only be waited for when one is configured. With no
+    # `LITELLM_BASE_URL` there is nothing to probe and nothing being hidden:
+    # the first embed call fails loudly and the retryable backoff above handles
+    # it. Installing a probe that can never answer would convert a
+    # misconfiguration into a silent forever-wait, which is the failure mode
+    # this wait exists to prevent, not a second instance of it.
+    probe = gateway_probe
+    if probe is None and (os.environ.get("LITELLM_BASE_URL") or "").strip():
+        probe = probe_gateway
+
+    def waits_for(routes: Sequence[str]) -> Callable[[], Awaitable[str]] | None:
+        """Bind one watcher's required routes to the probe, when there is one."""
+        if probe is None:
+            return None
+        bound = probe
+
+        async def ready() -> str:
+            return await bound(routes)
+
+        return ready
 
     markers = [marker.with_name(f"{marker.name}.raw")]
     watched_dirs = [raw_dir]
@@ -652,6 +778,7 @@ async def _async_main(
             base_delay=base_delay,
             max_delay=max_delay,
             sleep=sleep,
+            gateway_probe=waits_for(RAW_INGEST_ROUTES),
         )
     ]
     if wiki_dir is not None:
@@ -666,6 +793,7 @@ async def _async_main(
                 base_delay=base_delay,
                 max_delay=max_delay,
                 sleep=sleep,
+                gateway_probe=waits_for(WIKI_INGEST_ROUTES),
             )
         )
 

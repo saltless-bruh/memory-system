@@ -41,7 +41,7 @@ def _config() -> Config:
 
 
 def _server_key(client: str) -> str:
-    return "servers" if client == "vscode" else "mcpServers"
+    return {"vscode": "servers", "opencode": "mcp"}.get(client, "mcpServers")
 
 
 @pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
@@ -79,15 +79,16 @@ def test_printing_names_the_conventional_location_without_writing_it() -> None:
     assert "written_to" not in result.data
 
 
-def test_out_writes_a_new_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("client", ["claude", "opencode"])
+def test_out_writes_a_new_file(tmp_path: Path, client: str) -> None:
     target = tmp_path / "nested" / "mcp.json"
 
-    result = mcp_config(client="claude", out=str(target), config=_config())
+    result = mcp_config(client=client, out=str(target), config=_config())
 
     assert result.exit_code == ExitCode.SUCCESS
     assert result.data["written_to"] == str(target)
     written = json.loads(target.read_text(encoding="utf-8"))
-    assert written["mcpServers"] == exporter.generate_config("claude")["mcpServers"]
+    assert written == exporter.generate_config(client)
 
 
 def test_an_existing_file_is_untouched_without_confirm(tmp_path: Path) -> None:
@@ -123,23 +124,27 @@ def test_confirm_merges_rather_than_replacing(tmp_path: Path) -> None:
         assert name in merged["mcpServers"]
 
 
-def test_a_merged_document_is_written_but_never_echoed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("client", ["claude", "opencode"])
+def test_a_merged_document_is_written_but_never_echoed(
+    tmp_path: Path, client: str
+) -> None:
     """A neighbouring server's real token must not come back out of the tool."""
     secret = "Bearer a-real-token-for-another-server"
     target = tmp_path / "mcp.json"
     target.write_text(
-        json.dumps({"mcpServers": {"other": {"headers": {"Authorization": secret}}}}),
+        json.dumps(
+            {_server_key(client): {"other": {"headers": {"Authorization": secret}}}}
+        ),
         encoding="utf-8",
     )
 
-    result = mcp_config(
-        client="claude", out=str(target), confirm=True, config=_config()
-    )
+    result = mcp_config(client=client, out=str(target), confirm=True, config=_config())
 
     assert secret in target.read_text(encoding="utf-8")
     assert "config" not in result.data
     assert secret not in json.dumps(result.data)
     assert secret not in (result.summary or "")
+    assert secret not in json.dumps(result.messages)
 
 
 def test_an_unparseable_target_is_a_conflict_and_nothing_is_written(
@@ -161,13 +166,15 @@ def test_an_unparseable_target_is_a_conflict_and_nothing_is_written(
     assert result.error.details["cause"] == "JSONDecodeError"
 
 
+@pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
 def test_the_generated_document_never_contains_a_resolved_secret(
     monkeypatch: pytest.MonkeyPatch,
+    client: str,
 ) -> None:
     """The exporter emits a reference; this command must not resolve it."""
     monkeypatch.setenv("SCOUT_AUTH_HEADER", "Bearer resolved-value")
 
-    result = mcp_config(client="cursor", config=_config())
+    result = mcp_config(client=client, config=_config())
 
     rendered = json.dumps(result.data)
     assert "resolved-value" not in rendered
@@ -181,6 +188,104 @@ def test_mcp_config_is_declared_and_has_an_exposure_decision() -> None:
     assert any(spec.name == "mcp-config" for spec in DECLARED)
     policy = policy_for("mcp-config")
     assert policy is not None and policy.exposure is Exposure.HIDDEN
+
+
+def test_opencode_prints_native_config_and_names_its_project_path() -> None:
+    result = mcp_config(client="opencode", config=_config())
+    assert result.data["client"] == "opencode"
+    assert result.data["default_path"] == "opencode.json"
+    assert result.data["servers"] == ["scout"]
+    printed = json.loads(result.summary)
+    assert set(printed) == {"$schema", "mcp"}
+    assert printed["mcp"]["scout"]["headers"] == {
+        "Authorization": "{env:SCOUT_AUTH_HEADER}"
+    }
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("json_exists", [False, True])
+def test_opencode_jsonc_is_a_conflict_even_with_confirm(
+    tmp_path: Path, confirm: bool, json_exists: bool
+) -> None:
+    jsonc = tmp_path / "opencode.jsonc"
+    jsonc.write_text("// Bearer secret-jsonc-value\n{}", encoding="utf-8")
+    target = tmp_path / "opencode.json"
+    if json_exists:
+        target.write_text('{"model":"keep"}', encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+
+    with pytest.raises(CliError) as caught:
+        mcp_config(
+            client="opencode", out=str(target), confirm=confirm, config=_config()
+        )
+
+    result = caught.value.to_result()
+    assert result.exit_code == ExitCode.CONFLICT
+    assert "opencode.jsonc" in caught.value.message
+    assert "reconcile" in (caught.value.hint or "")
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+    assert "secret-jsonc-value" not in str(result)
+
+
+def test_opencode_custom_export_artifact_can_coexist_with_jsonc(tmp_path: Path) -> None:
+    jsonc = tmp_path / "opencode.jsonc"
+    original = b"// existing project configuration\n{}\n"
+    jsonc.write_bytes(original)
+    target = tmp_path / "scout-export.json"
+
+    result = mcp_config(client="opencode", out=str(target), config=_config())
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert jsonc.read_bytes() == original
+    assert (
+        json.loads(target.read_text(encoding="utf-8"))["mcp"]["scout"]["type"]
+        == "remote"
+    )
+
+
+@pytest.mark.parametrize("original", [b"", b'{"mcp": null}', b'{"mcp": []}'])
+def test_malformed_opencode_target_is_a_conflict_without_writes(
+    tmp_path: Path, original: bytes
+) -> None:
+    target = tmp_path / "opencode.json"
+    target.write_bytes(original)
+
+    with pytest.raises(CliError) as caught:
+        mcp_config(client="opencode", out=str(target), confirm=True, config=_config())
+
+    assert caught.value.to_result().exit_code == ExitCode.CONFLICT
+    assert target.read_bytes() == original
+
+
+def test_opencode_existing_file_needs_confirm_then_merges(tmp_path: Path) -> None:
+    target = tmp_path / "opencode.json"
+    original = {
+        "model": "custom/model",
+        "instructions": ["custom.md"],
+        "mcp": {
+            "other": {"enabled": False},
+            "snpmemory": {"type": "local", "command": ["snpmemory", "mcp"]},
+        },
+    }
+    target.write_text(json.dumps(original), encoding="utf-8")
+    before = target.read_bytes()
+
+    with pytest.raises(CliError) as caught:
+        mcp_config(client="opencode", out=str(target), config=_config())
+    assert caught.value.to_result().exit_code == ExitCode.CONFIRMATION_REQUIRED
+    assert target.read_bytes() == before
+
+    result = mcp_config(
+        client="opencode", out=str(target), confirm=True, config=_config()
+    )
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert written["model"] == original["model"]
+    assert written["instructions"] == original["instructions"]
+    assert written["mcp"]["other"] == original["mcp"]["other"]
+    assert set(written["mcp"]) == {"other", "scout"}
+    assert written["$schema"] == "https://opencode.ai/config.json"
+    assert result.data["servers"] == ["scout"]
+    assert "config" not in result.data
 
 
 # ── `snpmemory mcp --root` — the server half of the pin ────────────────────

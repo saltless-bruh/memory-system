@@ -54,6 +54,14 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 PLACEHOLDER_VALUES = (
     re.compile(r"^sk-local-dev-[a-z0-9-]+$"),
     re.compile(r"^sk-placeholder-[a-z0-9-]+$"),
+    # Synthetic credentials constructed by tests that assert a secret is never
+    # printed. They have to look like the thing they guard against, so they trip
+    # the scanner by design; exempting them by VALUE keeps the rule above intact,
+    # where exempting `tests/` by PATH would blind the scan to a real credential
+    # pasted into a test -- which is a likelier accident than either.
+    # Lower-case only, like its neighbours: the fixture was upper-case and was
+    # lower-cased to fit, rather than widening the alphabet for every value.
+    re.compile(r"^sk-synthetic-[a-z0-9-]+$"),
 )
 
 

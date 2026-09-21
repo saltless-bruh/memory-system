@@ -118,8 +118,11 @@ SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build scout sync-job host-
 docker compose up -d
 ```
 
-Known-red and not yours: `e2e_retrieval.py --group full-chain` fails on a
-pre-existing `_IngestConnection.fetch` `AttributeError`.
+Known-red and not yours: `ingest_policy.py --group control-docs-excluded` exits 2
+on a pre-existing `AttributeError: 'CountingConnection' object has no attribute
+'fetch'`. This note previously named `e2e_retrieval.py --group full-chain`, which
+passes; the exemption pointed at a green gate while the red one had none. Every
+other failing gate is enumerated with its cause in `docs/AUDIT_2026-09-15.md`.
 
 ## Architecture — the index finds, the vault answers
 

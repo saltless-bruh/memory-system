@@ -135,7 +135,9 @@ def build_server(mcp: FastMCP | None = None) -> FastMCP:
     )
     async def verify(
         stage: Annotated[
-            Literal["all", "addresses", "groundedness", "secrets", "vault"],
+            Literal[
+                "all", "addresses", "extraction", "groundedness", "secrets", "vault"
+            ],
             "Which verification to run.",
         ] = "all",
         detail: Annotated[bool, "Return every field instead of a summary."] = False,

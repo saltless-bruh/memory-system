@@ -21,4 +21,14 @@ paths = [
 regexes = [
     '''^sk-local-dev-[a-z0-9-]+$''',
     '''^sk-placeholder-[a-z0-9-]+$''',
+    '''^sk-synthetic-[a-z0-9-]+$''',
 ]
+
+# NOTE, 2026-09-15: this allowlist still carries `condition = "AND"` with a
+# `paths` restriction, while scripts/scan_secrets.py deliberately dropped its
+# path condition (audit finding M6) because it left that gate permanently red.
+# The two are therefore NOT equivalent: a placeholder outside .env.example or
+# docker-compose.yml is exempt for scan_secrets.py and reported by gitleaks.
+# Recorded rather than silently reconciled -- gitleaks has never actually run
+# here (defect #26), so tightening or loosening it now would be a change nobody
+# has ever observed the effect of.

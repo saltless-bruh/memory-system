@@ -34,6 +34,10 @@
 version: 1
 
 rules:
+  # Canonical OpenShift capture approved for the infra rehearsal only.
+  - path: rehearsal/opencode-20260911/openshift-build-system-source.md
+    departments: [infra]
+
   # ── Operated by infra, authored by ai_eng ─────────────────────────────
   # The gateway routing table: ai_eng owns the routes, infra reroutes them
   # during an outage. Cited by wiki/playbooks/llm-outage-failover.md (infra)

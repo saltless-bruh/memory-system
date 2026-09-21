@@ -57,19 +57,49 @@ TYPE_HEADING = {
 }
 
 
-def collect_lint(pages: list[vault.Page]) -> vault.LintResult:
-    """Run the full vault lint: tree + per-page + orphan detection."""
-    result = vault.LintResult()
+def collect_lint(
+    pages: list[vault.Page], wiki_dir: Path | None = None
+) -> vault.LintResult:
+    """Run the full vault lint: tree + per-page + orphan detection.
 
-    tree = vault.check_tree(WIKI_DIR)
+    `wiki_dir` is the tree the pages came from. It defaults to this package's
+    own `WIKI_DIR` for existing callers, but a caller linting someone else's
+    checkout must pass it -- otherwise the tree assertion silently checks this
+    package's sample tree while the per-page lint checks their pages, which is
+    register entry #59 wearing a different hat.
+    """
+    result = vault.LintResult()
+    tree_root = WIKI_DIR if wiki_dir is None else wiki_dir
+    # The contract travels with the tree, not with this package.
+    schema = vault.load_page_schema(tree_root)
+
+    tree = vault.check_tree(tree_root)
     result.errors.extend(tree.errors)
 
     slugs = {p.slug for p in pages}
     for page in pages:
+        # `wiki/raw/` is immutable evidence, not an authored page (AGENTS.md
+        # section 4; SCHEMA.md: "Keep raw sources under `raw/` and treat them as
+        # immutable"). It carries its own kinds -- `raw`, `raw-provenance` --
+        # which the page contract deliberately does not list. Judging it by the
+        # authored contract produced 118 `invalid type` errors about files that
+        # are not pages. Only skipped when a schema governs, so a tree without
+        # one keeps its previous behaviour exactly.
+        # `page.rel` falls back to an ABSOLUTE path when the page is not
+        # relative to this package's own WIKI_DIR, which is every page of a
+        # foreign checkout -- so the lane has to be computed from the tree root
+        # the caller handed us, not from `rel`.
+        try:
+            lane = Path(page.path).resolve().relative_to(Path(tree_root).resolve())
+        except ValueError:
+            lane = None
+        if schema is not None and lane is not None and lane.parts[0] == "raw":
+            continue
         r = vault.lint_page(
             page,
             known_slugs=slugs,
             frame=vault.HeadingFrame.AUTHORED,
+            schema=schema,
         )
         result.errors.extend(r.errors)
         result.warnings.extend(r.warnings)
@@ -94,8 +124,13 @@ def collect_lint(pages: list[vault.Page]) -> vault.LintResult:
     return result
 
 
-def render_index(pages: list[vault.Page]) -> str:
-    """Deterministically render wiki/index.md from page summaries."""
+def render_index(pages: list[vault.Page], wiki_dir: Path | None = None) -> str:
+    """Deterministically render wiki/index.md from page summaries.
+
+    `wiki_dir` is the root the hrefs are made relative to. Without it a page
+    from any other checkout raises ValueError on `relative_to`.
+    """
+    root = WIKI_DIR if wiki_dir is None else wiki_dir
     content_pages = pages
 
     by_type: dict[str, list[vault.Page]] = defaultdict(list)
@@ -131,7 +166,7 @@ def render_index(pages: list[vault.Page]) -> str:
         ):
             title = p.frontmatter.get("title", p.slug)
             summary = str(p.frontmatter.get("summary", "")).strip()
-            href = p.path.relative_to(WIKI_DIR).as_posix()
+            href = p.path.relative_to(root).as_posix()
             lines.append(f"- [{title}]({href}) — {summary}")
         lines.append("")
 

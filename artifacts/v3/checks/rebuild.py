@@ -323,6 +323,12 @@ async def main():
             "WHERE c.metadata->>'corpus' IS NULL "
             "ORDER BY length(c.chunk_text) DESC LIMIT 1"
         )
+        wiki = await conn.fetchrow(
+            "SELECT d.source_uri, c.chunk_text FROM rag_chunks c "
+            "JOIN rag_documents d ON d.doc_id = c.doc_id "
+            "WHERE c.metadata->>'corpus' = 'wiki' "
+            "ORDER BY length(c.chunk_text) DESC LIMIT 1"
+        )
     if row is None:
         result["raw_uri"] = None
         return
@@ -332,6 +338,13 @@ async def main():
     result["control_paths"] = sorted({c.file_path for c in control})
     tiered = await served.retrieve(hint, scope=scope, k=10)
     result["served_paths"] = sorted({c.file_path for c in tiered})
+    # Liveness needs its own subject: a query drawn from wiki content, not from
+    # the raw document the tier is meant to hide. See the assertion below.
+    result["wiki_uri"] = wiki["source_uri"] if wiki is not None else None
+    if wiki is not None:
+        wiki_hint = " ".join(wiki["chunk_text"].split())[:200]
+        live = await served.retrieve(wiki_hint, scope=scope, k=10)
+        result["served_live_paths"] = sorted({c.file_path for c in live})
     await unfiltered.close()
     await served.close()
 
@@ -360,15 +373,41 @@ print(json.dumps(result))
         f"Control returned {measured.get('control_paths')}",
     )
     require(
-        len(measured.get("served_paths", [])) > 0,
-        "the served backend returned nothing at all; an exclusion that hides "
-        "the whole corpus is a broken filter, not a tier",
-    )
-    require(
         raw_uri not in measured["served_paths"],
         f"the served surface inside the container surfaced {raw_uri}",
     )
 
+    # Liveness, proven on its own subject.
+    #
+    # This assertion used to require the served result of the RAW hint to be
+    # nonempty. That is unsound and it failed on a healthy container:
+    # `retrieve()` selects DISTINCT ON (doc_id), and the raw document this gate
+    # picks is a 110-chunk PDF, so every nearest neighbour of its own text
+    # collapses to that one document. Excluding it then correctly yields zero,
+    # which the gate reported as a broken filter.
+    wiki_uri = measured.get("wiki_uri")
+    require(
+        wiki_uri is not None,
+        "no wiki-corpus document in the index the container reads, so the "
+        "tier's liveness cannot be proven",
+    )
+    live_paths = measured.get("served_live_paths", [])
+    require(
+        len(live_paths) > 0,
+        "the served backend returned nothing for a query drawn from wiki "
+        "content itself; an exclusion that hides the whole corpus is a broken "
+        "filter, not a tier",
+    )
+    require(
+        wiki_uri in live_paths,
+        f"the served wiki tier did not reach {wiki_uri}, a document it "
+        f"contains, from that document's own text; got {live_paths}",
+    )
+
+    print(
+        f"  container excluded {raw_uri} from the wiki tier; "
+        f"reached {wiki_uri} under the same filter"
+    )
     return "SERVED CORPUS TIER VERIFIED"
 
 

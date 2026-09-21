@@ -157,7 +157,14 @@ async def wiki_read_tool(
     *,
     identity: CallerIdentity,
     path: str,
-    mode: str = "full",
+    # The documented default, not the widest one. Six shipped contracts name
+    # `mode="tldr"` -- AGENTS.md section 2, CLAUDE.md, snp-read-wiki-page,
+    # agent_guide, query_protocol and the snp-query workflow -- while this
+    # defaulted to `full`, so an agent that omitted the argument got the most
+    # expensive read in the system and every contract telling it otherwise was
+    # advisory; five instruct it as a wiki_read(...) call, which is what the
+    # leaf-2.1 check measures when it holds the two sides together.
+    mode: str = "tldr",
     section: str | None = None,
     department: str | list[str] | None = None,
 ) -> dict[str, object]:
@@ -271,7 +278,7 @@ def build_server(
         )
         async def wiki_read_endpoint(
             path: str,
-            mode: str = "full",
+            mode: str = "tldr",
             section: str | None = None,
             department: str | list[str] | None = None,
         ) -> dict[str, object]:
@@ -333,7 +340,7 @@ def build_server(
         )
         async def wiki_read_endpoint(
             path: str,
-            mode: str = "full",
+            mode: str = "tldr",
             section: str | None = None,
             department: str | list[str] | None = None,
             access_token: AccessToken = _CURRENT_ACCESS_TOKEN,

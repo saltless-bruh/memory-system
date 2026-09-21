@@ -220,7 +220,8 @@ engine and canonical envelope.*
 | `snpmemory verify-addresses` | address merge gate | `1` drift/fail |
 | `snpmemory verify-groundedness` | faithfulness gate | `1` unsupported claims |
 | `snpmemory verify-secrets` | secret scan | `1` findings |
-| `snpmemory check` | all four verifies, in order, first failure wins | |
+| `snpmemory verify-extraction` | names every indexed document that did not arrive whole | `1` incomplete, or nothing recorded · `2` index unreachable |
+| `snpmemory check` | all five verifies, cheapest first, first failure wins | |
 | `snpmemory up │ down │ status │ logs [service]` | stack lifecycle | `2` docker unavailable |
 | `snpmemory init` | bootstrap secrets and `.env` | |
 | `snpmemory install-agent [dir] [--dry-run] [--confirm]` | install the agent package | `3` target is not a directory · `5` target already has `.agent/` |

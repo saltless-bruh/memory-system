@@ -12,6 +12,7 @@ read an environment, open a database, or resolve a credential.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
 from cyclopts import Parameter
@@ -25,25 +26,36 @@ Injected = Annotated[Any, Parameter(parse=False)]
 
 
 def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int]:
-    """Load the vault, lint it, and report whether the index is current."""
+    """Load the vault at `wiki_dir`, lint it, and report whether its index is current.
+
+    Every path here derives from `wiki_dir`. Earlier this function took the tree
+    as an argument and then linted, rendered and index-checked against module
+    constants anchored to the installed package, so it produced the same verdict
+    whatever it was pointed at (register #59).
+    """
     from scout import vault
-    from scripts.gen_index import INDEX_PATH, collect_lint, render_index
+    from scripts.gen_index import collect_lint, render_index
 
     pages = vault.load_pages(wiki_dir)
-    lint = collect_lint(pages)
-    rendered = render_index(pages)
-    current = INDEX_PATH.read_text(encoding="utf-8") if INDEX_PATH.exists() else ""
+    lint = collect_lint(pages, wiki_dir=wiki_dir)
+    rendered = render_index(pages, wiki_dir=wiki_dir)
+    index_path = wiki_dir / "index.md"
+    current = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
     return pages, lint, rendered == current, len(pages)
+
+
+def _resolved_wiki_dir(cfg: Config) -> Path:
+    """The vault beneath the caller's checkout, not beneath this package."""
+    from scout.cli.commands.wiki import _wiki_dir
+
+    return _wiki_dir(cfg)
 
 
 def verify_vault(*, config: Injected = None) -> CommandResult:
     """Lint page frontmatter and confirm `wiki/index.md` is current."""
-    from scout import vault
-
     cfg: Config = config
-    cfg.require_repo()
     try:
-        pages, lint, index_current, count = _pages_and_lint(vault.WIKI_DIR)
+        pages, lint, index_current, count = _pages_and_lint(_resolved_wiki_dir(cfg))
     except ValueError as exc:
         # A malformed vault root is a configuration problem, not a finding.
         raise infrastructure_error(
@@ -157,8 +169,7 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
     )
 
     cfg: Config = config
-    cfg.require_repo()
-    addresses = _collect_addresses(vault.load_pages())
+    addresses = _collect_addresses(vault.load_pages(_resolved_wiki_dir(cfg)))
     if not addresses:
         return CommandResult(
             data={"checked": 0, "pass": 0, "fail": 0, "drift": 0, "status": "pass"},
@@ -213,6 +224,137 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
     )
 
 
+def verify_extraction(*, config: Injected = None) -> CommandResult:
+    """Name every indexed document that did not arrive whole.
+
+    A structural extraction failure is quiet by design: the parser logs it and
+    returns a *smaller document*, ingestion writes that document, and the run
+    reports `ingested_ok` because the write did succeed. On 2026-09-15 that is
+    how a 7-figure paper reached the index with zero figures described and
+    nothing said so for four days.
+
+    Reads `rag_documents.extraction_status` (migration 008), which records the
+    outcome of a parse, never a capability. Documents ingested before that
+    column existed are reported as **unknown**, not as healthy: "no record" is
+    not evidence of completeness.
+    """
+    import asyncio
+
+    import asyncpg
+
+    from scout.config import ConfigError, postgres_settings
+
+    cfg: Config = config
+    try:
+        settings = postgres_settings("query", env=cfg.values)
+    except ConfigError as exc:
+        raise infrastructure_error(
+            "database configuration is incomplete", hint=str(exc), retryable=False
+        ) from exc
+
+    async def read() -> list[Any]:
+        conn = await asyncpg.connect(
+            host=settings.host,
+            port=settings.port,
+            database=settings.database,
+            user=settings.user,
+            password=settings.password,
+        )
+        try:
+            # Fail-closed RLS: rag_documents is filtered by
+            # `scout.current_depts`, so an unscoped read returns nothing at all
+            # and this command would report "no incomplete documents" about a
+            # table it could not see.
+            from scout.policy import CANONICAL_DEPARTMENTS
+
+            await conn.execute(
+                "SELECT set_config('scout.current_depts', $1, false);",
+                ",".join(sorted(CANONICAL_DEPARTMENTS)),
+            )
+            return list(
+                await conn.fetch(
+                    """
+                    SELECT source_uri, title, extraction_status
+                    FROM rag_documents
+                    ORDER BY source_uri;
+                    """
+                )
+            )
+        finally:
+            await conn.close()
+
+    try:
+        rows = asyncio.run(read())
+    except Exception as exc:  # noqa: BLE001 - driver text may carry a DSN
+        raise infrastructure_error(
+            f"the index could not be read ({type(exc).__name__})",
+            hint="check that PostgreSQL is reachable and the role can read "
+            "rag_documents",
+        ) from exc
+
+    import json as _json
+
+    incomplete: list[dict[str, Any]] = []
+    unknown: list[str] = []
+    complete = 0
+    for row in rows:
+        raw = row["extraction_status"]
+        if raw is None:
+            unknown.append(str(row["source_uri"]))
+            continue
+        record = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+        if record.get("complete"):
+            complete += 1
+            continue
+        incomplete.append(
+            {
+                "source_uri": str(row["source_uri"]),
+                "title": row["title"],
+                "incomplete": record.get("incomplete", []),
+                "extractors": record.get("extractors", {}),
+                "figure_count": record.get("figure_count"),
+                "figures_described": record.get("figures_described"),
+            }
+        )
+
+    # A check that cannot see its subject is not a pass. Documents predating
+    # the column read as unknown; some unknowns are expected until they are
+    # re-ingested, but *only* unknowns means this command answered nothing.
+    # An empty read is not a clean bill of health. It means the index holds no
+    # documents, or this connection cannot see them -- and reporting "nothing
+    # incomplete" for a table it never read is the T5.1 shape this command
+    # exists to catch, one layer up.
+    saw_nothing = not rows
+    nothing_recorded = complete == 0 and not incomplete and bool(unknown)
+    ok = not incomplete and not nothing_recorded and not saw_nothing
+    return CommandResult(
+        exit_code=ExitCode.SUCCESS if ok else ExitCode.SEMANTIC_FAILURE,
+        data={
+            "status": "pass" if ok else "fail",
+            "checked": len(rows),
+            "complete": complete,
+            "incomplete_count": len(incomplete),
+            "unknown_count": len(unknown),
+            "documents": incomplete,
+            "unknown": unknown,
+        },
+        summary=(
+            f"{len(rows)} document(s) checked — {complete} complete · "
+            f"{len(incomplete)} incomplete · {len(unknown)} unrecorded"
+            + (
+                " — the index returned no documents at all, so this check "
+                "answered nothing about the corpus"
+                if saw_nothing
+                else " — no document records an extraction outcome, so this "
+                "check answered nothing; re-ingest to record one"
+                if nothing_recorded
+                else " (unrecorded means ingested before the outcome was "
+                "stored, which is unknown rather than healthy)"
+            )
+        ),
+    )
+
+
 def verify_groundedness(
     *, changed_only: bool = False, config: Injected = None
 ) -> CommandResult:
@@ -259,6 +401,11 @@ def verify_groundedness(
 DEFAULT_STAGES: tuple[tuple[str, Any], ...] = (
     ("vault", verify_vault),
     ("secrets", verify_secrets),
+    # One SQL read, and no embedding or model call — so it sits ahead of the
+    # two paid stages, which is what "cheapest first" means here. An index
+    # missing the evidence its sources contain makes a groundedness verdict on
+    # that evidence worth paying for only after it is fixed.
+    ("extraction", verify_extraction),
     ("addresses", verify_addresses),
     ("groundedness", verify_groundedness),
 )

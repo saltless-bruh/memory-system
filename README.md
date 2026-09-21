@@ -2,9 +2,10 @@
 
 SNP is a self-hosted memory system for coding agents and engineering teams.
 Git-backed Markdown pages provide a compact, compiled knowledge map; the same
-PostgreSQL 16 with pgvector index also stores the verbatim source chunks those
-pages were compiled from. Agents call the authenticated Scout server for both:
-`wiki_search` to find candidate pages, then `wiki_read` to read one.
+PostgreSQL 16 with pgvector index also stores source chunks used by the
+operator's compilation pipeline. Agents retrieve wiki pages through
+authenticated Scout: `wiki_search` finds candidates, then `wiki_read` returns
+a canonical page. Source extraction beyond indexed wiki pages is deferred.
 
 > Before operating on the vault, read [`AGENTS.md`](AGENTS.md). It is the
 > authoritative query, page, citation, and PR-first contract. See
@@ -15,8 +16,10 @@ pages were compiled from. Agents call the authenticated Scout server for both:
 
 ```text
 Agent -- authenticated wiki_search/wiki_read --> Scout --> PostgreSQL 16 + pgvector/RLS
-                                                          ^
-raw/ + wiki/ --> sync-job (ingest identity) ----------------+
+                                                  |                 ^
+                                                  v                 |
+                                           canonical replica        |
+raw/ + published wiki/ --> sync-job (ingest identity) ----------------+
 
 Cloud model APIs <-- LiteLLM <-- Scout, sync-job, and authoring utilities
 Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
@@ -62,6 +65,7 @@ the enabled OpenAI, Anthropic, or Gemini routes.
 ```bash
 ./scripts/bootstrap.sh
 # Review .env and the generated .secrets/* files; configure provider keys and auth.
+source .venv/bin/activate
 docker compose up -d --build
 docker compose ps
 ```
@@ -79,6 +83,24 @@ Useful health endpoints:
 `/ready` remains unavailable until a validated commit snapshot has been
 published. A plain browser request to an MCP endpoint is not a valid MCP health
 check.
+
+For the OpenCode rehearsal, run the explicit live preflight from this
+checkout with the intended credentials:
+
+```bash
+docker compose exec -T sync-job test -f /tmp/snp-sync-job/ready
+.venv/bin/python scripts/rehearsal_preflight.py --live --output json
+```
+
+The marker is inside `sync-job`, not the host's `/tmp`. The preflight checks
+required services and migration completion, host-sync readiness, a real
+1024-dimensional embedding, generation, an explicit typed judge response, and
+authenticated Scout search then canonical read. It spends provider requests
+on synthetic probe inputs. Liveness checks alone cannot establish readiness.
+Without `--live`, it makes no network/Docker calls and reports unverified.
+Exit `0` means all checks passed, `1` a live check failed, and `2`
+configuration or unverified status. A passing preflight does not certify
+fresh-agent answers, ingestion, PR review, or edit propagation.
 
 ## Scout authentication and scope
 
@@ -101,6 +123,25 @@ is no caller-wide `all` department.
 Client-specific configuration belongs in [`docs/CONNECT_AGENTS.md`](docs/CONNECT_AGENTS.md).
 Never copy an unauthenticated Scout example into a JWT or static deployment.
 
+For an existing fresh OpenCode project directory, preview and install from
+the system checkout:
+
+```bash
+snpmemory mcp-config --client opencode
+snpmemory install-agent /path/to/project --client opencode --dry-run
+snpmemory install-agent /path/to/project --client opencode
+```
+
+The native config uses `mcp.scout` with `type: "remote"`, the loopback Scout
+URL, and `{env:SCOUT_AUTH_HEADER}`. It includes no local `snpmemory` server.
+Installation copies seven skills to `.opencode/skills/` and governing files
+to `.opencode/snp/`; config `instructions` loads rules and instructions.
+Workflow files do not automatically register slash commands or a plugin.
+The default portable installation and other client exporters retain their
+existing behavior. See the [repeatable OpenCode rehearsal](docs/DEMO_OPENCODE.md)
+for fresh-profile restrictions, discovery checks, real OpenShift content,
+human PR handoff, and the ten-edit latency experiment.
+
 ## Query and authoring workflow
 
 1. Call `wiki_search(query, department, k=5, seen=[])` against authenticated
@@ -111,42 +152,39 @@ Never copy an unauthenticated Scout example into a JWT or static deployment.
    text.
 4. Cite the wiki page's `path` and the heading used.
 
-For a new page, ingest the raw source first, then run the compiler on a feature
-branch. The compiler requires the authorization scope and locator explicitly:
+The operator handles ingestion and compilation in an authorized checkout;
+the fresh retrieval agent does not gain filesystem or database authority.
+Preserve original `raw/` evidence, apply the intended source ACL, and use a
+dedicated source directory to bound the ingestion scan. Review a plan with
+actual source locators before spending generation/judge calls.
 
-```bash
-python scripts/compile_note.py \
-  --path raw/<file> \
-  --title "<Display title>" \
-  --category <concept|technique|entity|playbook> \
-  --dept <redteam|blueteam|ai_eng|infra> \
-  --loc "<source locator>"
+For the rehearsal, `snpmemory compile-plan PLAN --dry-run` prepares grounded
+prose in foreground staging. This compiler dry run can spend model calls and
+write a sibling plan staging directory; it withholds wiki publication. Host
+CLI calls use `LITELLM_BASE_URL=http://127.0.0.1:4000/v1`, and compilation
+uses the gateway alias `LITELLM_LLM_MODEL=snp-llm`. Set these only for the
+CLI child process, as shown in the rehearsal; Compose uses the latter name
+for its upstream provider model. Do not combine compiler `--dry-run` with
+`--background`, whose current CLI path does not forward `dry_run`. The
+legacy publisher regenerates `wiki/index.md`, so use the rehearsal's staged
+candidate handoff instead of publishing through that path.
 
-python scripts/propose_page.py --page wiki/<category>/<slug>.md
-```
+Prepare the final page on a feature branch against the target vault's
+authoritative `SCHEMA.md` before human handoff, preserving authored
+`index.md`, `log.md`, and unrelated work. The legacy compiler omits the H1
+and required V3 metadata, so staged prose needs an explicit authoring pass.
+Check required frontmatter, H1, provenance when sources are declared, and
+`## Cross-References` with at least two real outbound `[[wikilinks]]`.
+Keep sources as provenance and links in the body. The
+automated vault checker is transitional and does not certify the complete
+V3 schema/heading contract; grounding and explicit page review are separate
+requirements. `--skip-groundedness` cannot satisfy the rehearsal gate.
 
-The compiler generates the page body **from the passages its minted address
-retrieves**, not from the parsed file, so generation and the groundedness judge
-read one corpus. It then judges the candidate against those same passages before
-writing, retries once on an unsupported verdict carrying the rejected sentences,
-and refuses to write a page it cannot ground. `--skip-groundedness` bypasses that
-check and prints a warning; its output is unverified.
-
-Two model calls are made per page — metadata (summary/entities/hint) before
-minting, prose after — plus one judge call. Set `LITELLM_JUDGE_MODEL` to a model
-other than `LITELLM_LLM_MODEL`: with both unset the judge is the same model that
-wrote the prose, which self-preference bias makes a weak check.
-
-The compiler uses the repository parser, requires strict model JSON, mints a
-department-scoped address, lints the candidate, and atomically replaces each
-file while restoring prior page/index bytes after ordinary failures. A process
-or host crash between the two replacements is not a cross-file transaction;
-rerun the index gate after recovery. The compiler refuses protected branches.
-The proposer rejects pre-staged work and commits only the named page plus any
-changed generated companions (`wiki/index.md` and `wiki/log.md`). Local
-branch/add/commit failures restore the original branch and unstaged changes;
-an ambiguous push failure preserves the verified local commit for inspection
-and explicit retry.
+The human publishes the reviewed feature branch, opens/reviews the PR, and
+merges it. No exposed agent tool pushes or merges; never push agent changes
+directly to `main` or `master`. Do not commit wiki edits without the requested
+repository action. After the human merge, verify the changed answer through
+Scout search then canonical read in the same authorized scope.
 
 ## Verification
 
@@ -156,8 +194,11 @@ The deterministic suite is offline and prohibits network sockets:
 timeout 300s uv run pytest -m 'not integration' --disable-socket -q
 uv run ruff check .
 uv run mypy scout scripts
-python scripts/gen_index.py --check
 ```
+
+These code checks are not vault retrieval or full V3 page certification.
+Agents use Scout for content verification; the operator/human separately
+reviews the final candidate against its target schema.
 
 Live PostgreSQL and HTTP checks are explicitly marked integration tests. Bring
 up the disposable integration project before running them:
@@ -192,14 +233,14 @@ live one. Earlier revisions of this section pointed the exports at `4000` and
 `8080`, which were the live ports. Selected live tests fail with the names of missing prerequisites;
 they never skip or fall back to repository credentials.
 
-> **Run those exports in a throwaway shell.** The offline suite is not hermetic
-> with respect to `LITELLM_BASE_URL`: with it exported, `tests/test_chunker.py`
-> reports **7 spurious failures** that look like real regressions
-> (`LITELLM_MASTER_KEY` alone is harmless). Re-run the deterministic gate with
-> `env -u LITELLM_BASE_URL -u LITELLM_MASTER_KEY uv run pytest -m 'not integration'
-> --disable-socket -q`, or open a new shell.
+> **Run those exports in a dedicated shell.** The offline test fixture in
+> `tests/conftest.py` now clears `LITELLM_BASE_URL` and `LITELLM_MASTER_KEY`
+> for non-integration tests, preventing the earlier ambient-gateway failures.
+> Keep integration exports out of other operator commands by closing that
+> shell when the live checks finish.
 
-Address verification requires live configured services:
+Legacy address verification is an operator check requiring live services;
+it is not an agent retrieval path or a complete V3 page check:
 
 ```bash
 uv run python scripts/verify_addresses.py
@@ -231,6 +272,8 @@ rolls the wiki back. Scheduled mode starts from a protected base, creates a
 - [`AGENTS.md`](AGENTS.md): authoritative agent operating contract
 - [`docs/runbook.md`](docs/runbook.md): deployment and incident operations
 - [`docs/DEMO.md`](docs/DEMO.md): current end-to-end demonstration
+- [`docs/DEMO_OPENCODE.md`](docs/DEMO_OPENCODE.md): repeatable fresh OpenCode
+  setup, real OpenShift source, human-reviewed PR, and measured edit propagation
 - [`docs/ARCHITECTURE_STATUS.md`](docs/ARCHITECTURE_STATUS.md): active/historical document inventory
 - [`docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md`](docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md):
   active proposal for handling sources that ingest cleanly but are not evidence;

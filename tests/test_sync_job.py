@@ -18,6 +18,8 @@ import pytest
 
 from scout.ingest import DEFAULT_ACL_FILENAME
 from scout.sync_job import (
+    RAW_INGEST_ROUTES,
+    WIKI_INGEST_ROUTES,
     HttpRagIndexer,
     IndexOutcome,
     PgVectorDirectIndexer,
@@ -31,9 +33,15 @@ from scout.sync_job import (
     _PermanentSyncFailure,
     _supervise,
     _wiki_snapshot_commit,
+    probe_gateway,
     sync_once,
     watch,
 )
+
+
+async def _gateway_ready(_routes: object = ()) -> str:
+    """A probe that reports every route answering (readiness is not under test)."""
+    return ""
 
 
 def test_pgvector_direct_indexer_is_a_rag_indexer() -> None:
@@ -356,7 +364,9 @@ async def test_async_main_executes_cold_start_sync(
     monkeypatch.setattr("scout.sync_job.watch", fake_watch)
 
     indexer = FakeIndexer()
-    await _async_main(indexer, Path("raw"), tmp_path / "ready")
+    await _async_main(
+        indexer, Path("raw"), tmp_path / "ready", gateway_probe=_gateway_ready
+    )
 
     assert order == ["sync_once", "watch(initial_sync=False)"]
 
@@ -368,7 +378,7 @@ async def test_async_main_clears_readiness_on_cold_start_failure(
     marker.write_text("stale", encoding="utf-8")
     indexer = FakeIndexer(IndexOutcome(False, "invalid", retryable=False))
     with pytest.raises(SystemExit) as caught:
-        await _async_main(indexer, tmp_path, marker)
+        await _async_main(indexer, tmp_path, marker, gateway_probe=_gateway_ready)
     assert caught.value.code == 1
     assert not marker.exists()
 
@@ -387,7 +397,7 @@ async def test_async_main_clears_readiness_on_watched_failure(
 
     monkeypatch.setattr("scout.sync_job.watch", failing_watch)
     with pytest.raises(SystemExit) as caught:
-        await _async_main(FakeIndexer(), tmp_path, marker)
+        await _async_main(FakeIndexer(), tmp_path, marker, gateway_probe=_gateway_ready)
     assert caught.value.code == 1
     assert not marker.exists()
 
@@ -433,7 +443,13 @@ async def test_cold_start_retries_a_retryable_failure_instead_of_exiting(
     monkeypatch.setattr("scout.sync_job.watch", stop_watch)
 
     await _async_main(
-        FakeIndexer(), tmp_path, marker, base_delay=5.0, max_delay=300.0, sleep=record
+        FakeIndexer(),
+        tmp_path,
+        marker,
+        base_delay=5.0,
+        max_delay=300.0,
+        sleep=record,
+        gateway_probe=_gateway_ready,
     )
 
     assert len(seen_marker) == 3
@@ -466,6 +482,7 @@ async def test_cold_start_backoff_is_capped(
             base_delay=5.0,
             max_delay=60.0,
             sleep=record,
+            gateway_probe=_gateway_ready,
         )
     assert delays == [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0, 60.0]
 
@@ -481,7 +498,9 @@ async def test_cold_start_still_exits_on_a_non_retryable_failure(
         raise AssertionError("a permanent failure must not be retried")
 
     with pytest.raises(SystemExit) as caught:
-        await _async_main(indexer, tmp_path, marker, sleep=never)
+        await _async_main(
+            indexer, tmp_path, marker, sleep=never, gateway_probe=_gateway_ready
+        )
     assert caught.value.code == 1
     assert not marker.exists()
 
@@ -524,7 +543,13 @@ async def test_a_retryable_watched_failure_is_retried_not_fatal(
 
     monkeypatch.setattr("scout.sync_job.watch", flaky_watch)
     await _async_main(
-        FakeIndexer(), tmp_path, marker, base_delay=5.0, max_delay=300.0, sleep=record
+        FakeIndexer(),
+        tmp_path,
+        marker,
+        base_delay=5.0,
+        max_delay=300.0,
+        sleep=record,
+        gateway_probe=_gateway_ready,
     )
 
     assert len(watches) == 2
@@ -748,15 +773,55 @@ async def test_wiki_indexer_reports_a_transient_fault_as_retryable(
 async def test_wiki_indexer_reports_a_config_fault_as_permanent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A missing vault is a configuration fault; waiting cannot fix it."""
+    """A missing vault is a configuration fault; waiting cannot fix it.
+
+    The vault directory must really be absent. This test used to point at
+    `tmp_path`, which exists, so it asserted "permanent" for a vault that was
+    present and would have passed whatever the classification did with a
+    readable tree.
+    """
 
     async def boom(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
         raise FileNotFoundError("no such vault")
 
     monkeypatch.setattr("scout.sync_job.ingest_wiki", boom)
-    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+    absent = tmp_path / "vault-that-is-not-there"
+    outcome = await WikiIndexer(wiki_dir=absent).index()
     assert outcome.ok is False
     assert outcome.retryable is False
+    assert "vault unreadable" in outcome.status
+
+
+@pytest.mark.asyncio
+async def test_a_page_vanishing_mid_walk_is_transient_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A snapshot swap under a live walk must not stop the watcher for good.
+
+    `host-sync` publishes by materialising `snapshots/<commit>/` and retargeting
+    `current`, and a vault page can be deleted while the cycle that listed it is
+    still reading. Measured 2026-09-21: the propagation gate deleted its own
+    probe page mid-cycle, the indexer called the resulting FileNotFoundError a
+    configuration fault, and the vault watcher stopped permanently -- the
+    service read unhealthy until a human restarted the container, for an event
+    the next cycle would have absorbed.
+    """
+
+    async def vanished(wiki_dir: Path, **kwargs: object) -> list[dict[str, object]]:
+        raise FileNotFoundError(
+            f"[Errno 2] No such file or directory: "
+            f"'{wiki_dir}/V3-PROP-fff5aa28468342f3baeb9bb47b74955d.md'"
+        )
+
+    monkeypatch.setattr("scout.sync_job.ingest_wiki", vanished)
+    outcome = await WikiIndexer(wiki_dir=tmp_path).index()
+
+    assert outcome.ok is False
+    assert outcome.retryable is True, (
+        "a file that vanished inside a readable vault is a race, not a "
+        "configuration fault"
+    )
+    assert "changed under the walk" in outcome.status
 
 
 @pytest.mark.asyncio
@@ -849,6 +914,7 @@ async def test_async_main_supervises_both_corpora_when_wiki_dir_is_set(
         raw_dir=tmp_path / "raw",
         wiki_dir=tmp_path / "wiki",
         readiness_path=tmp_path / "ready",
+        gateway_probe=_gateway_ready,
     )
     assert supervised == [tmp_path / "raw", tmp_path / "wiki"]
 
@@ -889,6 +955,7 @@ async def test_the_vault_watcher_follows_the_publication_pointer(
         wiki_dir=tmp_path / "replica" / "current" / "wiki",
         wiki_watch_dir=tmp_path / "replica",
         readiness_path=tmp_path / "ready",
+        gateway_probe=_gateway_ready,
     )
     assert watched == [
         (tmp_path / "raw", True),
@@ -921,6 +988,7 @@ async def test_the_vault_indexer_still_reads_through_the_pointer(
         wiki_dir=wiki,
         wiki_watch_dir=tmp_path / "replica",
         readiness_path=tmp_path / "ready",
+        gateway_probe=_gateway_ready,
     )
     assert built == [wiki]
 
@@ -973,6 +1041,7 @@ async def test_async_main_watches_only_raw_when_wiki_dir_is_absent(
         raw_dir=tmp_path / "raw",
         wiki_dir=None,
         readiness_path=tmp_path / "ready",
+        gateway_probe=_gateway_ready,
     )
     assert supervised == [tmp_path / "raw"]
 
@@ -1155,5 +1224,184 @@ async def test_the_process_exits_once_every_watcher_has_failed(
             raw_dir=tmp_path / "raw",
             wiki_dir=tmp_path / "wiki",
             readiness_path=tmp_path / "ready",
+            gateway_probe=_gateway_ready,
         )
     assert caught.value.code == 1
+
+
+# ── gateway readiness (leaf-3.3) ─────────────────────────────────────────────
+
+
+async def test_gateway_readiness_holds_the_cold_start_until_the_route_answers(
+    tmp_path: Path,
+) -> None:
+    """Nothing is parsed while the gateway is unreachable.
+
+    An ingest that runs inside the gateway's boot window does not fail loudly;
+    it writes a corpus missing whatever needed the model and reports
+    `ingested_ok`. Measured 2026-09-15: seven figures of the one PDF in the
+    corpus, lost exactly this way, with `sync-job` reporting success.
+    """
+    marker = tmp_path / "ready"
+    indexer = FakeIndexer()
+    delays: list[float] = []
+    probed: list[int] = []
+    indexed_at_probe: list[int] = []
+
+    async def refuses_twice() -> str:
+        probed.append(1)
+        indexed_at_probe.append(indexer.calls)
+        if len(probed) <= 2:
+            return "snp-vlm: gateway unreachable (ConnectError: [Errno 111])"
+        return ""
+
+    async def record(delay: float) -> None:
+        delays.append(delay)
+
+    async def stop_watch(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    with mock.patch("scout.sync_job.watch", stop_watch):
+        await _supervise(
+            indexer,
+            tmp_path,
+            marker,
+            base_delay=5.0,
+            max_delay=300.0,
+            sleep=record,
+            gateway_probe=refuses_twice,
+        )
+
+    # The corpus was untouched for as long as the gateway was not answering.
+    assert indexed_at_probe == [0, 0, 0], (
+        "a document was parsed before the gateway answered"
+    )
+    assert indexer.calls == 1, "the cycle must run once, after the wait"
+    assert delays == [5.0, 10.0], "the wait must back off rather than spin"
+    assert marker.exists(), "readiness is published once the cycle succeeds"
+
+
+async def test_gateway_readiness_is_a_call_not_an_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured base URL is not evidence that anything is listening.
+
+    `depends_on: condition: service_healthy` is applied on `docker compose up`
+    and not when the daemon restarts every container together, so the variable
+    can be perfectly set while the gateway is still dead.
+    """
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-test")
+    attempted: list[httpx.Request] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        attempted.append(request)
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    reason = await probe_gateway(
+        RAW_INGEST_ROUTES, transport=httpx.MockTransport(refuse)
+    )
+
+    assert attempted, "readiness was decided without calling the gateway"
+    assert str(attempted[0].url) == "http://litellm:4000/health?model=snp-embed"
+    assert attempted[0].headers["authorization"] == "Bearer sk-test"
+    assert "unreachable" in reason
+
+
+async def test_gateway_readiness_covers_the_route_the_figure_path_calls() -> None:
+    """`snp-vlm` has to be waited for, not just `snp-embed`.
+
+    The compose healthcheck gates on `snp-embed` and `snp-llm` only, with the
+    recorded reason that nothing consumed `snp-vlm` yet. The figure describer
+    does, so a gateway that is "healthy" by that definition can still be unable
+    to describe a single figure.
+    """
+    asked: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        group = request.url.params["model"]
+        asked.append(str(group))
+        if group == "snp-vlm":
+            return httpx.Response(503, json={"error": "no healthy deployment"})
+        return httpx.Response(200, json={"healthy_count": 1, "unhealthy_count": 0})
+
+    reason = await probe_gateway(
+        RAW_INGEST_ROUTES,
+        base_url="http://litellm:4000/v1",
+        api_key="sk-test",
+        transport=httpx.MockTransport(answer),
+    )
+    assert "snp-vlm" in RAW_INGEST_ROUTES
+    assert "snp-vlm" not in WIKI_INGEST_ROUTES, (
+        "the Markdown corpus must not be gated on a route it never calls"
+    )
+    assert asked == ["snp-embed", "snp-vlm"]
+    assert reason == "snp-vlm: no healthy deployment"
+
+
+async def test_gateway_readiness_proceeds_once_every_route_answers() -> None:
+    """A healthy gateway is reported ready, so the probe cannot stall ingestion."""
+
+    def healthy(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"healthy_count": 2, "unhealthy_count": 0})
+
+    reason = await probe_gateway(
+        RAW_INGEST_ROUTES,
+        base_url="http://litellm:4000/v1",
+        api_key="sk-test",
+        transport=httpx.MockTransport(healthy),
+    )
+    assert reason == ""
+
+
+async def test_gateway_readiness_reports_an_unhealthy_deployment_as_not_ready() -> None:
+    """200 with a dead deployment is the case a liveliness probe misses."""
+
+    def degraded(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "healthy_count": 0,
+                "unhealthy_count": 1,
+                "unhealthy_endpoints": [{"model": "snp-embed"}],
+            },
+        )
+
+    reason = await probe_gateway(
+        ("snp-embed",),
+        base_url="http://litellm:4000/v1",
+        api_key="sk-test",
+        transport=httpx.MockTransport(degraded),
+    )
+    assert reason.startswith("snp-embed: ")
+    assert reason != ""
+
+
+async def test_gateway_readiness_is_skipped_when_no_gateway_is_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no `LITELLM_BASE_URL` there is nothing to wait for.
+
+    Waiting on an unconfigured gateway would turn a configuration fault into a
+    silent forever-wait — the same shape of failure this wait exists to remove.
+    The first embed call fails loudly instead, and the retryable backoff that
+    already existed handles it.
+    """
+    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
+    indexer = FakeIndexer()
+    probed: list[object] = []
+
+    async def never_called(*args: object) -> str:
+        probed.append(args)
+        return "should not be consulted"
+
+    monkeypatch.setattr("scout.sync_job.probe_gateway", never_called)
+
+    async def stop_watch(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr("scout.sync_job.watch", stop_watch)
+    await _async_main(indexer, tmp_path, tmp_path / "ready")
+
+    assert probed == []
+    assert indexer.calls == 1

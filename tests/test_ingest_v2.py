@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -333,3 +334,130 @@ async def test_reconcile_deletions() -> None:
             assert "doc1.md" in purged[0]
         finally:
             await conn.close()
+
+
+# ── extraction outcome, recorded per document (leaf-3.2 · raw-tier visibility) ─
+
+
+@pytest.mark.asyncio
+async def test_ingest_records_what_the_parse_actually_extracted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The document row carries the outcome, not only the capability.
+
+    `capability_fingerprint` is byte-identical whether the describer answered or
+    refused — by design, since the extractor was available either way. Without a
+    separate outcome the index cannot answer "did this document arrive whole?",
+    which is how a 7-figure paper sat in the corpus with zero figures described
+    and nothing said so.
+    """
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"%PDF-1.4 fake")
+
+    degraded = ParsedDocument(
+        source_uri="raw/papers/paper.pdf",
+        title="Paper",
+        sections=[ParsedSection(loc="p.1", text="body " * 200)],
+        metadata={
+            "figures_status": "failed",
+            "figure_count": 7,
+            "figures_described": 0,
+            "tables_status": "ok",
+        },
+    )
+    monkeypatch.setattr("scout.ingest.parse_file", lambda *_a, **_k: degraded)
+
+    written: list[tuple[str, Any]] = []
+
+    class RecordingConnection:
+        @asynccontextmanager
+        async def transaction(self) -> AsyncIterator[None]:
+            yield
+
+        async def fetchrow(self, query: str, *args: object) -> dict[str, int]:
+            if "INSERT INTO rag_documents" in query:
+                written.append((query, args))
+            return {"doc_id": 1}
+
+        async def execute(self, _query: str, *_args: object) -> str:
+            return "OK"
+
+        async def close(self) -> None:
+            return None
+
+    result = await ingest_document(
+        source,
+        ["infra"],
+        conn=RecordingConnection(),
+        embedder=FakeEmbedder(),
+        base_dir=tmp_path,
+    )
+
+    assert written, "no document row was written"
+    query, args = written[0]
+    assert "extraction_status" in query
+    recorded = json.loads(str(args[4]))
+    assert recorded["complete"] is False
+    assert recorded["incomplete"] == ["figures"]
+    assert recorded["extractors"] == {"figures": "failed", "tables": "ok"}
+    assert recorded["figure_count"] == 7
+    assert recorded["figures_described"] == 0
+
+    # The caller learns it too, without having to query the index back.
+    assert result["status"] == "ingested_ok"
+    assert result["extraction_status"]["complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_whole_document_records_a_complete_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard must not call every document degraded, or it says nothing."""
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"%PDF-1.4 fake")
+    whole = ParsedDocument(
+        source_uri="raw/papers/paper.pdf",
+        title="Paper",
+        sections=[ParsedSection(loc="p.1", text="body " * 200)],
+        metadata={
+            "figures_status": "ok",
+            "figure_count": 7,
+            "figures_described": 7,
+            "tables_status": "no_evidence",
+        },
+    )
+    monkeypatch.setattr("scout.ingest.parse_file", lambda *_a, **_k: whole)
+
+    class Connection:
+        @asynccontextmanager
+        async def transaction(self) -> AsyncIterator[None]:
+            yield
+
+        async def fetchrow(self, _query: str, *_args: object) -> dict[str, int]:
+            return {"doc_id": 1}
+
+        async def execute(self, _query: str, *_args: object) -> str:
+            return "OK"
+
+        async def close(self) -> None:
+            return None
+
+    result = await ingest_document(
+        source, ["infra"], conn=Connection(), embedder=FakeEmbedder(), base_dir=tmp_path
+    )
+    assert result["extraction_status"] == {
+        "extractors": {"figures": "ok", "tables": "no_evidence"},
+        "figure_count": 7,
+        "figures_described": 7,
+        "complete": True,
+    }
+
+
+def test_a_document_with_nothing_structural_is_complete_by_construction() -> None:
+    """Markdown loses nothing, so it must not be reported as degraded."""
+    from scout.parsers import extraction_state
+
+    assert extraction_state({"type": "markdown"}) == {
+        "extractors": {},
+        "complete": True,
+    }

@@ -113,6 +113,28 @@ async def group_corpus_tier() -> str:
         # sparse arms both rank it highly. Derived from the corpus rather than
         # hardcoded, so it keeps working when the raw tier changes.
         hint = " ".join(raw_text.split())[:200]
+
+        # A second subject, drawn from the WIKI tier, to prove the filter passes
+        # wiki content through. The exclusion half and the liveness half must not
+        # share a query -- see the assertion below for why.
+        wiki_row = await conn.fetchrow(
+            """
+            SELECT d.source_uri, c.chunk_text
+            FROM rag_chunks c
+            JOIN rag_documents d ON d.doc_id = c.doc_id
+            WHERE c.metadata->>'corpus' = 'wiki'
+            ORDER BY length(c.chunk_text) DESC
+            LIMIT 1
+            """
+        )
+        require(
+            wiki_row is not None,
+            "no wiki-corpus document in the live index, so the filter's "
+            "liveness cannot be proven and an absence downstream proves nothing",
+        )
+        wiki_uri: str = wiki_row["source_uri"]
+        wiki_hint = " ".join(wiki_row["chunk_text"].split())[:200]
+
         scope = Scope(departments=frozenset(CANONICAL_DEPARTMENTS))
 
         # Positive control. If the unfiltered path cannot reach the raw
@@ -135,15 +157,39 @@ async def group_corpus_tier() -> str:
         filtered = PgVectorRlsBackend(corpus="wiki")
         hits_filtered = await filtered.retrieve(hint, scope=scope, k=10)
         require(
-            len(hits_filtered) > 0,
-            "the wiki-filtered backend returned nothing at all; an exclusion "
-            "that hides the whole corpus is a broken filter, not a tier",
-        )
-        require(
             all(c.file_path != raw_uri for c in hits_filtered),
             f"corpus filter failed: wiki_search surfaced {raw_uri}",
         )
 
+        # Liveness, proven on its own subject rather than on the raw hint.
+        #
+        # This assertion used to read `len(hits_filtered) > 0` -- the filtered
+        # result of the RAW hint had to be nonempty. That is unsound, and it
+        # failed on a healthy system: `retrieve()` selects DISTINCT ON (doc_id)
+        # (pgvector.py:170), and the raw document this gate picks is a 110-chunk
+        # PDF, so every nearest neighbour of its own text collapses to that one
+        # document. Filtering it out then correctly yields zero, and the gate
+        # called that "a broken filter". Measured 2026-09-15: a wiki-native
+        # query returned 10 hits under the same filter in the same instant.
+        #
+        # Liveness therefore needs a subject the wiki tier actually contains.
+        hits_live = await filtered.retrieve(wiki_hint, scope=scope, k=10)
+        require(
+            len(hits_live) > 0,
+            "the wiki-filtered backend returned nothing for a query drawn from "
+            "wiki content itself; an exclusion that hides the whole corpus is a "
+            "broken filter, not a tier",
+        )
+        require(
+            any(c.file_path == wiki_uri for c in hits_live),
+            f"the wiki tier did not reach {wiki_uri}, a document it contains, "
+            f"from that document's own text; got {sorted({c.file_path for c in hits_live})}",
+        )
+
+        print(
+            f"  excluded {raw_uri} from the wiki tier; "
+            f"reached {wiki_uri} under the same filter"
+        )
         return "CORPUS TIER VERIFIED"
 
     finally:
@@ -367,6 +413,7 @@ async def group_shared_retrieve_blast_radius() -> str:
         )
 
         hint = " ".join(raw_text.split())[:200]
+
         scope = Scope(departments=frozenset(CANONICAL_DEPARTMENTS))
 
         # The default construction: exactly what the five compile-pipeline

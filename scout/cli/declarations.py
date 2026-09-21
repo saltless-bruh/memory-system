@@ -159,6 +159,43 @@ command(
     ),
 )
 command(
+    "verify-extraction",
+    "Name every indexed document that did not arrive whole.",
+    "scout.cli.commands.verify:verify_extraction",
+    outcomes=_SEMANTIC,
+    errors=(ErrorKind.INFRASTRUCTURE,),
+    example=("-o", "json"),
+    output_fields=(
+        _STATUS,
+        FieldSpec("checked", "integer"),
+        FieldSpec("complete", "integer"),
+        FieldSpec("incomplete_count", "integer"),
+        FieldSpec(
+            "unknown_count",
+            "integer",
+            description="Ingested before the outcome was recorded — never a pass.",
+        ),
+        FieldSpec(
+            "documents",
+            "array",
+            items=FieldSpec(
+                "document",
+                "object",
+                fields=(
+                    FieldSpec("source_uri", "string"),
+                    FieldSpec("title", "string", nullable=True),
+                    FieldSpec(
+                        "incomplete", "array", items=FieldSpec("extractor", "string")
+                    ),
+                    FieldSpec("figure_count", "integer", nullable=True),
+                    FieldSpec("figures_described", "integer", nullable=True),
+                ),
+            ),
+        ),
+        FieldSpec("unknown", "array", items=FieldSpec("source_uri", "string")),
+    ),
+)
+command(
     "verify-groundedness",
     "Judge each page's body against the sources it cites.",
     "scout.cli.commands.verify:verify_groundedness",
@@ -320,7 +357,7 @@ command(
             "--client",
             "string",
             required=True,
-            enum=("cursor", "vscode", "claude", "gemini"),
+            enum=("cursor", "vscode", "claude", "gemini", "opencode"),
             description="Which client's configuration dialect to emit.",
         ),
         ArgSpec(
@@ -344,7 +381,11 @@ command(
     ),
     example=("--client", "claude", "-o", "json"),
     output_fields=(
-        FieldSpec("client", "string", enum=("cursor", "vscode", "claude", "gemini")),
+        FieldSpec(
+            "client",
+            "string",
+            enum=("cursor", "vscode", "claude", "gemini", "opencode"),
+        ),
         FieldSpec("servers", "array", items=FieldSpec("server", "string")),
         FieldSpec(
             "default_path",
@@ -367,7 +408,7 @@ command(
 )
 command(
     "install-agent",
-    "Install the portable agent package into a project directory.",
+    "Install the SNP agent package into a project directory for a target client.",
     "scout.cli.commands.agent:install_agent",
     effect=Effect.WRITE,
     args=(
@@ -376,6 +417,13 @@ command(
             "path",
             default=".",
             description="The project to install into. Must already exist.",
+        ),
+        ArgSpec(
+            "--client",
+            "string",
+            default="portable",
+            enum=("portable", "opencode"),
+            description="Install the portable .agent layout or native OpenCode layout.",
         ),
         ArgSpec(
             "--dry-run",
@@ -387,18 +435,23 @@ command(
             "--confirm",
             "boolean",
             default=False,
-            description="Required when the target already has an .agent/ directory.",
+            description=(
+                "Required for an existing portable .agent/ directory or SNP-owned "
+                "OpenCode targets. Custom OpenCode content is preserved."
+            ),
         ),
     ),
     confirmation_bypass_arg="--confirm",
     errors=(
         ErrorKind.INPUT_VALIDATION,
         ErrorKind.CONFIRMATION_REQUIRED,
+        ErrorKind.CONFLICT,
         ErrorKind.INFRASTRUCTURE,
     ),
     example=(".", "--dry-run"),
     output_fields=(
         FieldSpec("status", "string", enum=("installed", "dry_run")),
+        FieldSpec("client", "string", enum=("portable", "opencode")),
         FieldSpec("target", "string"),
         FieldSpec(
             "package", "string", description="The plugin directory that was installed."
@@ -407,7 +460,7 @@ command(
             "servers",
             "array",
             items=FieldSpec("server", "string"),
-            description="MCP servers in the target's .mcp.json after installing.",
+            description="MCP servers in the target client's config after installing.",
         ),
         FieldSpec(
             "would_write",

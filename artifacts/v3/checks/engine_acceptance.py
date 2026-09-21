@@ -1417,9 +1417,41 @@ async def _assert_ingest_integrity(conn: _Fetches) -> str:
     ]
     require(not short, f"a document describes fewer figures than it found: {short}")
 
+    # The census above answers "is anything degraded?" but not "which document
+    # do I re-ingest?" -- `{'figures_status': {'partial': 110}}` names a chunk
+    # count, not a source. `rag_documents.extraction_status` (migration 008)
+    # records the outcome per document, so the answer can be a list of paths.
+    has_column = await conn.fetch(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = "
+        "'rag_documents' AND column_name = 'extraction_status';"
+    )
+    require(
+        bool(has_column),
+        "rag_documents.extraction_status is absent, so this gate cannot name "
+        "the documents that lost evidence; apply migration "
+        "008_document_extraction_status.sql. A gate that cannot see its "
+        "subject is not a pass",
+    )
+    named = await conn.fetch(
+        "SELECT source_uri, extraction_status FROM rag_documents "
+        "WHERE extraction_status IS NOT NULL "
+        "AND extraction_status->>'complete' <> 'true' ORDER BY source_uri;"
+    )
+    require(
+        not named,
+        "document(s) recorded an incomplete extraction: "
+        + ", ".join(f"{r['source_uri']} ({r['extraction_status']})" for r in named),
+    )
+    unrecorded = await conn.fetch(
+        "SELECT count(*) AS n FROM rag_documents WHERE extraction_status IS NULL;"
+    )
+    pending = int(unrecorded[0]["n"]) if unrecorded else 0
+
     print(
         f"  extractor states {census}; figure coverage "
-        f"{[(r['found'], r['described']) for r in coverage]}"
+        f"{[(r['found'], r['described']) for r in coverage]}; "
+        f"documents with no recorded outcome: {pending} "
+        "(ingested before migration 008; unknown, not healthy)"
     )
     return "INGEST INTEGRITY VERIFIED"
 

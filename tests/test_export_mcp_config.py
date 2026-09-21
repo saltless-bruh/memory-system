@@ -6,13 +6,16 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import scripts.export_mcp_config as exporter
 
+LEGACY_CLIENTS = ("cursor", "vscode", "claude", "gemini")
 
-@pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
+
+@pytest.mark.parametrize("client", LEGACY_CLIENTS)
 def test_generated_config_exposes_only_v3_servers_and_authenticates_scout(
     client: str,
 ) -> None:
@@ -145,7 +148,7 @@ def test_all_writes_every_client_and_preserves_unrelated_servers(
     assert exporter.main(["--all"]) == 0
     for client, path_string in paths.items():
         written = json.loads(Path(path_string).read_text(encoding="utf-8"))
-        server_key = "servers" if client == "vscode" else "mcpServers"
+        server_key = {"vscode": "servers", "opencode": "mcp"}.get(client, "mcpServers")
         assert "snp-wiki" not in written[server_key]
         assert (
             written[server_key]["scout"]
@@ -167,8 +170,9 @@ def test_claude_uses_portable_claude_code_project_config() -> None:
     assert exporter.CLIENT_CONFIG_PATHS["claude"] == ".mcp.json"
 
 
+@pytest.mark.parametrize("fail_at", [2, len(exporter.SUPPORTED_CLIENTS)])
 def test_all_client_write_failure_rolls_back_every_destination(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail_at: int
 ) -> None:
     paths = {
         client: str(tmp_path / f"{client}.json")
@@ -184,14 +188,14 @@ def test_all_client_write_failure_rolls_back_every_destination(
     real_replace = os.replace
     calls = 0
 
-    def fail_second_replace(source: str | Path, destination: str | Path) -> None:
+    def fail_replace(source: str | Path, destination: str | Path) -> None:
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if calls == fail_at:
             raise OSError("synthetic destination failure")
         real_replace(source, destination)
 
-    monkeypatch.setattr("scripts.export_mcp_config.os.replace", fail_second_replace)
+    monkeypatch.setattr("scripts.export_mcp_config.os.replace", fail_replace)
 
     assert exporter.main(["--all"]) == 1
     assert {target: Path(target).read_bytes() for target in paths.values()} == originals
@@ -212,11 +216,192 @@ def test_unknown_client_rejected() -> None:
         exporter.generate_config("unknown")
 
 
+def test_opencode_uses_native_authenticated_scout_only(tmp_path: Path) -> None:
+    assert exporter.CLIENT_CONFIG_PATHS["opencode"] == "opencode.json"
+    assert exporter.generate_config("opencode", root=tmp_path) == {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            "scout": {
+                "type": "remote",
+                "url": "http://127.0.0.1:8080/mcp",
+                "oauth": False,
+                "timeout": 15000,
+                "headers": {"Authorization": "{env:SCOUT_AUTH_HEADER}"},
+            }
+        },
+    }
+
+
+def test_opencode_merge_preserves_settings_and_removes_managed_local_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "opencode.json"
+    secret = "Bearer secret-for-someone-else"
+    unrelated = {
+        "type": "remote",
+        "url": "http://other.example/mcp",
+        "headers": {"Authorization": secret},
+    }
+    target.write_text(
+        json.dumps(
+            {
+                "$schema": "https://example.com/custom-schema.json",
+                "model": "custom/model",
+                "instructions": ["custom-rules.md"],
+                "permission": {"bash": "ask"},
+                "mcp": {
+                    "other": unrelated,
+                    "disabled": {"enabled": False},
+                    "scout": {"type": "local", "command": ["old-command"]},
+                    "snpmemory": {"type": "local", "command": ["snpmemory", "mcp"]},
+                    "snp-wiki": {"type": "remote", "url": "http://retired.example"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert exporter.main(["--client", "opencode"]) == 0
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert written["$schema"] == "https://example.com/custom-schema.json"
+    assert written["model"] == "custom/model"
+    assert written["instructions"] == ["custom-rules.md"]
+    assert written["permission"] == {"bash": "ask"}
+    assert set(written["mcp"]) == {"scout", "other", "disabled"}
+    assert written["mcp"]["other"] == unrelated
+    assert written["mcp"]["disabled"] == {"enabled": False}
+    assert written["mcp"]["scout"]["type"] == "remote"
+    output = capsys.readouterr()
+    assert secret not in output.out + output.err
+    # Repeated export does not accumulate or reorder managed entries.
+    before = target.read_bytes()
+    assert exporter.main(["--client", "opencode"]) == 0
+    assert target.read_bytes() == before
+    output = capsys.readouterr()
+    assert secret not in output.out + output.err
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        b"",
+        b" \n",
+        b"\v{}",
+        b"[]",
+        b"null",
+        b'{"mcp": null}',
+        b'{"mcp": []}',
+        b'{"mcp": false}',
+        b'{"mcp": "Bearer sensitive-value"}',
+        b'{"mcp": {}, "mcp": {}}',
+        b'{"temperature": NaN}',
+        b'{"temperature": Infinity}',
+        b'{"temperature": 1e9999}',
+        b'{"setting": "Bearer sensitive-value", invalid}',
+    ],
+)
+def test_malformed_opencode_aborts_all_exports_before_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    original: bytes,
+) -> None:
+    paths = {
+        client: str(tmp_path / f"{client}.json")
+        for client in exporter.SUPPORTED_CLIENTS
+    }
+    monkeypatch.setattr(exporter, "CLIENT_CONFIG_PATHS", paths)
+    originals = {}
+    for client, target in paths.items():
+        content = original if client == "opencode" else b'{"setting": "keep"}\n'
+        Path(target).write_bytes(content)
+        originals[target] = content
+
+    assert exporter.main(["--all"]) == 1
+    assert {target: Path(target).read_bytes() for target in paths.values()} == originals
+    assert not list(tmp_path.glob("*.tmp"))
+    output = capsys.readouterr()
+    assert "sensitive-value" not in output.out + output.err
+
+
+@pytest.mark.parametrize("json_exists", [False, True])
+def test_existing_jsonc_blocks_all_exports_without_being_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    json_exists: bool,
+) -> None:
+    paths = {
+        client: str(tmp_path / f"{client}.json")
+        for client in exporter.SUPPORTED_CLIENTS
+    }
+    monkeypatch.setattr(exporter, "CLIENT_CONFIG_PATHS", paths)
+    jsonc = tmp_path / "opencode.jsonc"
+    jsonc.write_text("// Bearer private-jsonc-value\n{}\n", encoding="utf-8")
+    target = Path(paths["opencode"])
+    if json_exists:
+        target.write_text('{"model":"keep"}', encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    real_read_text = Path.read_text
+
+    def refuse_jsonc_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        assert path != jsonc, "JSONC conflict detection must not read its contents"
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse_jsonc_read)
+    assert exporter.main(["--all"]) == 1
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+    output = capsys.readouterr()
+    assert "opencode.jsonc" in output.err
+    assert "private-jsonc-value" not in output.out + output.err
+
+
+def test_dangling_jsonc_symlink_is_also_a_conflict(tmp_path: Path) -> None:
+    sibling = tmp_path / "opencode.jsonc"
+    try:
+        sibling.symlink_to(tmp_path / "missing.jsonc")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this platform")
+    with pytest.raises(exporter.ConfigTargetConflict):
+        exporter.validate_config_target("opencode", tmp_path / "opencode.json")
+    assert sibling.is_symlink()
+
+
+def test_print_opencode_does_not_inspect_existing_configs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "opencode.json").write_text("not JSON", encoding="utf-8")
+    (tmp_path / "opencode.jsonc").write_text("// keep\n{}", encoding="utf-8")
+    assert exporter.main(["--client", "opencode", "--print"]) == 0
+    assert json.loads(capsys.readouterr().out)["mcp"]["scout"]["oauth"] is False
+
+
+def test_export_can_write_without_posix_only_fchmod(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    assert exporter.main(["--client", "opencode"]) == 0
+    target = tmp_path / "opencode.json"
+    assert (
+        json.loads(target.read_text(encoding="utf-8"))["mcp"]["scout"]["type"]
+        == "remote"
+    )
+    if os.name == "posix":
+        assert target.stat().st_mode & 0o777 == 0o600
+
+
 # ── the local stdio server (T2.1) ─────────────────────────────────────────
 
 
-@pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
-def test_every_client_gets_exactly_the_v3_servers(client: str) -> None:
+@pytest.mark.parametrize("client", LEGACY_CLIENTS)
+def test_legacy_clients_get_exactly_the_v3_servers(client: str) -> None:
     """An installed agent reaches V3 retrieval and the authoring path.
 
     The retired basic-memory server must not be scaffolded after Scout proves
@@ -227,7 +412,7 @@ def test_every_client_gets_exactly_the_v3_servers(client: str) -> None:
     assert set(servers) == {"scout", exporter.LOCAL_SERVER_NAME}
 
 
-@pytest.mark.parametrize("client", exporter.SUPPORTED_CLIENTS)
+@pytest.mark.parametrize("client", LEGACY_CLIENTS)
 def test_the_local_server_is_stdio_with_its_checkout_pinned(client: str) -> None:
     server_key = "servers" if client == "vscode" else "mcpServers"
     local = exporter.generate_config(client)[server_key][exporter.LOCAL_SERVER_NAME]

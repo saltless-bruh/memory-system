@@ -13,6 +13,7 @@ environment you are not in cannot be produced honestly, so they are not.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,28 @@ def main(argv: list[str] | None = None) -> int:
     source = repo_root / SOURCE_URI
     if not source.exists():
         print(f"corpus document missing: {source}", file=sys.stderr)
+        return 2
+
+    # A configured vision route makes this digest non-reproducible: the figure
+    # sections would carry model prose, which differs between two runs of the
+    # same parser over the same bytes. Every recorded golden so far is a
+    # route-less parse (`figures_status: unconfigured`, figures counted and not
+    # described), and the key does not distinguish the two, so recording with a
+    # route would silently replace a stable expectation with a random one.
+    configured = [
+        name
+        for name in ("LITELLM_BASE_URL", "LITELLM_MASTER_KEY")
+        if (os.environ.get(name) or "").strip()
+    ]
+    if configured and "--with-vision-route" not in (argv or sys.argv[1:]):
+        print(
+            "refusing to record with a vision route configured "
+            f"({', '.join(configured)}): the figure descriptions are model "
+            "output and would make this digest unreproducible.\n"
+            "  env -u LITELLM_BASE_URL -u LITELLM_MASTER_KEY "
+            "uv run python -m scout.parser_golden_record",
+            file=sys.stderr,
+        )
         return 2
 
     document = parse_pdf(source, SOURCE_URI)

@@ -14,14 +14,17 @@ import logging
 import mimetypes
 import os
 import tempfile
+import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from scout.gateway_retry import urlopen_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,63 @@ logger = logging.getLogger(__name__)
 VLM_STATUS_OK = "ok"
 VLM_STATUS_UNAVAILABLE = "unavailable"
 VLM_STATUS_UNCONFIGURED = "unconfigured"
+
+#: Values ``_pdf_figure_sections`` writes to ``metadata["figures_status"]``.
+#:
+#: ``FIGURES_FAILED`` exists because 0-of-7 and 6-of-7 were both ``partial``
+#: until 2026-09-21, and they are not the same statement. A partial document
+#: carries figure evidence and is missing some of it; a failed one carries none,
+#: which is the state the whole corpus was in for
+#: ``raw/papers/computers-12-00091.pdf`` (figure_count=7, figures_described=0)
+#: while reporting a word that reads like degradation rather than loss.
+FIGURES_OK = "ok"
+FIGURES_PARTIAL = "partial"
+FIGURES_FAILED = "failed"
+FIGURES_NO_EVIDENCE = "no_evidence"
+FIGURES_UNAVAILABLE = "unavailable"
+FIGURES_UNCONFIGURED = "unconfigured"
+
+#: Figure states in which the document does NOT carry the figure evidence its
+#: own bytes contain. `no_evidence` is absent on purpose: a document that
+#: captions no figures is complete, not degraded.
+FIGURES_INCOMPLETE = frozenset(
+    {FIGURES_PARTIAL, FIGURES_FAILED, FIGURES_UNAVAILABLE, FIGURES_UNCONFIGURED}
+)
+
+
+#: Extractor states that mean "this document carries everything its bytes
+#: contain". Everything else produces a SMALLER document, which is logged and
+#: not raised, so nothing downstream notices without being told.
+COMPLETE_EXTRACTOR_STATES = frozenset({"ok", "no_evidence"})
+
+
+def extraction_state(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarise what one parse actually extracted, for the document record.
+
+    An outcome, never a capability: `capability_fingerprint` answers what the
+    environment could do and must keep answering the same thing for two runs of
+    the same environment, so the thing that differs between those runs lives
+    here instead (`rag_documents.extraction_status`, migration 008).
+
+    A document with no extractor state at all -- Markdown, a CSV -- is complete
+    by construction: there is nothing structural to lose.
+    """
+    states = {
+        name: metadata[key]
+        for name, key in (("figures", "figures_status"), ("tables", "tables_status"))
+        if metadata.get(key) is not None
+    }
+    record: dict[str, Any] = {"extractors": states}
+    for key in ("figure_count", "figures_described"):
+        if metadata.get(key) is not None:
+            record[key] = metadata[key]
+    incomplete = sorted(
+        name for name, state in states.items() if state not in COMPLETE_EXTRACTOR_STATES
+    )
+    record["complete"] = not incomplete
+    if incomplete:
+        record["incomplete"] = incomplete
+    return record
 
 
 class ParserError(RuntimeError):
@@ -283,7 +343,7 @@ def _pdf_figure_sections(
     try:
         figures = extract_figures(file_path)
     except PdfStructureError as exc:
-        metadata["figures_status"] = "unavailable"
+        metadata["figures_status"] = FIGURES_UNAVAILABLE
         metadata["figures_error"] = str(exc)
         logger.warning("Figure extraction unavailable for %s: %s", source_uri, exc)
         return []
@@ -292,14 +352,14 @@ def _pdf_figure_sections(
     if not figures:
         # The parser looked and this document captions no figures. That is a
         # different statement from "could not look", which is `unavailable`.
-        metadata["figures_status"] = "no_evidence"
+        metadata["figures_status"] = FIGURES_NO_EVIDENCE
         return []
 
     have_route = bool(
         os.environ.get("LITELLM_BASE_URL") or os.environ.get("LITELLM_MASTER_KEY")
     )
     if vision_extractor is None and not have_route:
-        metadata["figures_status"] = "unconfigured"
+        metadata["figures_status"] = FIGURES_UNCONFIGURED
         logger.warning(
             "No vision route configured; %d figure(s) in %s are not described.",
             len(figures),
@@ -342,7 +402,15 @@ def _pdf_figure_sections(
                     },
                 )
             )
-    metadata["figures_status"] = "ok" if described == len(figures) else "partial"
+    # Three outcomes, not two. `described == 0` means every figure this
+    # document captions was lost -- a failed extraction, not a degraded one --
+    # and it has to be sayable in one word or nothing downstream can act on it.
+    if described == len(figures):
+        metadata["figures_status"] = FIGURES_OK
+    elif described == 0:
+        metadata["figures_status"] = FIGURES_FAILED
+    else:
+        metadata["figures_status"] = FIGURES_PARTIAL
     metadata["figures_described"] = described
     return sections
 
@@ -407,6 +475,8 @@ def extract_image_via_vlm(
     api_key: str | None = None,
     model: str | None = None,
     timeout: float = 60.0,
+    opener: Callable[..., object] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Calls LiteLLM multimodal vision endpoint (Gemini Vision) with Base64 data URI."""
     base = (
@@ -463,16 +533,26 @@ def extract_image_via_vlm(
         method="POST",
     )
 
+    # Retried, like every other gateway call in this system. Measured
+    # 2026-09-15: a daemon restart brought sync-job up alongside litellm, and
+    # all seven figures of the one PDF in the corpus failed with
+    # `[Errno 111] Connection refused` inside the gateway's boot window. A
+    # single attempt turned a few seconds of unavailability into a permanent
+    # hole -- `_IndexedSignature.matches()` then reported the document
+    # unchanged forever, so nothing ever retried it.
+    #
+    # `opener` and `sleep` are injectable so a test can drive the real retry
+    # loop rather than patch over it.
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            choices = data.get("choices")
-            if choices and isinstance(choices, list) and isinstance(choices[0], dict):
-                msg = choices[0].get("message")
-                if isinstance(msg, dict):
-                    content = msg.get("content")
-                    if isinstance(content, str) and content.strip():
-                        return content.strip()
+        body = urlopen_with_retry(req, timeout=timeout, opener=opener, sleep=sleep)
+        data = json.loads(body.decode("utf-8"))
+        choices = data.get("choices")
+        if choices and isinstance(choices, list) and isinstance(choices[0], dict):
+            msg = choices[0].get("message")
+            if isinstance(msg, dict):
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
     except Exception as exc:
         raise ParserError(
             f"Multimodal vision extraction failed for {source_uri}: {exc}"

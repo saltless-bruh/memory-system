@@ -33,7 +33,12 @@ from typing import Any
 #: 1: chunked page text, tables via pdfplumber, figures via pypdf+Pillow.
 #: 2: reference list lifted into metadata (2026-08-25); a missing Pillow raises
 #:    `PdfStructureError` instead of being swallowed per page.
-PARSER_REVISION = 2
+#: 3: the figure describer retries a transient gateway failure instead of
+#:    dropping the figure (2026-09-21), and `described == 0` is recorded as
+#:    `failed` rather than `partial`. Both change what the parser produces from
+#:    the same bytes -- the first changes the sections, the second the metadata
+#:    -- which is exactly the condition this constant exists to mark.
+PARSER_REVISION = 3
 
 #: Schema of the fingerprint record itself, so it can migrate independently of
 #: what it describes.

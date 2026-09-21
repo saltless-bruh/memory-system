@@ -31,7 +31,40 @@ REQUIRED_FRONTMATTER = (
     "last_compiled",
 )
 
+#: The COMPILED lane's category vocabulary, not the authored page contract.
+#: `scripts/compile_note.py`, `compile_plan.py` and `plan_articles.py` all read
+#: it, and a compiled page's category is chosen from it at mint time. Authored
+#: pages use the vault's own `note-schema.json`, whose kinds are entirely
+#: different (`comparison`, `query`, `summary`, `schema`); conflating the two is
+#: what made the linter demand `summary`/`entities`/`department` of 433 pages
+#: that never had them.
 VALID_TYPES = frozenset(["technique", "entity", "playbook", "concept"])
+
+
+#: The authored page contract, when the vault publishes one.
+PAGE_SCHEMA_NAME = "note-schema.json"
+
+
+def load_page_schema(wiki_dir: Path | None = None) -> dict[str, Any] | None:
+    """The vault's own frontmatter contract, or None when it publishes none.
+
+    A vault that ships `note-schema.json` governs its authored pages with it.
+    A tree that does not keeps the historical hardcoded contract, so nothing
+    changes for a caller that has not adopted a schema.
+    """
+    import json
+
+    root = WIKI_DIR if wiki_dir is None else wiki_dir
+    candidate = Path(root) / PAGE_SCHEMA_NAME
+    if not candidate.is_file():
+        return None
+    try:
+        loaded = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 VALID_DEPARTMENTS = frozenset(["redteam", "blueteam", "ai_eng", "infra"])
 
 # R-1.2 required tree.
@@ -100,8 +133,19 @@ class HeadingFrame(StrEnum):
     AUTHORED = "authored"
 
 
+def body_contract(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The declared body contract from a page schema, if it publishes one."""
+    if not isinstance(schema, dict):
+        return None
+    body = schema.get("x-body")
+    return body if isinstance(body, dict) else None
+
+
 def headings_are_valid(
-    actual: tuple[str, ...], *, frame: HeadingFrame = HeadingFrame.COMPILED
+    actual: tuple[str, ...],
+    *,
+    frame: HeadingFrame = HeadingFrame.COMPILED,
+    body: dict[str, Any] | None = None,
 ) -> bool:
     """True when `actual` satisfies `frame`.
 
@@ -112,14 +156,25 @@ def headings_are_valid(
     if frame is HeadingFrame.COMPILED:
         return _headings_are_ordered(actual)
 
+    # A vault that declares its own body contract governs by it. Without one the
+    # historical list applies, so a tree that has not adopted a schema is
+    # unaffected. Measured: the historical list required `TL;DR`, which
+    # AGENTS.md section 4 calls "Recommended, not mandatory", and 173 authored
+    # pages were failed for omitting something optional.
+    required: tuple[str, ...] = REQUIRED_HEADINGS
+    if body is not None:
+        declared = body.get("requiredHeadings")
+        if isinstance(declared, list) and declared:
+            required = tuple(str(h) for h in declared)
+
     # Required headings, in order, exactly once each. Duplication is rejected
     # explicitly rather than falling out of the arithmetic: two `## TL;DR`
     # sections is precisely the defect an automated pass introduces, and a
     # plain "is it present" test would wave it through.
-    for heading in REQUIRED_HEADINGS:
+    for heading in required:
         if actual.count(heading) != 1:
             return False
-    positions = [actual.index(heading) for heading in REQUIRED_HEADINGS]
+    positions = [actual.index(heading) for heading in required]
     return positions == sorted(positions)
 
 
@@ -285,6 +340,7 @@ def lint_page(
     raw_dir: Path | None = None,
     known_slugs: set[str] | None = None,
     frame: HeadingFrame = HeadingFrame.COMPILED,
+    schema: dict[str, Any] | None = None,
 ) -> LintResult:
     """Comprehensive structural and canonical contract lint for one page.
 
@@ -302,8 +358,21 @@ def lint_page(
     fm = page.frontmatter
     source_root = (raw_dir or RAW_DIR).resolve(strict=False)
 
+    # The contract follows the frame. An authored page is governed by the vault's
+    # own schema when it publishes one; a compiled page, and any tree without a
+    # schema, keeps the historical lists. Measured 2026-09-15: the hardcoded
+    # contract required `summary`, `entities`, `department` and `last_compiled`,
+    # which 0, 0, 1 and 0 of 433 real pages carried.
+    if frame is HeadingFrame.AUTHORED and schema is not None:
+        required_fields: tuple[str, ...] = tuple(schema.get("required", ()))
+        type_spec = (schema.get("properties") or {}).get("type") or {}
+        valid_types = frozenset(type_spec.get("enum") or ()) or VALID_TYPES
+    else:
+        required_fields = REQUIRED_FRONTMATTER
+        valid_types = VALID_TYPES
+
     # 1. Frontmatter presence
-    for fld in REQUIRED_FRONTMATTER:
+    for fld in required_fields:
         if fld not in fm:
             res.errors.append(f"{page.rel}: missing frontmatter field '{fld}'")
 
@@ -315,121 +384,146 @@ def lint_page(
 
     # 2. Canonical Type
     page_type = fm.get("type")
-    if not isinstance(page_type, str) or page_type not in VALID_TYPES:
+    if not isinstance(page_type, str) or page_type not in valid_types:
         res.errors.append(
-            f"{page.rel}: invalid type '{page_type}'. Must be one of: {sorted(VALID_TYPES)}"
+            f"{page.rel}: invalid type '{page_type}'. "
+            f"Must be one of: {sorted(valid_types)}"
         )
 
     title = fm.get("title")
     if not isinstance(title, str) or not title.strip():
         res.errors.append(f"{page.rel}: title must be a nonempty string")
 
-    # 3. Canonical Department
-    dept = fm.get("department")
-    if not isinstance(dept, str) or dept not in VALID_DEPARTMENTS:
-        res.errors.append(
-            f"{page.rel}: invalid department '{dept}'. Must be one of: {sorted(VALID_DEPARTMENTS)}"
-        )
+    # Sections 3-6 are the COMPILED lane's field contract: department,
+    # entities, a single-sentence summary, `last_compiled`, and `sources` as
+    # path/loc/hint address mappings. When the vault publishes its own schema
+    # those fields are the schema's business, and enforcing both means enforcing
+    # two contracts at once -- which is how 433 authored pages came to be judged
+    # against fields that 0, 0, 1 and 0 of them carried (Part V).
+    if not (frame is HeadingFrame.AUTHORED and schema is not None):
+        # 3. Canonical Department
+        dept = fm.get("department")
+        if not isinstance(dept, str) or dept not in VALID_DEPARTMENTS:
+            res.errors.append(
+                f"{page.rel}: invalid department '{dept}'. Must be one of: {sorted(VALID_DEPARTMENTS)}"
+            )
 
-    entities = fm.get("entities")
-    if (
-        not isinstance(entities, list)
-        or not entities
-        or any(not isinstance(entity, str) or not entity.strip() for entity in entities)
-    ):
-        res.errors.append(
-            f"{page.rel}: entities must be a nonempty list of nonempty strings"
-        )
-
-    # 4. Single-Sentence Summary
-    raw_summary = fm.get("summary")
-    if not isinstance(raw_summary, str) or not raw_summary.strip():
-        res.errors.append(f"{page.rel}: summary must be a nonempty string")
-    else:
-        summary = raw_summary.strip()
-        if "\n" in summary or "\r" in summary:
-            res.errors.append(f"{page.rel}: summary must be a single line")
+        entities = fm.get("entities")
         if (
-            not summary.endswith((".", "?", "!"))
-            or len(_SENTENCE_TERMINATOR_RE.findall(summary)) != 1
-        ):
-            res.errors.append(f"{page.rel}: summary must contain exactly one sentence")
-
-    # 5. Date validation
-    raw_last_compiled = fm.get("last_compiled")
-    if isinstance(raw_last_compiled, datetime.datetime):
-        valid_date = False
-        last_compiled = str(raw_last_compiled)
-    elif isinstance(raw_last_compiled, datetime.date):
-        valid_date = True
-        last_compiled = raw_last_compiled.isoformat()
-    elif isinstance(raw_last_compiled, str):
-        last_compiled = raw_last_compiled.strip()
-        valid_date = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", last_compiled))
-        try:
-            datetime.date.fromisoformat(last_compiled)
-        except ValueError:
-            valid_date = False
-    else:
-        valid_date = False
-        last_compiled = str(raw_last_compiled)
-    if not valid_date:
-        res.errors.append(
-            f"{page.rel}: invalid last_compiled date '{last_compiled}' "
-            "(expected YYYY-MM-DD)"
-        )
-
-    # 6. Sources validation
-    raw_sources = fm.get("sources")
-    if not isinstance(raw_sources, list):
-        res.errors.append(f"{page.rel}: sources must be a list")
-        raw_sources = []
-    for i, src in enumerate(raw_sources):
-        if not isinstance(src, dict):
-            res.errors.append(f"{page.rel}: sources[{i}] is not a mapping")
-            continue
-        for key in ("path", "loc", "hint"):
-            if key not in src:
-                res.errors.append(f"{page.rel}: sources[{i}] missing '{key}' (R-1.4)")
-            elif not isinstance(src[key], str) or not src[key].strip():
-                res.errors.append(
-                    f"{page.rel}: sources[{i}].{key} must be a nonempty string"
-                )
-
-        raw_path = src.get("path")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            continue
-        source_path = Path(raw_path)
-        if (
-            source_path.is_absolute()
-            or not source_path.parts
-            or source_path.parts[0] != "raw"
+            not isinstance(entities, list)
+            or not entities
+            or any(
+                not isinstance(entity, str) or not entity.strip() for entity in entities
+            )
         ):
             res.errors.append(
-                f"{page.rel}: sources[{i}].path must be relative beneath raw/: {raw_path}"
+                f"{page.rel}: entities must be a nonempty list of nonempty strings"
             )
-            continue
-        disk = source_root.joinpath(*source_path.parts[1:]).resolve(strict=False)
-        try:
-            disk.relative_to(source_root)
-        except ValueError:
-            res.errors.append(f"{page.rel}: sources[{i}].path escapes raw/: {raw_path}")
-            continue
-        if not disk.is_file():
-            res.errors.append(f"{page.rel}: sources[{i}].path not on disk: {raw_path}")
+
+        # 4. Single-Sentence Summary
+        raw_summary = fm.get("summary")
+        if not isinstance(raw_summary, str) or not raw_summary.strip():
+            res.errors.append(f"{page.rel}: summary must be a nonempty string")
+        else:
+            summary = raw_summary.strip()
+            if "\n" in summary or "\r" in summary:
+                res.errors.append(f"{page.rel}: summary must be a single line")
+            if (
+                not summary.endswith((".", "?", "!"))
+                or len(_SENTENCE_TERMINATOR_RE.findall(summary)) != 1
+            ):
+                res.errors.append(
+                    f"{page.rel}: summary must contain exactly one sentence"
+                )
+
+        # 5. Date validation
+        raw_last_compiled = fm.get("last_compiled")
+        if isinstance(raw_last_compiled, datetime.datetime):
+            valid_date = False
+            last_compiled = str(raw_last_compiled)
+        elif isinstance(raw_last_compiled, datetime.date):
+            valid_date = True
+            last_compiled = raw_last_compiled.isoformat()
+        elif isinstance(raw_last_compiled, str):
+            last_compiled = raw_last_compiled.strip()
+            valid_date = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", last_compiled))
+            try:
+                datetime.date.fromisoformat(last_compiled)
+            except ValueError:
+                valid_date = False
+        else:
+            valid_date = False
+            last_compiled = str(raw_last_compiled)
+        if not valid_date:
+            res.errors.append(
+                f"{page.rel}: invalid last_compiled date '{last_compiled}' "
+                "(expected YYYY-MM-DD)"
+            )
+
+        # 6. Sources validation
+        raw_sources = fm.get("sources")
+        if not isinstance(raw_sources, list):
+            res.errors.append(f"{page.rel}: sources must be a list")
+            raw_sources = []
+        for i, src in enumerate(raw_sources):
+            if not isinstance(src, dict):
+                res.errors.append(f"{page.rel}: sources[{i}] is not a mapping")
+                continue
+            for key in ("path", "loc", "hint"):
+                if key not in src:
+                    res.errors.append(
+                        f"{page.rel}: sources[{i}] missing '{key}' (R-1.4)"
+                    )
+                elif not isinstance(src[key], str) or not src[key].strip():
+                    res.errors.append(
+                        f"{page.rel}: sources[{i}].{key} must be a nonempty string"
+                    )
+
+            raw_path = src.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            source_path = Path(raw_path)
+            if (
+                source_path.is_absolute()
+                or not source_path.parts
+                or source_path.parts[0] != "raw"
+            ):
+                res.errors.append(
+                    f"{page.rel}: sources[{i}].path must be relative beneath raw/: {raw_path}"
+                )
+                continue
+            disk = source_root.joinpath(*source_path.parts[1:]).resolve(strict=False)
+            try:
+                disk.relative_to(source_root)
+            except ValueError:
+                res.errors.append(
+                    f"{page.rel}: sources[{i}].path escapes raw/: {raw_path}"
+                )
+                continue
+            if not disk.is_file():
+                res.errors.append(
+                    f"{page.rel}: sources[{i}].path not on disk: {raw_path}"
+                )
 
     # 7. Ordered Body Headings (for standard notes)
     actual_headings = tuple(
         match.group(1).strip()
         for match in re.finditer(r"^##[ \t]+(.+?)[ \t]*$", page.body, re.MULTILINE)
     )
-    if not headings_are_valid(actual_headings, frame=frame):
+    if not headings_are_valid(actual_headings, frame=frame, body=body_contract(schema)):
         optional = ", ".join(
             f"{name} (before {before})" for name, before in OPTIONAL_HEADINGS.items()
         )
+        body = body_contract(schema)
+        declared = (body or {}).get("requiredHeadings")
+        shown = (
+            tuple(str(h) for h in declared)
+            if isinstance(declared, list) and declared
+            else REQUIRED_HEADINGS
+        )
         res.errors.append(
             f"{page.rel}: section headings must appear exactly once in order: "
-            + " -> ".join(REQUIRED_HEADINGS)
+            + " -> ".join(shown)
             + f"; optional: {optional}"
         )
 

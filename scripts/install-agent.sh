@@ -5,12 +5,65 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/saltless-bruh/memory-system/main/scripts/install-agent.sh | bash
 # Or locally:
-#   ./scripts/install-agent.sh [target_directory]
+#   ./scripts/install-agent.sh [target_directory] [--client portable|opencode]
+#                             [--dry-run] [--confirm]
 # ==============================================================================
 
 set -euo pipefail
 
-TARGET_DIR="${1:-.}"
+TARGET_DIR="."
+TARGET_SET=false
+CLIENT="portable"
+DRY_RUN=false
+CONFIRM=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --client)
+            if [[ $# -lt 2 ]]; then
+                echo "--client requires portable or opencode" >&2
+                exit 3
+            fi
+            CLIENT="$2"
+            shift 2
+            ;;
+        --client=*) CLIENT="${1#*=}"; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --confirm) CONFIRM=true; shift ;;
+        --help|-h)
+            echo "Usage: install-agent.sh [directory] [--client portable|opencode] [--dry-run] [--confirm]"
+            exit 0
+            ;;
+        --)
+            shift
+            if [[ $# -ne 1 ]] || [[ "${TARGET_SET}" == true ]]; then
+                echo "Expected one target directory" >&2
+                exit 3
+            fi
+            TARGET_DIR="$1"
+            TARGET_SET=true
+            shift
+            ;;
+        -*) echo "Unknown option: $1" >&2; exit 3 ;;
+        *)
+            if [[ "${TARGET_SET}" == true ]]; then
+                echo "Expected one target directory" >&2
+                exit 3
+            fi
+            TARGET_DIR="$1"
+            TARGET_SET=true
+            shift
+            ;;
+    esac
+done
+if [[ "${CLIENT}" != portable && "${CLIENT}" != opencode ]]; then
+    echo "Unknown client: ${CLIENT}; expected portable or opencode" >&2
+    exit 3
+fi
+if [[ ! -d "${TARGET_DIR}" ]]; then
+    echo "Target must be an existing directory: ${TARGET_DIR}" >&2
+    exit 3
+fi
+TARGET_DIR="$(cd -- "${TARGET_DIR}" && pwd)"
 TARGET_AGENT_DIR="${TARGET_DIR}/.agent"
 
 echo "🧠 Installing SNP Memory System Agent Package..."
@@ -20,6 +73,26 @@ echo "📂 Target Directory: $(cd "${TARGET_DIR}" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PACKAGE_SRC="${REPO_ROOT}/packages/snp-agent"
+
+# A preview must not clone, create temporary directories, or scaffold a target.
+# A local OpenCode preview uses the same complete validator as installation.
+if [[ "${DRY_RUN}" == true ]] && { [[ "${CLIENT}" == portable ]] || [[ ! -d "${PACKAGE_SRC}" ]]; }; then
+    echo "[dry-run] ${CLIENT} installation would write:"
+    if [[ "${CLIENT}" == opencode ]]; then
+        echo "  ${TARGET_DIR}/.opencode/skills/snp-*"
+        echo "  ${TARGET_DIR}/.opencode/snp/{rules,instructions,workflows}"
+        echo "  ${TARGET_DIR}/opencode.json"
+        echo "Package source is remote; no package was fetched for this preview."
+    else
+        for component in rules instructions workflows skills; do
+            echo "  ${TARGET_AGENT_DIR}/${component}"
+        done
+        if [[ ! -f "${TARGET_DIR}/.mcp.json" ]]; then
+            echo "  ${TARGET_DIR}/.mcp.json"
+        fi
+    fi
+    exit 0
+fi
 
 # The checkout the local stdio server would serve. Set only when this script is
 # run from a real clone: a curl install clones into a temp directory that is
@@ -58,6 +131,23 @@ if [[ ! -d "${PACKAGE_SRC}" ]]; then
     echo "   (ref '${SNP_AGENT_REF}' is not immutable — record this commit)"
     PACKAGE_SRC="${TEMP_DIR}/repo/packages/snp-agent"
     LOCAL_CHECKOUT=""
+fi
+
+if [[ "${CLIENT}" == opencode ]]; then
+    PACKAGE_REPO="$(cd "${PACKAGE_SRC}/../.." && pwd)"
+    if [[ -n "${SNP_AGENT_PYTHON:-}" ]]; then
+        INSTALLER_PYTHON="${SNP_AGENT_PYTHON}"
+    elif [[ -x "${PACKAGE_REPO}/.venv/bin/python" ]]; then
+        INSTALLER_PYTHON="${PACKAGE_REPO}/.venv/bin/python"
+    else
+        INSTALLER_PYTHON="python3"
+    fi
+    OPENCODE_ARGS=("${TARGET_DIR}" --package "${PACKAGE_SRC}")
+    if [[ "${DRY_RUN}" == true ]]; then OPENCODE_ARGS+=(--dry-run); fi
+    if [[ "${CONFIRM}" == true ]]; then OPENCODE_ARGS+=(--confirm); fi
+    # -B keeps even a source-checkout preview free of Python bytecode writes.
+    "${INSTALLER_PYTHON}" -B "${PACKAGE_REPO}/scripts/install_opencode_agent.py" "${OPENCODE_ARGS[@]}"
+    exit 0
 fi
 
 # 1. Create target directory structure

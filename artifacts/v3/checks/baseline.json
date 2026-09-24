@@ -1,5 +1,20 @@
 {
-  "documents": 432,
-  "chunks": 2303,
-  "null_embeddings": 0
+  "_comment": "Corpus survival baseline for `containers.py --group corpus-survived`. A rebuild must not destroy rows; this records what the corpus held when the snapshot was taken, so a later shrink is visible. Refresh it only after verifying the corpus is intact, and record why here.",
+  "documents": 441,
+  "chunks": 2103,
+  "null_embeddings": 0,
+  "recorded": "2026-09-24",
+  "recorded_by": "refresh after the PARSER_REVISION 2 -> 3 re-ingest",
+  "composition": {
+    "wiki": {"documents": 439, "chunks": 1968},
+    "raw": {"documents": 2, "chunks": 135},
+    "documents_without_chunks": 0
+  },
+  "previous": {
+    "recorded": "2026-09-04",
+    "commit": "a550c66",
+    "documents": 432,
+    "chunks": 2303,
+    "note": "The 2303 -> ~2100 chunk difference predates this refresh and this session: the 2026-09-15 audit independently measured 436 documents / 2099 chunks while planning the PARSER_REVISION bump, so the corpus was already at that size before any work here. Documents rose 432 -> 441 and chunks fell because the two movements have different causes, not because rows were lost in a rebuild -- verified at refresh time: 0 chunks with a null embedding and 0 documents with no chunks at all."
+  }
 }

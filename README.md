@@ -132,8 +132,12 @@ snpmemory install-agent /path/to/project --client opencode --dry-run
 snpmemory install-agent /path/to/project --client opencode
 ```
 
-The native config uses `mcp.scout` with `type: "remote"`, the loopback Scout
-URL, and `{env:SCOUT_AUTH_HEADER}`. It includes no local `snpmemory` server.
+The native config uses `mcp.snpmemory` with `type: "remote"`, the loopback
+URL, and `{env:SCOUT_AUTH_HEADER}`. That entry is the remote retrieval server:
+it is reached over the network and launches nothing locally. (The name once
+belonged to a local stdio server, deleted in leaf-4.3; the remote server took
+it in leaf-4.4, and an older config naming that server `scout` has the old
+entry removed rather than kept alongside.)
 Installation copies seven skills to `.opencode/skills/` and governing files
 to `.opencode/snp/`; config `instructions` loads rules and instructions.
 Workflow files do not automatically register slash commands or a plugin.

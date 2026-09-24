@@ -5,6 +5,7 @@ from __future__ import annotations
 from scout.cli.declarations import DECLARED
 from scout.cli.mcp_policy import (
     POLICIES,
+    SERVED_SURFACE,
     Exposure,
     scout_surface,
     undecided_commands,
@@ -47,8 +48,14 @@ def test_nothing_is_exposed_on_a_server_that_no_longer_exists() -> None:
     """
     exposed = [p for p in POLICIES if p.exposure is Exposure.TOOL]
     assert exposed, "the retrieval surface must not be empty"
-    assert {p.surface for p in exposed} == {"scout"}
+    assert {p.surface for p in exposed} == {SERVED_SURFACE}
     assert len(scout_surface()) == len(exposed)
+
+    # The discriminator is not free text: it must be the name the server
+    # actually reports, or the policy would describe a server nobody runs.
+    from scout.mcp_server import SERVER_NAME
+
+    assert SERVED_SURFACE == SERVER_NAME
 
 
 def test_a_command_the_stdio_server_used_to_serve_is_hidden_with_its_reason() -> None:

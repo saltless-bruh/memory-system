@@ -112,9 +112,9 @@ def test_the_installed_project_gets_the_v3_server(tmp_path: Path) -> None:
     """
     result = install_agent(str(tmp_path), config=_config())
 
-    assert result.data["servers"] == ["scout"]
+    assert result.data["servers"] == ["snpmemory"]
     written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
-    assert set(written["mcpServers"]) == {"scout"}
+    assert set(written["mcpServers"]) == {"snpmemory"}
 
 
 def test_installing_is_idempotent(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_native_install_uses_the_shared_shell_and_reports_the_client(
         "client": "opencode",
         "target": str(target),
         "package": str(REPO_ROOT / "packages/snp-agent"),
-        "servers": ["scout"],
+        "servers": ["snpmemory"],
     }
     assert len(list((target / ".opencode/skills").glob("*/SKILL.md"))) == 10
     assert not (target / ".agent").exists()
@@ -280,7 +280,7 @@ def test_native_cli_merges_custom_config_and_keeps_its_values_out_of_output(
 
     result = install_agent(str(tmp_path), client="opencode", config=_config())
 
-    assert result.data["servers"] == ["custom", "scout"]
+    assert result.data["servers"] == ["custom", "snpmemory"]
     assert "private-token" in config_path.read_text()
     assert "private-token" not in str(result)
     assert (tmp_path / "AGENTS.md").read_text() == "Keep the human instructions"

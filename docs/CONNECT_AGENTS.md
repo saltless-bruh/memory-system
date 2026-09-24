@@ -10,10 +10,17 @@ live ingestion → human-reviewed update experiment.
 
 | Surface | Transport | Purpose |
 |---|---|---|
-| `scout` | Remote MCP at `http://127.0.0.1:8080/mcp` | Authenticated `wiki_search`, `wiki_read` and `wiki_quote`; the agent's only retrieval path, and since 2026-09-24 the only MCP server this project configures. |
+| `snpmemory` | Remote MCP at `http://127.0.0.1:8080/mcp` | Authenticated `wiki_search`, `wiki_read` and `wiki_quote`; the agent's only retrieval path, and since 2026-09-24 the only MCP server this project configures. It answered to `scout` until that date. |
 | `snpmemory` CLI | Operator terminal in an authorized checkout | Ingestion, planning, compilation, verification, and explicit operator actions. Not an MCP surface. |
 
-The optional local `snpmemory` stdio MCP server was **deleted on 2026-09-24**.
+**The server was renamed on 2026-09-24.** It is `snpmemory` now; configs
+written before that date call it `scout`. Re-running `snpmemory mcp-config`
+removes the old entry as it writes the new one, so an upgraded config holds one
+server rather than two pointing at the same URL. Both spellings conform to the
+MCP naming rules, so there is no alias period and nothing answers to `scout`.
+
+The optional local `snpmemory` stdio MCP server was **deleted on 2026-09-24**,
+which is what freed the name.
 It ran as a subprocess with its launching user's full authority, and served its
 own copies of `wiki_search` and `wiki_read` that could disagree with the ones
 Scout serves. Everything it exposed — verification, `plan-articles`,
@@ -58,7 +65,7 @@ runtime:
 ```json
 {
   "mcp": {
-    "scout": {
+    "snpmemory": {
       "type": "remote",
       "url": "http://127.0.0.1:8080/mcp",
       "oauth": false,

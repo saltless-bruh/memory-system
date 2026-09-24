@@ -135,7 +135,7 @@ MCP, with no local `snpmemory` server:
 ```json
 {
   "mcp": {
-    "scout": {
+    "snpmemory": {
       "type": "remote",
       "url": "http://127.0.0.1:8080/mcp",
       "oauth": false,
@@ -435,7 +435,7 @@ Fill the scorecard during this run; unrun rows remain unverified.
 
 | Observation | Next check |
 |---|---|
-| OpenCode rejects config | Use native `mcp.scout` with `type: "remote"`; resolve `opencode.jsonc` conflicts. Claude `.mcp.json` is not OpenCode's config. |
+| OpenCode rejects config | Use native `mcp.snpmemory` with `type: "remote"` (`mcp.scout` before 2026-09-24); resolve `opencode.jsonc` conflicts. Claude `.mcp.json` is not OpenCode's config. |
 | Scout missing/disconnected | Run `opencode mcp list` in the target workspace and inspect Scout service state. Native OpenCode does not need `mcp-remote`. |
 | Scout 401/403 | Check complete auth header, loaded identity/JWT claims, and authorized `infra` scope. Never weaken auth to recover. |
 | Model auth fails | Check this OpenCode profile's key separately from LiteLLM credentials. A temporary key test did not save a default. |

@@ -30,19 +30,30 @@ SUPPORTED_CLIENTS = ["cursor", "vscode", "claude", "gemini", "opencode"]
 _SCOUT_URL = "http://localhost:8080/mcp"
 _OPENCODE_SCOUT_URL = "http://127.0.0.1:8080/mcp"
 _SCOUT_AUTH_HEADER_ENV = "SCOUT_AUTH_HEADER"
-#: Server entries this script removes from a config it merges into, because
-#: they name a surface that no longer exists. Leaving one behind is worse than
-#: never having written it: the client keeps advertising tools whose launch
-#: fails, and an agent reading the list cannot tell a dead entry from a live
-#: one.
+#: The name the one server is served under, everywhere a client is configured.
+#: It moved here from the deleted stdio server in leaf-4.4; see
+#: `scout.mcp_server.SERVER_NAME`, which this must equal and which a test holds
+#: it to. It is repeated rather than imported because that module pulls in
+#: fastmcp, and this script has to stay runnable on a machine with nothing
+#: installed.
+SERVER_NAME = "snpmemory"
+
+#: Every name this project has ever given a server of its own.
 #:
-#: `snp-wiki` was renamed. `snpmemory` was the local stdio server deleted in
-#: leaf-4.3 — a second MCP surface that carried the authority of whoever
-#: launched it and served its own copies of `wiki_search` and `wiki_read`.
-#: Retirement runs before the generated servers are merged in, so a name that
-#: is later reused for a *different* server is dropped and then rewritten,
-#: never shadowed.
-_RETIRED_SERVER_NAMES = frozenset({"snp-wiki", "snpmemory"})
+#: On merge, the ones this run is *not* generating are removed from the user's
+#: config. That is the whole point and it is easy to get wrong: each rename
+#: leaves the previous key behind pointing at a server that has moved or gone,
+#: and the client goes on listing it. After `snp-wiki` (basic-memory, retired),
+#: `snpmemory` (the local stdio server, deleted in leaf-4.3) and `scout` (this
+#: same server under its old name until leaf-4.4), a config upgraded across all
+#: three would otherwise carry four entries for one server.
+#:
+#: Deriving the removals from this set minus the generated names — rather than
+#: listing the dead ones — means the next rename cannot orphan its predecessor
+#: by omission. Removal runs before the generated servers are merged in, so a
+#: name reused for a different server is dropped and then rewritten, never
+#: shadowed.
+_OWN_SERVER_NAMES = frozenset({"snp-wiki", "snpmemory", "scout"})
 
 #: The checkout this script belongs to. Kept as the default `root` argument so
 #: the signature of `generate_config` is stable for its callers, even though no
@@ -107,10 +118,10 @@ def generate_config(client: str, root: Path | None = None) -> dict[str, Any]:
     if client == "opencode":
         return {
             "$schema": "https://opencode.ai/config.json",
-            "mcp": {"scout": _scout_config(client)},
+            "mcp": {SERVER_NAME: _scout_config(client)},
         }
     server_key = "servers" if client == "vscode" else "mcpServers"
-    return {server_key: {"scout": _scout_config(client)}}
+    return {server_key: {SERVER_NAME: _scout_config(client)}}
 
 
 def merge_configs(
@@ -134,8 +145,11 @@ def merge_configs(
         raise ValueError(f"existing {server_key} value is not an object")
 
     existing[server_key] = existing_servers
-    for retired in _RETIRED_SERVER_NAMES:
-        existing_servers.pop(retired, None)
+    # Remove our own superseded names before writing the current one, so an
+    # upgraded config ends with exactly the servers this run generates plus
+    # whatever the user added themselves.
+    for superseded in _OWN_SERVER_NAMES - set(servers):
+        existing_servers.pop(superseded, None)
 
     existing_servers.update(servers)
     for key, value in new_config.items():

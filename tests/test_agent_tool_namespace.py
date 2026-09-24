@@ -43,21 +43,25 @@ def test_contracts_name_no_retired_retrieval_surface(path: Path) -> None:
 
 
 def test_config_emitters_advertise_exactly_the_one_v3_server() -> None:
-    """Both emitters write the same single server.
+    """Both emitters write the same single server, under the same name.
 
     They pinned two until leaf-4.3. The second was a stdio server launched from
     the user's own shell; it is deleted, and an emitter still naming it would
-    install an entry whose launch fails.
+    install an entry whose launch fails. In leaf-4.4 the server that remains
+    took that freed name, so the two emitters have to agree on the new spelling
+    as well as the count -- they are separate files and nothing but this holds
+    them together.
     """
     import scripts.export_mcp_config as exporter
 
     emitted = set(exporter.generate_config("claude")["mcpServers"])
-    assert emitted == {"scout"}
+    assert emitted == {exporter.SERVER_NAME}
 
     installer = (REPO_ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
-    assert '"scout"' in installer
-    assert '"snpmemory": {' not in installer
-    assert '"snp-wiki"' not in installer
+    assert f'"{exporter.SERVER_NAME}": {{' in installer
+    # The names this project used before, none of which may be scaffolded.
+    for superseded in exporter._OWN_SERVER_NAMES - {exporter.SERVER_NAME}:
+        assert f'"{superseded}": {{' not in installer, superseded
     assert '"basic-memory"' not in installer
 
 

@@ -84,7 +84,7 @@ def test_fresh_shell_install_loads_every_skill_and_governing_instructions(
 
     config = json.loads((tmp_path / "opencode.json").read_text())
     assert config["mcp"] == {
-        "scout": {
+        "snpmemory": {
             "type": "remote",
             "url": "http://127.0.0.1:8080/mcp",
             "oauth": False,
@@ -184,7 +184,13 @@ def test_custom_only_content_config_and_legacy_contract_need_no_confirmation(
         "rule",
         "instruction",
         "workflow",
-        "scout-config",
+        # One case per name this project has ever given a server of its own.
+        # All three must be recognised as ours: the current one, and the two it
+        # superseded. `scout` is the name the remote server itself answered to
+        # until leaf-4.4, so an install that stopped recognising it would walk
+        # past a live entry it owns.
+        "current-config",
+        "superseded-scout-config",
         "retired-local-config",
         "retired-wiki-config",
         "loaded-instruction",
@@ -206,14 +212,28 @@ def test_every_owned_collision_requires_confirmation_before_writes(
         destination.parent.mkdir(parents=True)
         destination.write_text("locally customized SNP content")
     else:
-        server = {
-            "scout-config": "scout",
-            "retired-local-config": "snpmemory",
-            "retired-wiki-config": "snp-wiki",
+        # After leaf-4.4 the live server and the deleted stdio server share the
+        # key `snpmemory`, so these two cases are told apart by shape rather
+        # than by name: one is reached over the network, the other launched as
+        # a subprocess. Both are ours and both must stop an unconfirmed write.
+        planted = {
+            "current-config": (
+                "snpmemory",
+                {"type": "remote", "url": "http://127.0.0.1:8080/mcp"},
+            ),
+            "superseded-scout-config": (
+                "scout",
+                {"type": "remote", "url": "http://127.0.0.1:8080/mcp"},
+            ),
+            "retired-local-config": (
+                "snpmemory",
+                {"type": "local", "command": ["snpmemory", "mcp"]},
+            ),
+            "retired-wiki-config": ("snp-wiki", {"command": "basic-memory"}),
         }.get(owned)
         config = (
-            {"mcp": {server: {}}}
-            if server
+            {"mcp": {planted[0]: planted[1]}}
+            if planted
             else {"instructions": [".opencode/snp/rules/snp-memory.md"]}
         )
         (tmp_path / "opencode.json").write_text(json.dumps(config))
@@ -242,7 +262,7 @@ def test_confirmed_upgrade_reconciles_snp_and_is_repeatable(tmp_path: Path) -> N
 
     assert result.returncode == 0, result.stderr
     merged = json.loads(config_path.read_text())
-    assert set(merged["mcp"]) == {"scout", "custom"}
+    assert set(merged["mcp"]) == {"snpmemory", "custom"}
     assert merged["instructions"] == config["instructions"]
     assert custom.read_text() == "Keep my skill notes"
     before = _snapshot(tmp_path)

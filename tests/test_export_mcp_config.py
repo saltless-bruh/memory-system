@@ -22,8 +22,8 @@ def test_generated_config_exposes_only_v3_servers_and_authenticates_scout(
     config = exporter.generate_config(client)
     server_key = "servers" if client == "vscode" else "mcpServers"
     servers = config[server_key]
-    assert set(servers) == {"scout"}
-    scout = servers["scout"]
+    assert set(servers) == {"snpmemory"}
+    scout = servers["snpmemory"]
 
     if client == "vscode":
         assert scout["type"] == "stdio"
@@ -52,7 +52,7 @@ def test_each_client_uses_supported_environment_reference(
     client: str, expected_env: dict[str, str] | None
 ) -> None:
     server_key = "servers" if client == "vscode" else "mcpServers"
-    scout = exporter.generate_config(client)[server_key]["scout"]
+    scout = exporter.generate_config(client)[server_key]["snpmemory"]
     if expected_env is None:
         assert "env" not in scout
     else:
@@ -151,8 +151,8 @@ def test_all_writes_every_client_and_preserves_unrelated_servers(
         server_key = {"vscode": "servers", "opencode": "mcp"}.get(client, "mcpServers")
         assert "snp-wiki" not in written[server_key]
         assert (
-            written[server_key]["scout"]
-            == exporter.generate_config(client)[server_key]["scout"]
+            written[server_key]["snpmemory"]
+            == exporter.generate_config(client)[server_key]["snpmemory"]
         )
     assert "unrelated" in json.loads(cursor_path.read_text())["mcpServers"]
     assert "snp-wiki" not in json.loads(cursor_path.read_text())["mcpServers"]
@@ -221,7 +221,7 @@ def test_opencode_uses_native_authenticated_scout_only(tmp_path: Path) -> None:
     assert exporter.generate_config("opencode", root=tmp_path) == {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
-            "scout": {
+            "snpmemory": {
                 "type": "remote",
                 "url": "http://127.0.0.1:8080/mcp",
                 "oauth": False,
@@ -255,7 +255,11 @@ def test_opencode_merge_preserves_settings_and_removes_managed_local_server(
                 "mcp": {
                     "other": unrelated,
                     "disabled": {"enabled": False},
-                    "scout": {"type": "local", "command": ["old-command"]},
+                    # Every name this project has ever used, each planted as
+                    # the shape it really had: the live remote server under its
+                    # old key, the deleted stdio server, and basic-memory. A
+                    # merge has to end with exactly one of them.
+                    "scout": {"type": "remote", "url": "http://127.0.0.1:8080/mcp"},
                     "snpmemory": {"type": "local", "command": ["snpmemory", "mcp"]},
                     "snp-wiki": {"type": "remote", "url": "http://retired.example"},
                 },
@@ -270,10 +274,10 @@ def test_opencode_merge_preserves_settings_and_removes_managed_local_server(
     assert written["model"] == "custom/model"
     assert written["instructions"] == ["custom-rules.md"]
     assert written["permission"] == {"bash": "ask"}
-    assert set(written["mcp"]) == {"scout", "other", "disabled"}
+    assert set(written["mcp"]) == {"snpmemory", "other", "disabled"}
     assert written["mcp"]["other"] == unrelated
     assert written["mcp"]["disabled"] == {"enabled": False}
-    assert written["mcp"]["scout"]["type"] == "remote"
+    assert written["mcp"]["snpmemory"]["type"] == "remote"
     output = capsys.readouterr()
     assert secret not in output.out + output.err
     # Repeated export does not accumulate or reorder managed entries.
@@ -379,7 +383,7 @@ def test_print_opencode_does_not_inspect_existing_configs(
     (tmp_path / "opencode.json").write_text("not JSON", encoding="utf-8")
     (tmp_path / "opencode.jsonc").write_text("// keep\n{}", encoding="utf-8")
     assert exporter.main(["--client", "opencode", "--print"]) == 0
-    assert json.loads(capsys.readouterr().out)["mcp"]["scout"]["oauth"] is False
+    assert json.loads(capsys.readouterr().out)["mcp"]["snpmemory"]["oauth"] is False
 
 
 def test_export_can_write_without_posix_only_fchmod(
@@ -390,7 +394,7 @@ def test_export_can_write_without_posix_only_fchmod(
     assert exporter.main(["--client", "opencode"]) == 0
     target = tmp_path / "opencode.json"
     assert (
-        json.loads(target.read_text(encoding="utf-8"))["mcp"]["scout"]["type"]
+        json.loads(target.read_text(encoding="utf-8"))["mcp"]["snpmemory"]["type"]
         == "remote"
     )
     if os.name == "posix":
@@ -410,11 +414,11 @@ def test_every_client_gets_exactly_one_server(client: str) -> None:
     """
     server_key = "servers" if client == "vscode" else "mcpServers"
     servers = exporter.generate_config(client)[server_key]
-    assert set(servers) == {"scout"}
+    assert set(servers) == {"snpmemory"}
 
 
 def test_opencode_gets_exactly_one_server() -> None:
-    assert set(exporter.generate_config("opencode")["mcp"]) == {"scout"}
+    assert set(exporter.generate_config("opencode")["mcp"]) == {"snpmemory"}
 
 
 @pytest.mark.parametrize("client", LEGACY_CLIENTS)
@@ -467,7 +471,7 @@ def test_an_upgrade_removes_the_deleted_stdio_entry(client: str) -> None:
         }
     }
     merged = exporter.merge_configs(existing, exporter.generate_config(client))
-    assert set(merged[server_key]) == {"scout", "unrelated"}
+    assert set(merged[server_key]) == {"snpmemory", "unrelated"}
 
 
 def test_an_opencode_upgrade_removes_the_deleted_stdio_entry() -> None:
@@ -478,4 +482,33 @@ def test_an_opencode_upgrade_removes_the_deleted_stdio_entry() -> None:
         }
     }
     merged = exporter.merge_configs(existing, exporter.generate_config("opencode"))
-    assert set(merged["mcp"]) == {"scout", "unrelated"}
+    assert set(merged["mcp"]) == {"snpmemory", "unrelated"}
+
+
+def test_the_exporter_and_the_server_agree_on_the_server_name() -> None:
+    """Two files naming the same server must not be allowed to disagree.
+
+    `scripts/export_mcp_config.py` repeats the name rather than importing it:
+    that module has to stay runnable on a machine with nothing installed, and
+    `scout.mcp_server` pulls in fastmcp. The repetition is deliberate, so the
+    agreement has to be enforced somewhere, and this is the only place it is.
+
+    A disagreement would not raise anywhere. The exporter would write one key,
+    the server would answer to another, and every generated config would point
+    a client at a server name the server never claims.
+    """
+    from scout.mcp_server import SERVER_NAME
+
+    assert exporter.SERVER_NAME == SERVER_NAME
+
+
+def test_the_supersession_set_contains_the_name_in_use() -> None:
+    """Removal is derived as `_OWN_SERVER_NAMES - generated`, which only works
+    if the generated name is a member. Drop it and the set becomes a list of
+    dead names again -- the shape that let `scout` be orphaned by the rename.
+    """
+    assert exporter.SERVER_NAME in exporter._OWN_SERVER_NAMES
+    for client in exporter.SUPPORTED_CLIENTS:
+        key = {"opencode": "mcp", "vscode": "servers"}.get(client, "mcpServers")
+        generated = set(exporter.generate_config(client)[key])
+        assert generated <= exporter._OWN_SERVER_NAMES, generated

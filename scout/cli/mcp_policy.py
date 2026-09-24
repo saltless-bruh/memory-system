@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final
 
 from scout.cli.declarations import DECLARED
 
@@ -51,14 +52,15 @@ class ToolPolicy:
     tool: str = ""
     #: Why, when the answer is not obvious.
     reason: str = ""
-    #: Which server serves it. `scout` is the authenticated retrieval server,
-    #: and since leaf-4.3 it is the only one. This field exists so that server
-    #: can derive its tool set from the policy instead of repeating a literal
-    #: list: audit finding F1 was that `governance.py` read this table while
-    #: `scout/mcp_server.py` built its tools independently, so a pass there
-    #: described the declared surface and not the served one. The default is
-    #: the empty string — a command is served only by saying which server
-    #: serves it.
+    #: Which server serves it: `snpmemory`, the authenticated retrieval server,
+    #: and since leaf-4.3 the only one. (It answered to `scout` until leaf-4.4,
+    #: when it took the name the deleted stdio server had been holding.) This
+    #: field exists so that server can derive its tool set from the policy
+    #: instead of repeating a literal list: audit finding F1 was that
+    #: `governance.py` read this table while `scout/mcp_server.py` built its
+    #: tools independently, so a pass there described the declared surface and
+    #: not the served one. The default is the empty string — a command is
+    #: served only by saying which server serves it.
     surface: str = ""
 
 
@@ -197,9 +199,9 @@ POLICIES: tuple[ToolPolicy, ...] = (
     # source or a quotation, and nothing on the surface could produce one, so an
     # agent asked for the evidence under a page could only decline. The tool is
     # still read-only and still post-filters to the addressed file.
-    ToolPolicy("fetch", Exposure.TOOL, tool="wiki_quote", surface="scout"),
-    ToolPolicy("search", Exposure.TOOL, tool="wiki_search", surface="scout"),
-    ToolPolicy("read", Exposure.TOOL, tool="wiki_read", surface="scout"),
+    ToolPolicy("fetch", Exposure.TOOL, tool="wiki_quote", surface="snpmemory"),
+    ToolPolicy("search", Exposure.TOOL, tool="wiki_search", surface="snpmemory"),
+    ToolPolicy("read", Exposure.TOOL, tool="wiki_read", surface="snpmemory"),
     ToolPolicy(
         "install-agent",
         Exposure.HIDDEN,
@@ -262,6 +264,10 @@ def unknown_policies() -> tuple[str, ...]:
     return tuple(p.command for p in POLICIES if p.command not in known)
 
 
+#: The one server that serves tools, as `ToolPolicy.surface` spells it.
+SERVED_SURFACE: Final[str] = "snpmemory"
+
+
 def scout_surface() -> dict[str, str]:
     """Command name -> served tool name, for the authenticated retrieval server.
 
@@ -273,5 +279,5 @@ def scout_surface() -> dict[str, str]:
     return {
         policy.command: policy.tool
         for policy in POLICIES
-        if policy.surface == "scout" and policy.exposure is Exposure.TOOL
+        if policy.surface == SERVED_SURFACE and policy.exposure is Exposure.TOOL
     }

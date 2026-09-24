@@ -454,14 +454,27 @@ _RETRIEVAL_ADAPTERS: dict[
 }
 
 
+#: What `initialize` reports as `serverInfo.name`, and the key every client
+#: config lists this server under. It became `snpmemory` in leaf-4.3/4.4: the
+#: local stdio server that held the name is deleted, so the one server that
+#: remains takes the name the product actually goes by. There is no alias
+#: period -- both spellings conform to the MCP naming rules, so nothing
+#: obliged one, and two names for one server is the ambiguity being removed.
+#:
+#: This is the *agent-facing* identity only. The `scout/` package, the `scout`
+#: compose service and every `SCOUT_*` variable keep their names: they identify
+#: a container and a token audience, not a tool surface.
+SERVER_NAME: Final[str] = "snpmemory"
+
+
 def build_server(
     backend: RagBackend,
-    name: str = "scout",
+    name: str = SERVER_NAME,
     *,
     auth_config: AuthConfig | None = None,
     wiki_engine: ScoutDiyEngine | None = None,
 ) -> FastMCP:
-    """Build authenticated Scout with exactly the two V3 retrieval tools."""
+    """Build the authenticated server with exactly the three retrieval tools."""
     config = auth_config or load_auth_config()
     engine = wiki_engine or _default_engine(backend)
 

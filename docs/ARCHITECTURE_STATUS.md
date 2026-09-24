@@ -68,9 +68,14 @@ not an operations manual.
   Body prose containing `##`, `[[`, `---`, or control characters is rejected at
   validation, so generated text can never break heading order or create an
   unvalidated wikilink (R-1.5).
-- **One MCP surface exists.** `scout` is a container on Streamable HTTP serving
-  exactly three tools — `wiki_search`, `wiki_read` and `wiki_quote` — behind
-  request-scoped JWT/static authentication. It is the only door into the wiki
+- **One MCP surface exists.** `snpmemory` is a container on Streamable HTTP
+  serving exactly three tools — `wiki_search`, `wiki_read` and `wiki_quote` —
+  behind request-scoped JWT/static authentication. It served under the name
+  `scout` until 2026-09-24, and took this one from the stdio server deleted a
+  step earlier. The rename is the *agent-facing* identity only: the `scout/`
+  package, the `scout` compose service and every `SCOUT_*` variable — including
+  the JWT audience — keep their names, because they identify a container and a
+  token audience rather than a tool surface. It is the only door into the wiki
   and the RAG index. Its tool set is built from `scout_surface()` in
   `scout/cli/mcp_policy.py`, and it refuses to start if the policy names a
   command it has no adapter for, so the declared surface and the served one

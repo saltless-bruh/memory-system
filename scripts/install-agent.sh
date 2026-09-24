@@ -188,13 +188,16 @@ done
 # 6. Scaffold .mcp.json if not present
 #
 # One server, matching plugin.json, packages/snp-agent/mcp.json and
-# scripts/export_mcp_config.py: the authenticated Scout connection. The local
-# `snpmemory` stdio server that used to be written beside it was deleted in
-# leaf-4.3, so there is no second entry and no checkout to pin in argv.
+# scripts/export_mcp_config.py: the authenticated retrieval connection. The
+# local stdio server that used to be written beside it was deleted in leaf-4.3,
+# so there is no second entry and no checkout to pin in argv. It is named
+# `snpmemory` since leaf-4.4, taking the name that server had held; a config
+# written before then calls it `scout`, and `snpmemory mcp-config` removes that
+# entry rather than leaving both.
 if [[ ! -f "${TARGET_DIR}/.mcp.json" ]]; then
     {
         printf '{\n  "mcpServers": {\n'
-        printf '    "scout": {\n      "url": "http://localhost:8080/mcp",\n'
+        printf '    "snpmemory": {\n      "url": "http://localhost:8080/mcp",\n'
         printf '      "headers": {"Authorization": "${SCOUT_AUTH_HEADER}"}\n    }'
         printf '\n  }\n}\n'
     } > "${TARGET_DIR}/.mcp.json"

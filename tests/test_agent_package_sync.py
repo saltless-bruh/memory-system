@@ -92,7 +92,7 @@ def test_package_manifest_validity() -> None:
     # One server since leaf-4.3: the local `snpmemory` stdio server it used to
     # declare beside Scout is deleted, and a manifest entry for it would have
     # an installed client launching a subcommand that no longer exists.
-    assert set(servers) == {"scout"}
+    assert set(servers) == {"snpmemory"}
 
     project = data["extensions"]["io.snp.memory"]
     assert "entrypoints" in project

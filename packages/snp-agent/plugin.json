@@ -33,8 +33,8 @@
         "workflows": "workflows/"
       },
       "requiredTools": {
-        "note": "The declared tools are introspected against the running server by tests/test_agent_package.py. `scout` is the only MCP server this package declares: the local `snpmemory` stdio server, which served verify, plan_articles, compile_plan, compile_status and its own copies of wiki_search and wiki_read, was deleted in leaf-4.3 (2026-09-24). Those commands remain in the CLI and ship as the skills listed under `ships`.",
-        "scout": [
+        "note": "The declared tools are introspected against the running server by tests/test_agent_package.py. `snpmemory` is the only MCP server this package declares. It answered to `scout` until 2026-09-24 (leaf-4.4), when it took the name from the local stdio server deleted a step earlier in leaf-4.3 \u2014 that server had held `snpmemory` while serving verify, plan_articles, compile_plan, compile_status and its own copies of wiki_search and wiki_read. Those commands remain in the CLI and ship as the skills listed under `ships`.",
+        "snpmemory": [
           "wiki_search",
           "wiki_read",
           "wiki_quote"

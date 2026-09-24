@@ -255,7 +255,7 @@ def test_the_manifest_lists_the_servers_real_tools() -> None:
     declared = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))[
         "extensions"
     ]["io.snp.memory"]["requiredTools"]
-    assert set(declared) - {"note"} == {"scout"}
+    assert set(declared) - {"note"} == {"snpmemory"}
 
     class _NullBackend:
         async def retrieve(
@@ -284,7 +284,7 @@ def test_the_manifest_lists_the_servers_real_tools() -> None:
             build_scout(_NullBackend(), auth_config=scout_config).list_tools()
         )
     }
-    assert set(declared["scout"]) == served_scout
+    assert set(declared["snpmemory"]) == served_scout
 
 
 def test_the_package_declares_no_server_that_launches_a_local_process() -> None:
@@ -310,8 +310,8 @@ def test_the_installer_scaffolds_exactly_the_v3_servers(tmp_path: Path) -> None:
     )
     scaffolded = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
 
-    assert set(scaffolded["mcpServers"]) == {"scout"}
-    assert scaffolded["mcpServers"]["scout"]["url"] == "http://localhost:8080/mcp"
+    assert set(scaffolded["mcpServers"]) == {"snpmemory"}
+    assert scaffolded["mcpServers"]["snpmemory"]["url"] == "http://localhost:8080/mcp"
 
 
 def test_installer_removes_retired_components_but_preserves_custom_files(

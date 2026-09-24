@@ -629,7 +629,8 @@ snpmemory install-agent /path/to/project --client opencode --dry-run
 snpmemory install-agent /path/to/project --client opencode
 ```
 
-OpenCode receives only native remote `mcp.scout`, seven skills under
+OpenCode receives only native remote `mcp.snpmemory` (named `mcp.scout` in
+configs written before 2026-09-24), seven skills under
 `.opencode/skills/`, and rules/instructions loaded through config
 `instructions` from `.opencode/snp/`. Reference workflows do not register
 OpenCode slash commands automatically. Existing default portable and other

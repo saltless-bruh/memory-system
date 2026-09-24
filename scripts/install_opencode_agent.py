@@ -23,6 +23,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.export_mcp_config import (
+    _OWN_SERVER_NAMES,
     ConfigTargetConflict,
     _load_existing,
     generate_config,
@@ -138,9 +139,11 @@ def prepare_install(
             not isinstance(server, dict) for server in servers.values()
         ):
             raise ValueError("mcp must be an object of server configuration objects")
+        # Sorted: this list is reported back to the user, and a frozenset's
+        # iteration order is not stable across runs.
         owned = [
             f"opencode.json:mcp.{name}"
-            for name in ("scout", "snpmemory", "snp-wiki")
+            for name in sorted(_OWN_SERVER_NAMES)
             if name in servers
         ]
         merged = merge_configs(existing, generate_config("opencode"))

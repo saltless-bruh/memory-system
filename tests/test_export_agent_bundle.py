@@ -117,7 +117,7 @@ def test_install_to_cursor(tmp_path: Path) -> None:
     assert cursor_mcp.is_file()
     data = json.loads(cursor_mcp.read_text(encoding="utf-8"))
     # One server since leaf-4.3, when the local stdio server was deleted.
-    assert set(data["mcpServers"]) == {"scout"}
+    assert set(data["mcpServers"]) == {"snpmemory"}
 
 
 def test_install_to_claude(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_the_bundle_installer_emits_what_the_one_generator_emits(
     key = "servers" if client == "vscode" else "mcpServers"
 
     assert produced[key] == exporter.generate_config(client)[key]
-    assert set(produced[key]) == {"scout"}
+    assert set(produced[key]) == {"snpmemory"}
 
 
 @pytest.mark.parametrize("client", ["cursor", "claude", "vscode"])

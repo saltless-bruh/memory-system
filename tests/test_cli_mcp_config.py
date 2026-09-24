@@ -195,10 +195,10 @@ def test_opencode_prints_native_config_and_names_its_project_path() -> None:
     result = mcp_config(client="opencode", config=_config())
     assert result.data["client"] == "opencode"
     assert result.data["default_path"] == "opencode.json"
-    assert result.data["servers"] == ["scout"]
+    assert result.data["servers"] == ["snpmemory"]
     printed = json.loads(result.summary)
     assert set(printed) == {"$schema", "mcp"}
-    assert printed["mcp"]["scout"]["headers"] == {
+    assert printed["mcp"]["snpmemory"]["headers"] == {
         "Authorization": "{env:SCOUT_AUTH_HEADER}"
     }
 
@@ -239,7 +239,7 @@ def test_opencode_custom_export_artifact_can_coexist_with_jsonc(tmp_path: Path) 
     assert result.exit_code == ExitCode.SUCCESS
     assert jsonc.read_bytes() == original
     assert (
-        json.loads(target.read_text(encoding="utf-8"))["mcp"]["scout"]["type"]
+        json.loads(target.read_text(encoding="utf-8"))["mcp"]["snpmemory"]["type"]
         == "remote"
     )
 
@@ -283,9 +283,9 @@ def test_opencode_existing_file_needs_confirm_then_merges(tmp_path: Path) -> Non
     assert written["model"] == original["model"]
     assert written["instructions"] == original["instructions"]
     assert written["mcp"]["other"] == original["mcp"]["other"]
-    assert set(written["mcp"]) == {"other", "scout"}
+    assert set(written["mcp"]) == {"other", "snpmemory"}
     assert written["$schema"] == "https://opencode.ai/config.json"
-    assert result.data["servers"] == ["scout"]
+    assert result.data["servers"] == ["snpmemory"]
     assert "config" not in result.data
 
 

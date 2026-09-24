@@ -781,7 +781,13 @@ def _entry_contract_errors(path: Path, content: str) -> list[str]:
 def group_contract_matches_surface() -> str:
     """Compare shipped manifests and entry contracts to the real server."""
     served_scout = asyncio.run(_served_tool_names())
-    served = {"scout": served_scout}
+    # Keyed by the served server's own name, read from the module that sets it
+    # rather than repeated here: this gate compares shipped manifests against
+    # the running surface, and a literal would let the two drift apart in the
+    # one place the comparison happens.
+    from scout.mcp_server import SERVER_NAME  # noqa: PLC0415
+
+    served = {SERVER_NAME: served_scout}
     require(
         served_scout == set(_SCOUT_PARAMETERS),
         "Scout runtime and manifests drifted together from the canonical pair",

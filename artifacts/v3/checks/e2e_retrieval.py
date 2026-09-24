@@ -622,8 +622,15 @@ class _NullBackend:
 _SCOUT_PARAMETERS = {
     "wiki_search": {"query", "k", "seen", "department"},
     "wiki_read": {"path", "mode", "section", "department"},
+    "wiki_quote": {"path", "hint", "loc", "k", "department"},
 }
-_SCOUT_REQUIRED = {"wiki_search": {"query"}, "wiki_read": {"path"}}
+_SCOUT_REQUIRED = {
+    "wiki_search": {"query"},
+    "wiki_read": {"path"},
+    # Both halves of an address are required: a hint with no path could match
+    # any file, which is the post-filter's whole subject (R-4.3).
+    "wiki_quote": {"path", "hint"},
+}
 #: Envelope keys wiki_search declares. The per-page rows moved under
 #: ``results``; the three counters describe the search itself.
 _SEARCH_ENVELOPE_FIELDS = {

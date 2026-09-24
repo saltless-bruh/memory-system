@@ -191,7 +191,7 @@ def group_no_retired_service() -> str:
 
 
 def group_live_tool_surface() -> str:
-    """Verify the live scout container serves exactly wiki_search and wiki_read.
+    """Verify the live scout container serves exactly the three retrieval tools.
 
     Reaches the container's HTTP MCP server, authenticates with static token,
     and verifies the tool manifest by initializing an MCP session.
@@ -254,7 +254,10 @@ def group_live_tool_surface() -> str:
     except Exception as exc:
         raise GateFailure(f"MCP client error: {exc}") from exc
 
-    expected_tools = {"wiki_search", "wiki_read"}
+    # The V3 surface is three retrieval tools (ADR-0001). `wiki_quote` joined
+    # on 2026-09-22; this gate pinned two and is what catches a fourth
+    # appearing without a decision.
+    expected_tools = {"wiki_search", "wiki_read", "wiki_quote"}
     require(
         tool_names == expected_tools,
         f"tool surface mismatch: found {sorted(tool_names)!r}, "

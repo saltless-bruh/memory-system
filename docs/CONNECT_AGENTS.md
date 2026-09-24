@@ -10,9 +10,17 @@ live ingestion → human-reviewed update experiment.
 
 | Surface | Transport | Purpose |
 |---|---|---|
-| `scout` | Remote MCP at `http://127.0.0.1:8080/mcp` | Authenticated `wiki_search` and `wiki_read`; the agent's only retrieval path. |
-| `snpmemory` | Optional local stdio subprocess | Local authoring/verification adapter with its launching user's authority; omitted from the OpenCode target. |
-| `snpmemory` CLI | Operator terminal in an authorized checkout | Ingestion, planning, compilation, and explicit operator actions. |
+| `scout` | Remote MCP at `http://127.0.0.1:8080/mcp` | Authenticated `wiki_search`, `wiki_read` and `wiki_quote`; the agent's only retrieval path, and since 2026-09-24 the only MCP server this project configures. |
+| `snpmemory` CLI | Operator terminal in an authorized checkout | Ingestion, planning, compilation, verification, and explicit operator actions. Not an MCP surface. |
+
+The optional local `snpmemory` stdio MCP server was **deleted on 2026-09-24**.
+It ran as a subprocess with its launching user's full authority, and served its
+own copies of `wiki_search` and `wiki_read` that could disagree with the ones
+Scout serves. Everything it exposed — verification, `plan-articles`,
+`compile-plan`, `compile-status` — is still a CLI command, and ships as an
+Agent Skill that runs it. A config written before that date still holding a
+`snpmemory` server entry is corrected by re-running `snpmemory mcp-config`,
+which removes it rather than leaving it registered.
 
 There is no separate wiki-engine endpoint in the V3 agent connection. Source
 extraction beyond indexed wiki pages is deferred. Do not invent another
@@ -61,8 +69,8 @@ runtime:
 }
 ```
 
-This target adds no local `snpmemory` MCP server. OpenCode uses `mcp` rather
-than the Claude-style `mcpServers` key and needs no `mcp-remote` bridge.
+OpenCode uses `mcp` rather than the Claude-style `mcpServers` key and needs no
+`mcp-remote` bridge.
 
 The installer copies seven package skills into `.opencode/skills/`. SNP
 rules, instructions, and reference workflows go to `.opencode/snp/`; config
@@ -116,10 +124,14 @@ behavior. OpenCode support does not change the portable installation default.
 | Client | Conventional destination | Server key | Managed entries |
 |---|---|---|---|
 | `opencode` | Current project's `opencode.json` | `mcp` | Remote Scout |
-| `cursor` | `~/.cursor/mcp.json` | `mcpServers` | Scout bridge and local `snpmemory` |
-| `vscode` | Current project's `.vscode/mcp.json` | `servers` | Scout bridge and local `snpmemory`, both `type: "stdio"` |
-| `claude` | Current project's `.mcp.json` | `mcpServers` | Scout bridge and local `snpmemory` |
-| `gemini` | `~/.gemini/settings.json` | `mcpServers` | Scout bridge and local `snpmemory` |
+| `cursor` | `~/.cursor/mcp.json` | `mcpServers` | Scout bridge |
+| `vscode` | Current project's `.vscode/mcp.json` | `servers` | Scout bridge, `type: "stdio"` |
+| `claude` | Current project's `.mcp.json` | `mcpServers` | Scout bridge |
+| `gemini` | `~/.gemini/settings.json` | `mcpServers` | Scout bridge |
+
+Every target is one entry. Each also *removes* a `snpmemory` entry it finds,
+because that server no longer exists; unrelated servers in the same file are
+preserved.
 
 The `claude` target is Claude Code; it does not configure Claude Desktop's
 remote connector UI or serialize a bearer token into Desktop settings.
@@ -156,18 +168,9 @@ Cursor and VS Code use `${env:SCOUT_AUTH_HEADER}` in the bridge environment;
 Gemini uses `$SCOUT_AUTH_HEADER`. Claude Code inherits the variable from its
 process environment without a self-referential `env` entry.
 
-The local server pins the system checkout in its arguments:
-
-```json
-{
-  "command": "snpmemory",
-  "args": ["mcp", "--root", "/path/to/memory-system"]
-}
-```
-
-VS Code also sets `type: "stdio"`. This ensures relative plans,
-configuration, and `.env` resolve against the intended checkout rather than
-the client workspace. Keep `snpmemory` on the client process's PATH.
+No generated entry launches a local process, so nothing has to be on the
+client process's PATH and no entry pins a checkout. The local server that did
+both was deleted on 2026-09-24.
 
 Without an explicit client target, installation keeps portable `.agent/`
 behavior:
@@ -227,25 +230,17 @@ requires a Scout restart. See the [operations runbook](runbook.md#11-static-toke
 
 ## Optional local MCP authority
 
-The local `snpmemory` server inherits the launching user's filesystem and
-operator authority. It has no bearer authentication or network listener.
-It is not a scope-enforced substitute for Scout, even if the client lists
-similarly named local tools. Do not expose it through a reverse proxy or
-attach it to the isolated OpenCode retrieval rehearsal.
+Agent retrieval uses authenticated Scout, and there is no second surface to
+confuse it with. The local `snpmemory` stdio server that used to sit beside it
+inherited the launching user's filesystem and operator authority, with no
+bearer authentication and no scope check; it was deleted on 2026-09-24 rather
+than kept behind a warning.
 
-Operators can enumerate its actual surface:
-
-```bash
-snpmemory mcp --root /path/to/checkout --list-tools
-```
-
-It currently includes `verify`, `plan_articles`, `compile_plan`,
-`compile_status`, `wiki_search`, and `wiki_read`. Agent retrieval still uses
-authenticated Scout. `compile_plan` can write pages and requires
-confirmation; a background handle must be polled with `compile_status`.
-The automated vault checker is transitional and does not certify the
-complete V3 schema/heading contract. Follow the rehearsal's foreground
-staging procedure to preserve authored control documents.
+Authoring and verification are operator actions at a terminal. `compile-plan`
+writes pages and requires `--confirm`; a background handle is polled with
+`compile-status`. The automated vault checker is transitional and does not
+certify the complete V3 schema/heading contract. Follow the rehearsal's
+foreground staging procedure to preserve authored control documents.
 
 No exposed MCP tool pushes or merges a branch. The operator CLI handles
 ingestion/compilation; a human publishes the feature branch, opens/reviews

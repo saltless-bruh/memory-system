@@ -215,7 +215,6 @@ engine and canonical envelope.*
 | `snpmemory extract --path │ --dir` | figures + tables → `derived/` | `3` path outside `raw/` |
 | `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started / failed / cancelled · `3` handle names no readable plan |
 | `snpmemory compile-cancel <handle>` | ask a running batch to stop at its next article boundary | `3` unknown handle |
-| `snpmemory mcp [--root] [--list-tools]` | serve these operations to an agent over stdio | `3` `--root` is not a checkout |
 | `snpmemory verify-vault` | frontmatter + index lint | `1` lint errors |
 | `snpmemory verify-addresses` | address merge gate | `1` drift/fail |
 | `snpmemory verify-groundedness` | faithfulness gate | `1` unsupported claims |
@@ -227,6 +226,15 @@ engine and canonical envelope.*
 | `snpmemory install-agent [dir] [--dry-run] [--confirm]` | install the agent package | `3` target is not a directory · `5` target already has `.agent/` |
 | `snpmemory mcp-config --client [--out] [--confirm]` | emit MCP client configuration | `5` `--out` exists · `7` target unparseable |
 | `snpmemory schema` | capability description | |
+
+**`snpmemory mcp` was deleted on 2026-09-24 (leaf-4.3)** and is absent from
+this table rather than marked retired: it is not a command with a deprecation
+period. It served a second MCP server over stdio, carrying the authority of
+whoever launched it, and holding its own copies of `wiki_search` and
+`wiki_read` free to drift from the ones the authenticated server actually
+serves. The operations it exposed are unaffected — `check`, `plan-articles`,
+`compile-plan` and `compile-status` are still the commands above, and ship as
+Agent Skills that run them. `mcp-config` now emits one server.
 
 `up`/`down`/`status`/`logs` shell out to `docker compose` and forward unknown
 arguments, so `snpmemory up --build` behaves as expected. They are a

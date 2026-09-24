@@ -18,7 +18,12 @@
   "extensions": {
     "io.snp.memory": {
       "rbac": {
-        "departments": ["redteam", "blueteam", "ai_eng", "infra"],
+        "departments": [
+          "redteam",
+          "blueteam",
+          "ai_eng",
+          "infra"
+        ],
         "defaultScope": "ai_eng",
         "note": "A tool argument may narrow the caller's departments but never add or expand authority. The document ACL value `all` is not caller clearance."
       },
@@ -28,15 +33,11 @@
         "workflows": "workflows/"
       },
       "requiredTools": {
-        "note": "The declared tools are introspected against both in-process servers by tests/test_agent_package.py.",
-        "scout": ["wiki_search", "wiki_read", "wiki_quote"],
-        "snpmemory": [
-          "verify",
-          "plan_articles",
-          "compile_plan",
-          "compile_status",
+        "note": "The declared tools are introspected against the running server by tests/test_agent_package.py. `scout` is the only MCP server this package declares: the local `snpmemory` stdio server, which served verify, plan_articles, compile_plan, compile_status and its own copies of wiki_search and wiki_read, was deleted in leaf-4.3 (2026-09-24). Those commands remain in the CLI and ship as the skills listed under `ships`.",
+        "scout": [
           "wiki_search",
-          "wiki_read"
+          "wiki_read",
+          "wiki_quote"
         ]
       },
       "ships": {
@@ -65,12 +66,18 @@
           "frontmatter_schema.instructions.md",
           "query_protocol.instructions.md"
         ],
-        "rules": ["snp-memory.md"]
+        "rules": [
+          "snp-memory.md"
+        ]
       },
       "repoLocal": {
         "note": "Not distributed: repository development instructions and the superpowers layer. Shared non-superpowers instructions remain mirrored into .claude; superpowers is excluded there because Claude uses unlazy completion discipline.",
-        "prefixes": ["superpowers-"],
-        "rules": ["superpowers.md"],
+        "prefixes": [
+          "superpowers-"
+        ],
+        "rules": [
+          "superpowers.md"
+        ],
         "instructions": [
           "Roadmap.instructions.md",
           "coding_standards.instructions.md",

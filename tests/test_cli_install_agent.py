@@ -102,18 +102,19 @@ def test_confirm_installs_over_an_existing_agent_directory(tmp_path: Path) -> No
     assert (tmp_path / ".agent" / "rules" / "snp-memory.md").is_file()
 
 
-def test_the_installed_project_gets_the_two_v3_servers(tmp_path: Path) -> None:
+def test_the_installed_project_gets_the_v3_server(tmp_path: Path) -> None:
     """`snp-wiki` was basic-memory, and V3 removed it from the stack.
 
-    An installed project must be handed the two servers that exist, and must
-    not be told to connect to the retired one — a stale entry here points a
-    fresh checkout at a port nothing listens on.
+    An installed project must be handed the servers that exist, and must not be
+    told to connect to a retired one — a stale entry here points a fresh
+    checkout at a port nothing listens on, or at a subcommand that was deleted.
+    `snpmemory` was the second such entry until leaf-4.3.
     """
     result = install_agent(str(tmp_path), config=_config())
 
-    assert result.data["servers"] == ["scout", "snpmemory"]
+    assert result.data["servers"] == ["scout"]
     written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
-    assert set(written["mcpServers"]) == {"scout", "snpmemory"}
+    assert set(written["mcpServers"]) == {"scout"}
 
 
 def test_installing_is_idempotent(tmp_path: Path) -> None:

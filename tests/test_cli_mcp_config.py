@@ -1,7 +1,7 @@
-"""Tests for `scout/cli/commands/mcp.py` — `mcp-config` and `mcp --root`.
+"""Tests for `scout/cli/commands/mcp.py` — `mcp-config`.
 
-The commands' jobs are small; their failure modes are not. Three of them are
-what these tests mostly pin:
+The command's job is small; its failure modes are not. Two of them are what
+these tests mostly pin:
 
 **A user's config is merged, never replaced.** It holds servers this project
 knows nothing about.
@@ -10,9 +10,11 @@ knows nothing about.
 only a `${SCOUT_AUTH_HEADER}` reference, but the half read from disk may hold a
 real token for an unrelated server.
 
-**The served checkout is pinned, not inherited.** A client launches this server
-from its own directory, and every tool call resolves configuration and relative
-paths against the process cwd.
+The third property this file used to pin — that `snpmemory mcp` served the
+checkout given to `--root` rather than whichever directory a client launched it
+from — is gone with that command, deleted in leaf-4.3 along with the stdio
+server behind it. What is left of the subject is measured below: the command is
+absent, and nothing it wrote survives in the emitted config.
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -288,101 +289,43 @@ def test_opencode_existing_file_needs_confirm_then_merges(tmp_path: Path) -> Non
     assert "config" not in result.data
 
 
-# ── `snpmemory mcp --root` — the server half of the pin ────────────────────
+# ── the deleted `snpmemory mcp` command (leaf-4.3) ────────────────────────
 
 
-def _mcp() -> Any:
-    from scout.cli.commands.mcp import mcp
+def test_the_mcp_command_is_gone() -> None:
+    """It launched a second MCP server over stdio and is deleted, not hidden.
 
-    return mcp
-
-
-def test_root_pins_the_working_directory_so_a_client_may_launch_anywhere(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A client starts this server from its own directory, not from the repo.
-
-    Every tool call resolves its configuration, its `.env`, and any relative
-    plan path against the process cwd, so an unpinned launch serves a different
-    checkout — or, from outside one, no checkout at all.
+    The module that held its tools is gone too, so a surviving entry point
+    would fail at import rather than at policy — and `mcp-config`, which lives
+    in the same module, must keep working.
     """
-    monkeypatch.chdir(tmp_path)
-    outside = Config(prerequisite=Prerequisite.LOCAL, repo_root=None)
+    import scout.cli.commands.mcp as module
 
-    result = _mcp()(root=str(REPO_ROOT), list_tools=True, config=outside)
-
-    assert result.exit_code == ExitCode.SUCCESS
-    assert Path.cwd() == REPO_ROOT
-    assert {tool["name"] for tool in result.data["tools"]} == {
-        "verify",
-        "plan_articles",
-        "compile_plan",
-        "compile_status",
-        "wiki_search",
-        "wiki_read",
-    }
+    assert not hasattr(module, "mcp")
+    assert callable(module.mcp_config)
 
 
-def test_root_accepts_a_subdirectory_and_pins_the_checkout_itself(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    outside = Config(prerequisite=Prerequisite.LOCAL, repo_root=None)
+def test_no_emitted_entry_launches_the_deleted_command() -> None:
+    """Measured over every client, not asserted against one name."""
+    for client in exporter.SUPPORTED_CLIENTS:
+        servers = mcp_config(client=client, config=_config()).data["config"][
+            _server_key(client)
+        ]
+        for name, entry in servers.items():
+            argv = [entry.get("command", ""), *entry.get("args", [])]
+            assert "mcp" not in argv[1:], f"{client}/{name} still launches a server"
 
-    _mcp()(root=str(REPO_ROOT / "scout"), list_tools=True, config=outside)
 
-    assert Path.cwd() == REPO_ROOT
+def test_mcp_config_still_requires_a_checkout() -> None:
+    """`root` stopped pinning anything; requiring a repository did not.
 
-
-def test_root_outside_any_checkout_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    empty = tmp_path / "not-a-checkout"
-    empty.mkdir()
-
+    The command writes this project's configuration, so running it from outside
+    a checkout is a user error rather than a default.
+    """
     with pytest.raises(CliError) as caught:
-        _mcp()(
-            root=str(empty),
-            list_tools=True,
+        mcp_config(
+            client="claude",
             config=Config(prerequisite=Prerequisite.LOCAL, repo_root=None),
         )
 
     assert caught.value.to_result().exit_code == ExitCode.INPUT_VALIDATION
-    assert Path.cwd() == tmp_path
-
-
-def test_a_root_that_does_not_exist_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    with pytest.raises(CliError) as caught:
-        _mcp()(
-            root=str(tmp_path / "absent"),
-            list_tools=True,
-            config=Config(prerequisite=Prerequisite.LOCAL, repo_root=None),
-        )
-
-    assert caught.value.to_result().exit_code == ExitCode.INPUT_VALIDATION
-
-
-def test_without_root_a_checkout_is_still_required(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    with pytest.raises(CliError) as caught:
-        _mcp()(
-            list_tools=True,
-            config=Config(prerequisite=Prerequisite.LOCAL, repo_root=None),
-        )
-
-    assert caught.value.to_result().exit_code == ExitCode.INPUT_VALIDATION
-
-
-def test_the_exported_root_is_the_checkout_mcp_config_was_run_in() -> None:
-    """What `mcp-config` writes and what `mcp --root` accepts are one value."""
-    result = mcp_config(client="claude", config=_config())
-    local = result.data["config"]["mcpServers"]["snpmemory"]
-    assert local["args"] == ["mcp", "--root", str(REPO_ROOT)]

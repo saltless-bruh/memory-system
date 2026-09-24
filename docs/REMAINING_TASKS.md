@@ -258,10 +258,15 @@ directions — `cd docs && compile-status ../artifacts/plan.json` was refused wi
 instead of the file the caller was looking at. A relative path resolves the way a
 shell resolves it; `root` is a **boundary**, not an anchor.
 
-`snpmemory mcp --root <dir>` pins the working directory at startup, so a client
-may launch the server from its own directory. That is a `chdir`, not a stored
-value, because `invoke()` resolves configuration and `.env` from `Path.cwd()` on
-every tool call.
+`snpmemory mcp --root <dir>` pinned the working directory at startup, so a
+client could launch the server from its own directory. That was a `chdir`, not
+a stored value, because `invoke()` resolves configuration and `.env` from
+`Path.cwd()` on every tool call.
+
+**Superseded 2026-09-24 (leaf-4.3):** `snpmemory mcp` and the stdio server
+behind it are deleted, so nothing launches a server from a client's directory
+any more and no generated config pins a checkout. The boundary rule above still
+governs the CLI commands, which is where those operations live now.
 
 ### T2.3 — Staging was not guarded against a plan edit — FIXED
 
@@ -459,11 +464,15 @@ the migration corrected, beyond shape:
 **The limitation to know before "fixing" it:** a portable plugin **cannot** pin
 the memory-system checkout. `${PLUGIN_ROOT}` names the *installed plugin's*
 directory, every resolved path must stay inside it, and the checkout is outside
-by construction. So `mcp.json` ships `env: {"SNP_MEMORY_ROOT": ""}` and
-`snpmemory mcp` reads it as a `--root` fallback, exiting `3` and naming the
-variable when it is empty rather than serving whichever directory the client
-started in. `snpmemory mcp-config` writes the real path, because it runs *from*
+by construction. So `mcp.json` shipped `env: {"SNP_MEMORY_ROOT": ""}` and
+`snpmemory mcp` read it as a `--root` fallback, exiting `3` and naming the
+variable when it was empty rather than serving whichever directory the client
+started in. `snpmemory mcp-config` wrote the real path, because it runs *from*
 the checkout and therefore knows it.
+
+**Resolved by removal, 2026-09-24 (leaf-4.3):** the limitation is gone with its
+subject. `mcp.json` declares one server, a URL, so a portable plugin has no
+checkout to pin and `SNP_MEMORY_ROOT` is no longer read by anything.
 
 ### T3.5 — There were **five** config surfaces, not three — FIXED
 

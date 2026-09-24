@@ -189,10 +189,7 @@ def group_no_write_capability() -> str:
 
     def _exposed(name: str) -> bool:
         policy = policy_for(name)
-        return policy is not None and policy.exposure in (
-            Exposure.TOOL,
-            Exposure.GROUPED,
-        )
+        return policy is not None and policy.exposure is Exposure.TOOL
 
     # The rule is derived from what each command DECLARES, not from a list of
     # names. A hardcoded list goes stale silently: this gate previously required

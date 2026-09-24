@@ -94,10 +94,10 @@ if [[ "${DRY_RUN}" == true ]] && { [[ "${CLIENT}" == portable ]] || [[ ! -d "${P
     exit 0
 fi
 
-# The checkout the local stdio server would serve. Set only when this script is
-# run from a real clone: a curl install clones into a temp directory that is
-# deleted on exit, and pinning a server to a path that will not exist is worse
-# than not offering it.
+# Whether this script is running from a real clone rather than a temp directory
+# a curl install deletes on exit. Nothing in the scaffolded config depends on it
+# any more — the one server it writes is a URL — but the closing advice does:
+# `snpmemory mcp-config` has to be run from a checkout.
 LOCAL_CHECKOUT="${REPO_ROOT}"
 
 # Which revision a remote install fetches.
@@ -187,25 +187,21 @@ done
 
 # 6. Scaffold .mcp.json if not present
 #
-# Two servers, matching plugin.json and scripts/export_mcp_config.py: Scout
-# serves V3 retrieval and snpmemory serves the local retrieval/authoring surface.
-# The stdio server needs the checkout it serves pinned in argv.
+# One server, matching plugin.json, packages/snp-agent/mcp.json and
+# scripts/export_mcp_config.py: the authenticated Scout connection. The local
+# `snpmemory` stdio server that used to be written beside it was deleted in
+# leaf-4.3, so there is no second entry and no checkout to pin in argv.
 if [[ ! -f "${TARGET_DIR}/.mcp.json" ]]; then
     {
         printf '{\n  "mcpServers": {\n'
         printf '    "scout": {\n      "url": "http://localhost:8080/mcp",\n'
         printf '      "headers": {"Authorization": "${SCOUT_AUTH_HEADER}"}\n    }'
-        if [[ -n "${LOCAL_CHECKOUT}" ]]; then
-            printf ',\n    "snpmemory": {\n      "command": "snpmemory",\n'
-            printf '      "args": ["mcp", "--root", "%s"]\n    }' "${LOCAL_CHECKOUT}"
-        fi
         printf '\n  }\n}\n'
     } > "${TARGET_DIR}/.mcp.json"
     echo "📄 Created default .mcp.json"
     if [[ -z "${LOCAL_CHECKOUT}" ]]; then
-        echo "ℹ️  The local authoring server was left out: this install had no"
-        echo "   persistent checkout to point it at. From your memory-system"
-        echo "   clone, run: snpmemory mcp-config --client claude"
+        echo "ℹ️  From your memory-system clone, run"
+        echo "   snpmemory mcp-config --client claude to regenerate this file."
     fi
 else
     echo "ℹ️  Preserved existing .mcp.json; run snpmemory mcp-config --client claude"

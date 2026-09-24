@@ -310,44 +310,6 @@ command(
     ),
 )
 command(
-    "mcp",
-    "Serve these operations to an MCP agent over stdio.",
-    "scout.cli.commands.mcp:mcp",
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
-    args=(
-        ArgSpec(
-            "--root",
-            "path",
-            description=(
-                "The checkout to serve. Pins the working directory at startup, "
-                "so a client may launch this server from anywhere."
-            ),
-        ),
-        ArgSpec(
-            "--list-tools",
-            "boolean",
-            default=False,
-            description="Print the tool surface and exit instead of serving.",
-        ),
-    ),
-    example=("--list-tools", "-o", "json"),
-    output_fields=(
-        FieldSpec(
-            "tools",
-            "array",
-            items=FieldSpec(
-                "tool",
-                "object",
-                fields=(
-                    FieldSpec("name", "string"),
-                    FieldSpec("read_only", "boolean"),
-                    FieldSpec("destructive", "boolean"),
-                ),
-            ),
-        ),
-    ),
-)
-command(
     "mcp-config",
     "Emit MCP client configuration for this stack's servers.",
     "scout.cli.commands.mcp:mcp_config",

@@ -236,10 +236,12 @@ def test_the_manifest_and_the_exporter_describe_the_same_servers() -> None:
     assert set(_manifest_servers(PACKAGE_DIR)) == exported
 
 
-def test_the_manifest_lists_the_local_servers_real_tools() -> None:
-    """`requiredTools` has to name tools the servers actually serve.
+def test_the_manifest_lists_the_servers_real_tools() -> None:
+    """`requiredTools` has to name tools the server actually serves.
 
-    Both active servers are built in-process here, keeping this check hermetic.
+    The server is built in-process here, keeping this check hermetic. It used
+    to introspect two: the local stdio server was deleted in leaf-4.3, and the
+    manifest may not keep declaring tools nothing can serve.
     """
     import asyncio
     import json
@@ -247,16 +249,13 @@ def test_the_manifest_lists_the_local_servers_real_tools() -> None:
 
     sys.path.insert(0, str(REPO_ROOT))
     from scout.auth import AuthConfig, AuthMode, CallerIdentity
-    from scout.mcp.local_server import build_server
     from scout.mcp_server import build_server as build_scout
     from scout.types import RagChunk, Scope
 
     declared = json.loads((PACKAGE_DIR / "plugin.json").read_text(encoding="utf-8"))[
         "extensions"
     ]["io.snp.memory"]["requiredTools"]
-
-    served_local = {tool.name for tool in asyncio.run(build_server().list_tools())}
-    assert set(declared["snpmemory"]) == served_local
+    assert set(declared) - {"note"} == {"scout"}
 
     class _NullBackend:
         async def retrieve(
@@ -288,13 +287,18 @@ def test_the_manifest_lists_the_local_servers_real_tools() -> None:
     assert set(declared["scout"]) == served_scout
 
 
-def test_the_local_server_is_declared_stdio_and_carries_no_url() -> None:
-    """It has the authority of whoever launches it; a URL would publish that."""
-    local = _manifest_servers(PACKAGE_DIR)["snpmemory"]
-    # Agent Plugins types the transport rather than leaving it free text.
-    assert local["type"] == "stdio"
-    assert "url" not in local
-    assert local["command"] == "snpmemory"
+def test_the_package_declares_no_server_that_launches_a_local_process() -> None:
+    """The deleted stdio server must not survive in the shipped manifest.
+
+    It carried the authority of whoever launched it. Measured over every
+    declared server rather than by naming the retired one, so a differently
+    named stdio entry cannot be added back without failing here.
+    """
+    for name, server in _manifest_servers(PACKAGE_DIR).items():
+        # Agent Plugins types the transport rather than leaving it free text.
+        assert server.get("type") != "stdio", f"{name} launches a local process"
+        assert "command" not in server, f"{name} launches a local process"
+        assert server.get("url"), f"{name} declares no endpoint"
 
 
 def test_the_installer_scaffolds_exactly_the_v3_servers(tmp_path: Path) -> None:
@@ -306,10 +310,8 @@ def test_the_installer_scaffolds_exactly_the_v3_servers(tmp_path: Path) -> None:
     )
     scaffolded = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
 
-    assert set(scaffolded["mcpServers"]) == {"scout", "snpmemory"}
-    local = scaffolded["mcpServers"]["snpmemory"]
-    assert local["command"] == "snpmemory"
-    assert local["args"] == ["mcp", "--root", str(REPO_ROOT)]
+    assert set(scaffolded["mcpServers"]) == {"scout"}
+    assert scaffolded["mcpServers"]["scout"]["url"] == "http://localhost:8080/mcp"
 
 
 def test_installer_removes_retired_components_but_preserves_custom_files(

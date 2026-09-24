@@ -22,7 +22,7 @@ def test_generated_config_exposes_only_v3_servers_and_authenticates_scout(
     config = exporter.generate_config(client)
     server_key = "servers" if client == "vscode" else "mcpServers"
     servers = config[server_key]
-    assert set(servers) == {"scout", exporter.LOCAL_SERVER_NAME}
+    assert set(servers) == {"scout"}
     scout = servers["scout"]
 
     if client == "vscode":
@@ -397,69 +397,85 @@ def test_export_can_write_without_posix_only_fchmod(
         assert target.stat().st_mode & 0o777 == 0o600
 
 
-# ── the local stdio server (T2.1) ─────────────────────────────────────────
+# ── one server, and the retired one removed (leaf-4.3) ────────────────────
 
 
 @pytest.mark.parametrize("client", LEGACY_CLIENTS)
-def test_legacy_clients_get_exactly_the_v3_servers(client: str) -> None:
-    """An installed agent reaches V3 retrieval and the authoring path.
+def test_every_client_gets_exactly_one_server(client: str) -> None:
+    """The exported surface is the authenticated Scout connection and nothing else.
 
-    The retired basic-memory server must not be scaffolded after Scout proves
-    both canonical V3 read tools.
+    Until leaf-4.3 this also wrote a `snpmemory` stdio entry that launched a
+    second MCP server from the user's own shell. That server is deleted, so an
+    entry naming it would advertise tools that cannot start.
     """
     server_key = "servers" if client == "vscode" else "mcpServers"
     servers = exporter.generate_config(client)[server_key]
-    assert set(servers) == {"scout", exporter.LOCAL_SERVER_NAME}
+    assert set(servers) == {"scout"}
+
+
+def test_opencode_gets_exactly_one_server() -> None:
+    assert set(exporter.generate_config("opencode")["mcp"]) == {"scout"}
 
 
 @pytest.mark.parametrize("client", LEGACY_CLIENTS)
-def test_the_local_server_is_stdio_with_its_checkout_pinned(client: str) -> None:
-    server_key = "servers" if client == "vscode" else "mcpServers"
-    local = exporter.generate_config(client)[server_key][exporter.LOCAL_SERVER_NAME]
+def test_the_root_argument_no_longer_pins_a_checkout(
+    client: str, tmp_path: Path
+) -> None:
+    """`root` survives as an accepted argument and changes nothing.
 
-    assert local["command"] == "snpmemory"
-    assert local["args"] == ["mcp", "--root", str(exporter.REPO_ROOT)]
-    # stdio only: no URL, no token, no header. This server carries the authority
-    # of whoever launches it, which is exactly why it must never be a URL.
-    assert "url" not in local and "httpUrl" not in local
-    assert "env" not in local
-    if client == "vscode":
-        assert local["type"] == "stdio"
-
-
-def test_the_pinned_root_follows_the_caller(tmp_path: Path) -> None:
-    local = exporter.generate_config("claude", root=tmp_path)["mcpServers"][
-        exporter.LOCAL_SERVER_NAME
-    ]
-    assert local["args"] == ["mcp", "--root", str(tmp_path)]
-
-
-def test_the_exporter_and_the_server_agree_on_the_server_name() -> None:
-    """Two files naming the same server must not be allowed to disagree."""
-    from scout.mcp.local_server import SERVER_NAME
-
-    assert exporter.LOCAL_SERVER_NAME == SERVER_NAME
-
-
-def test_the_exported_entry_actually_starts_the_advertised_tools() -> None:
-    """The config must agree with reality, not with what it said last year.
-
-    This is the check that stops the exporter drifting from the server again:
-    it runs the exact argv the config carries and compares the tool names.
+    `snpmemory mcp-config` still passes it. It pinned the deleted server's
+    checkout; a generated config that varied by caller now would mean some
+    entry still carries a path.
     """
-    import asyncio
+    server_key = "servers" if client == "vscode" else "mcpServers"
+    assert (
+        exporter.generate_config(client, root=tmp_path)[server_key]
+        == exporter.generate_config(client)[server_key]
+    )
 
-    from scout.mcp.local_server import build_server
 
-    local = exporter.generate_config("claude")["mcpServers"][exporter.LOCAL_SERVER_NAME]
-    assert local["args"][0] == "mcp"
+def test_no_generated_entry_launches_a_local_process_from_a_checkout() -> None:
+    """Measured over every client, not asserted over a list of names."""
+    for client in exporter.SUPPORTED_CLIENTS:
+        config = exporter.generate_config(client)
+        key = (
+            "mcp"
+            if client == "opencode"
+            else ("servers" if client == "vscode" else "mcpServers")
+        )
+        for name, entry in config[key].items():
+            argv = [entry.get("command", ""), *entry.get("args", [])]
+            assert "mcp" not in argv[1:], f"{client}/{name} still launches a server"
+            assert str(exporter.REPO_ROOT) not in " ".join(argv), (
+                f"{client}/{name} still pins a checkout"
+            )
 
-    served = {tool.name for tool in asyncio.run(build_server().list_tools())}
-    assert served == {
-        "verify",
-        "plan_articles",
-        "compile_plan",
-        "compile_status",
-        "wiki_search",
-        "wiki_read",
+
+@pytest.mark.parametrize("client", LEGACY_CLIENTS)
+def test_an_upgrade_removes_the_deleted_stdio_entry(client: str) -> None:
+    """A config written before leaf-4.3 must be corrected, not shadowed.
+
+    The stale entry names a real installed command (`snpmemory`) with a
+    subcommand that no longer exists, so leaving it registered gives the client
+    a server whose launch fails at use time rather than at install time.
+    """
+    server_key = "servers" if client == "vscode" else "mcpServers"
+    existing = {
+        server_key: {
+            "snpmemory": {"command": "snpmemory", "args": ["mcp", "--root", "/old"]},
+            "unrelated": {"command": "somebody-elses-server"},
+        }
     }
+    merged = exporter.merge_configs(existing, exporter.generate_config(client))
+    assert set(merged[server_key]) == {"scout", "unrelated"}
+
+
+def test_an_opencode_upgrade_removes_the_deleted_stdio_entry() -> None:
+    existing = {
+        "mcp": {
+            "snpmemory": {"command": "snpmemory", "args": ["mcp"]},
+            "unrelated": {"type": "remote", "url": "http://example.invalid/mcp"},
+        }
+    }
+    merged = exporter.merge_configs(existing, exporter.generate_config("opencode"))
+    assert set(merged["mcp"]) == {"scout", "unrelated"}

@@ -89,7 +89,10 @@ def test_package_manifest_validity() -> None:
     mcp_path = PACKAGE_DIR / "mcp.json"
     assert mcp_path.is_file(), f"Missing mcp.json at {mcp_path}"
     servers = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]
-    assert set(servers) == {"scout", "snpmemory"}
+    # One server since leaf-4.3: the local `snpmemory` stdio server it used to
+    # declare beside Scout is deleted, and a manifest entry for it would have
+    # an installed client launching a subcommand that no longer exists.
+    assert set(servers) == {"scout"}
 
     project = data["extensions"]["io.snp.memory"]
     assert "entrypoints" in project

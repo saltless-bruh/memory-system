@@ -639,14 +639,6 @@ _SEARCH_ENVELOPE_FIELDS = {
     "suppressed_as_seen",
     "has_more",
 }
-_LOCAL_TOOLS = {
-    "verify",
-    "plan_articles",
-    "compile_plan",
-    "compile_status",
-    "wiki_search",
-    "wiki_read",
-}
 
 
 def _scout_surface_errors(tools: Sequence[object]) -> list[str]:
@@ -709,9 +701,14 @@ def _scout_surface_errors(tools: Sequence[object]) -> list[str]:
     return errors
 
 
-async def _served_tool_names() -> tuple[set[str], set[str]]:
+async def _served_tool_names() -> set[str]:
+    """The tools the one MCP server actually registers, on both auth branches.
+
+    This returned two surfaces until leaf-4.3 (2026-09-24), when the local
+    stdio server was deleted. Nothing replaced it here: a second entry would
+    have to name a server that exists.
+    """
     from scout.auth import load_auth_config  # noqa: PLC0415
-    from scout.mcp.local_server import build_server as build_local  # noqa: PLC0415
     from scout.mcp_server import build_server as build_scout  # noqa: PLC0415
     from scout.types import RagBackend  # noqa: PLC0415
 
@@ -732,9 +729,7 @@ async def _served_tool_names() -> tuple[set[str], set[str]]:
         scout_surfaces[0] == scout_surfaces[1],
         "Scout auth branches register different tool surfaces",
     )
-    local = {tool.name for tool in await build_local().list_tools()}
-    require(local == _LOCAL_TOOLS, f"local MCP surface drifted: {sorted(local)!r}")
-    return scout_surfaces[0], local
+    return scout_surfaces[0]
 
 
 def _manifest_tools(path: Path) -> dict[str, set[str]]:
@@ -784,9 +779,9 @@ def _entry_contract_errors(path: Path, content: str) -> list[str]:
 
 
 def group_contract_matches_surface() -> str:
-    """Compare shipped manifests and entry contracts to both real servers."""
-    served_scout, served_local = asyncio.run(_served_tool_names())
-    served = {"scout": served_scout, "snpmemory": served_local}
+    """Compare shipped manifests and entry contracts to the real server."""
+    served_scout = asyncio.run(_served_tool_names())
+    served = {"scout": served_scout}
     require(
         served_scout == set(_SCOUT_PARAMETERS),
         "Scout runtime and manifests drifted together from the canonical pair",

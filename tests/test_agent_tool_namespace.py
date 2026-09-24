@@ -42,15 +42,21 @@ def test_contracts_name_no_retired_retrieval_surface(path: Path) -> None:
     assert not hits, f"{_rel(path)} names retired agent surface(s): {hits}"
 
 
-def test_config_emitters_advertise_exactly_the_two_v3_servers() -> None:
+def test_config_emitters_advertise_exactly_the_one_v3_server() -> None:
+    """Both emitters write the same single server.
+
+    They pinned two until leaf-4.3. The second was a stdio server launched from
+    the user's own shell; it is deleted, and an emitter still naming it would
+    install an entry whose launch fails.
+    """
     import scripts.export_mcp_config as exporter
 
     emitted = set(exporter.generate_config("claude")["mcpServers"])
-    assert emitted == {"scout", "snpmemory"}
+    assert emitted == {"scout"}
 
     installer = (REPO_ROOT / "scripts" / "install-agent.sh").read_text(encoding="utf-8")
     assert '"scout"' in installer
-    assert '"snpmemory"' in installer
+    assert '"snpmemory": {' not in installer
     assert '"snp-wiki"' not in installer
     assert '"basic-memory"' not in installer
 

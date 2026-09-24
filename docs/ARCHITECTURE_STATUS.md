@@ -68,20 +68,24 @@ not an operations manual.
   Body prose containing `##`, `[[`, `---`, or control characters is rejected at
   validation, so generated text can never break heading order or create an
   unvalidated wikilink (R-1.5).
-- Two MCP surfaces exist and they are not interchangeable.
-  **`scout`** is the deployed one: a container on Streamable HTTP with exactly two
-  tools, `wiki_search` and `wiki_read`, behind request-scoped JWT/static
-  authentication. It remains the only door into the wiki and the RAG index.
-  **`snpmemory mcp`** is a local **stdio** server exposing this repository's own
-  operations (`verify`, `plan_articles`, `compile_plan`, `compile_status`), generated
-  from the command declarations in `scout/cli/declarations.py`.
-  It carries **exactly the authority of the user who launches it** — no token, no
-  scope check, no listener. That is why it is stdio-only. Serving it over HTTP would
-  require an OAuth 2.1 design with audience validation; a server that accepts a token
-  it was not issued is the confused-deputy failure the MCP guidance exists to prevent.
-  Tool effects come from each command's declared `Effect`, so `readOnlyHint` and
-  `destructiveHint` cannot disagree with what a command actually does. A command with
-  no exposure decision in `scout/cli/mcp_policy.py` fails the test suite.
+- **One MCP surface exists.** `scout` is a container on Streamable HTTP serving
+  exactly three tools — `wiki_search`, `wiki_read` and `wiki_quote` — behind
+  request-scoped JWT/static authentication. It is the only door into the wiki
+  and the RAG index. Its tool set is built from `scout_surface()` in
+  `scout/cli/mcp_policy.py`, and it refuses to start if the policy names a
+  command it has no adapter for, so the declared surface and the served one
+  cannot answer differently. A command with no exposure decision in that file
+  fails the test suite.
+
+  **A second surface existed until 2026-09-24 (leaf-4.3).** `snpmemory mcp` was
+  a local stdio server exposing this repository's own operations — `verify`,
+  `plan_articles`, `compile_plan`, `compile_status` — plus its own copies of
+  `wiki_search` and `wiki_read`. It is **deleted, not mitigated**, for two
+  reasons. It carried exactly the authority of whoever launched it: no token,
+  no scope check, no listener. And its duplicate retrieval tools were free to
+  drift from the ones actually served, which is the class of defect the audit
+  found rather than a hypothetical. Nothing was lost with it: those operations
+  are still CLI commands, and ship as Agent Skills that run them.
 - Offline tests run with sockets disabled. Live PostgreSQL and authenticated
   HTTP tests carry the `integration` marker.
 - Address verification returns `0` for PASS, `1` for semantic drift/failure,
@@ -265,10 +269,11 @@ Active instructions must not describe:
 - a mismatched `hint` returning empty or "dead-ending" — `rag_fetch` is no longer agent-facing, but the internal call still
   pre-filters by `path`, so the addressed file is returned regardless;
 - the Phase 0 Gate 4 model as deployed for wiki search;
-- the local `snpmemory mcp` server as network-reachable, authenticated, or safe to
-  expose over HTTP — it is stdio-only and unauthenticated by design;
-- any MCP tool other than `wiki_search`/`wiki_read` as a door into the wiki or
-  RAG index;
+- the local `snpmemory mcp` server as anything that still exists — it was
+  deleted on 2026-09-24, and while it existed it was stdio-only and
+  unauthenticated by design, never network-reachable or safe over HTTP;
+- any MCP tool other than `wiki_search`/`wiki_read`/`wiki_quote` as a door into
+  the wiki or RAG index;
 - figure or table extraction as working in the deployed ingester — the
   `snp-scout` image installs `pypdf` only (`scout/requirements.txt`), so
   `pdfplumber` (tables) and Pillow (`pypdf[image]`, figures) are both absent,

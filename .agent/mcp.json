@@ -7,14 +7,6 @@
       "headers": {
         "Authorization": "${SCOUT_AUTH_HEADER}"
       }
-    },
-    "snpmemory": {
-      "type": "stdio",
-      "command": "snpmemory",
-      "args": ["mcp"],
-      "env": {
-        "SNP_MEMORY_ROOT": ""
-      }
     }
   }
 }

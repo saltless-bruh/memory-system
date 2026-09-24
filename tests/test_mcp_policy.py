@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from scout.cli.declarations import DECLARED
 from scout.cli.mcp_policy import (
-    DEFAULT_VERIFY_STAGE,
     POLICIES,
-    VERIFY_TOOL,
     Exposure,
-    stages,
-    standalone_tools,
+    scout_surface,
     undecided_commands,
     unknown_policies,
 )
@@ -36,50 +31,38 @@ def test_each_command_appears_exactly_once() -> None:
 
 
 def test_the_tool_surface_is_smaller_than_the_command_surface() -> None:
-    """Tool-list bloat degrades selection; collapsing the verify family is why."""
-    tool_names = set(standalone_tools()) | {"verify"}
+    """Tool-list bloat degrades selection; retrieval is the whole surface."""
+    tool_names = set(scout_surface().values())
     assert len(tool_names) < len(DECLARED)
-    assert tool_names == {
-        "wiki_search",
-        "wiki_read",
-        "wiki_quote",
-        "verify",
-        "plan_articles",
-        "compile_plan",
-        "compile_status",
-    }
+    assert tool_names == {"wiki_search", "wiki_read", "wiki_quote"}
 
 
-def test_verify_stages_cover_the_whole_family() -> None:
-    assert set(stages()) == {
-        DEFAULT_VERIFY_STAGE,
-        "vault",
-        "secrets",
-        "addresses",
-        "groundedness",
-        "extraction",
-    }
+def test_nothing_is_exposed_on_a_server_that_no_longer_exists() -> None:
+    """Every exposed command names the one server that serves it.
 
-
-def test_the_served_stage_argument_accepts_exactly_the_declared_stages() -> None:
-    """The tool's schema and its own description must name the same stages.
-
-    The served `stage` argument is a hardcoded `Literal`, while the description
-    is built from `stages()`. Adding `verify-extraction` to the policy alone
-    advertised a stage the schema would have rejected -- a tool that documents
-    a call it refuses.
+    Until leaf-4.3 a second value, `local`, meant the stdio server. That server
+    is deleted, so an entry still claiming it would be exposed in the table and
+    served by nothing — the drift `scout_surface()` exists to prevent, pointing
+    the other way.
     """
-    import typing
+    exposed = [p for p in POLICIES if p.exposure is Exposure.TOOL]
+    assert exposed, "the retrieval surface must not be empty"
+    assert {p.surface for p in exposed} == {"scout"}
+    assert len(scout_surface()) == len(exposed)
 
-    from scout.mcp.local_server import build_server
 
-    server = build_server()
-    tool = asyncio.run(server.get_tool(VERIFY_TOOL))
-    # `from __future__ import annotations` leaves the signature holding the
-    # source string, so resolve it rather than reading `__annotations__` raw.
-    hint = typing.get_type_hints(tool.fn, include_extras=True)["stage"]
-    literal = typing.get_args(hint)[0]
-    assert set(typing.get_args(literal)) == set(stages())
+def test_a_command_the_stdio_server_used_to_serve_is_hidden_with_its_reason() -> None:
+    """Retiring a surface must leave a decision behind, not a gap.
+
+    These four were tools on the deleted stdio server. Dropping their rows
+    would have re-opened them as undecided commands; leaving them TOOL would
+    have declared a surface nothing serves.
+    """
+    by_command = {p.command: p for p in POLICIES}
+    for command in ("check", "plan-articles", "compile-plan", "compile-status"):
+        policy = by_command[command]
+        assert policy.exposure is Exposure.HIDDEN
+        assert "leaf-4.3" in policy.reason
 
 
 def test_hidden_commands_state_a_reason() -> None:

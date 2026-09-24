@@ -30,20 +30,24 @@ SUPPORTED_CLIENTS = ["cursor", "vscode", "claude", "gemini", "opencode"]
 _SCOUT_URL = "http://localhost:8080/mcp"
 _OPENCODE_SCOUT_URL = "http://127.0.0.1:8080/mcp"
 _SCOUT_AUTH_HEADER_ENV = "SCOUT_AUTH_HEADER"
-_RETIRED_SERVER_NAMES = frozenset({"snp-wiki"})
+#: Server entries this script removes from a config it merges into, because
+#: they name a surface that no longer exists. Leaving one behind is worse than
+#: never having written it: the client keeps advertising tools whose launch
+#: fails, and an agent reading the list cannot tell a dead entry from a live
+#: one.
+#:
+#: `snp-wiki` was renamed. `snpmemory` was the local stdio server deleted in
+#: leaf-4.3 — a second MCP surface that carried the authority of whoever
+#: launched it and served its own copies of `wiki_search` and `wiki_read`.
+#: Retirement runs before the generated servers are merged in, so a name that
+#: is later reused for a *different* server is dropped and then rewritten,
+#: never shadowed.
+_RETIRED_SERVER_NAMES = frozenset({"snp-wiki", "snpmemory"})
 
-#: The checkout this script belongs to — the default for the local server's
-#: pinned root, since a config exported from a clone should serve that clone.
+#: The checkout this script belongs to. Kept as the default `root` argument so
+#: the signature of `generate_config` is stable for its callers, even though no
+#: generated entry pins a checkout any more.
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-#: Must equal `scout.mcp.local_server.SERVER_NAME`. It is repeated rather than
-#: imported because that module pulls in fastmcp, and this script has to stay
-#: runnable on a machine with nothing installed. A test holds the two together.
-LOCAL_SERVER_NAME = "snpmemory"
-
-#: Installed by `[project.scripts]`, so the exported entry can name a command on
-#: PATH rather than a path into a checkout the user may not have.
-_LOCAL_SERVER_COMMAND = "snpmemory"
 
 
 def _scout_config(client: str) -> dict[str, Any]:
@@ -86,37 +90,18 @@ def _scout_config(client: str) -> dict[str, Any]:
     return config
 
 
-def _local_server_config(client: str, root: Path) -> dict[str, Any]:
-    """Return the local stdio server entry, with the checkout it serves pinned.
-
-    The root travels in ``args`` rather than in a client-specific ``cwd`` key:
-    argv is the one field every one of these four clients passes through
-    unchanged, and an operator reading the config can see which checkout is
-    being served instead of having to know what directory the client launches
-    in. `snpmemory mcp` resolves relative paths and `.env` against its working
-    directory, so an unpinned launch would serve whichever tree the client
-    happened to start from — or none at all.
-
-    No token and no network address: this server is stdio-only and carries the
-    authority of whoever launches it. See `scout/mcp/local_server.py`.
-    """
-    config: dict[str, Any] = {
-        "command": _LOCAL_SERVER_COMMAND,
-        "args": ["mcp", "--root", str(root)],
-    }
-    if client == "vscode":
-        config["type"] = "stdio"
-    return config
-
-
 def generate_config(client: str, root: Path | None = None) -> dict[str, Any]:
-    """Generate client configuration; OpenCode connects directly to Scout only.
+    """Generate client configuration: one server, the authenticated Scout.
+
+    Every client gets the same single entry. Until leaf-4.3 this also wrote a
+    local stdio server pinned to a checkout; that server is deleted, so there
+    is nothing left for `root` to pin.
 
     Args:
         client: One of `SUPPORTED_CLIENTS`.
-        root: The checkout the local stdio server should serve. Defaults to the
-            one this script lives in.
+        root: Accepted and ignored, so existing callers keep working.
     """
+    del root
     if client not in SUPPORTED_CLIENTS:
         raise ValueError(f"Unknown client: {client}")
     if client == "opencode":
@@ -125,12 +110,7 @@ def generate_config(client: str, root: Path | None = None) -> dict[str, Any]:
             "mcp": {"scout": _scout_config(client)},
         }
     server_key = "servers" if client == "vscode" else "mcpServers"
-    return {
-        server_key: {
-            "scout": _scout_config(client),
-            LOCAL_SERVER_NAME: _local_server_config(client, root or REPO_ROOT),
-        }
-    }
+    return {server_key: {"scout": _scout_config(client)}}
 
 
 def merge_configs(
@@ -156,10 +136,6 @@ def merge_configs(
     existing[server_key] = existing_servers
     for retired in _RETIRED_SERVER_NAMES:
         existing_servers.pop(retired, None)
-    if server_key == "mcp":
-        # An upgrade must not leave our local authoring surface registered in
-        # OpenCode. Other clients still receive it, and unrelated servers stay.
-        existing_servers.pop(LOCAL_SERVER_NAME, None)
 
     existing_servers.update(servers)
     for key, value in new_config.items():

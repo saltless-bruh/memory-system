@@ -8,9 +8,16 @@ redundant MCP tool, since an MCP client lists tools natively.
 Exposure is not 1:1 on purpose. A tool definition costs roughly 100-500 tokens
 of every agent's context, and a long tool list measurably degrades tool
 selection — agents call the wrong tool. Retrieval plus every operator command
-would be a crowded list for no benefit, so the five verification
-commands collapse into one `verify` tool with a `stage` argument. That is the
-shape `check` already had.
+would be a crowded list for no benefit.
+
+**Since leaf-4.3 (2026-09-24) the exposed surface is retrieval only.** The
+verification, planning and compilation tools were served by a second MCP server
+over stdio, which is deleted: it carried the authority of whoever launched it
+and held a second copy of `wiki_search`/`wiki_read` free to drift from the
+served ones. Those commands did not disappear with it — they remain CLI
+commands, and ship as Agent Skills that run them — so their entries here are
+`HIDDEN` with that reason, not removed. A retired exposure decision still has
+to be a decision, or the invariant below cannot tell it from an oversight.
 
 The invariant that keeps this honest: **every command in the registry must
 appear here exactly once.** A new command with no exposure decision fails the
@@ -23,7 +30,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from scout.cli.declarations import DECLARED
-from scout.cli.registry import CommandSpec
 
 
 class Exposure(StrEnum):
@@ -31,8 +37,6 @@ class Exposure(StrEnum):
 
     #: Becomes its own tool.
     TOOL = "tool"
-    #: Becomes one `stage` of a grouped tool.
-    GROUPED = "grouped"
     #: Deliberately not exposed.
     HIDDEN = "hidden"
 
@@ -43,25 +47,20 @@ class ToolPolicy:
 
     command: str
     exposure: Exposure
-    #: For TOOL, the tool name. For GROUPED, the tool it joins.
+    #: For TOOL, the served tool name.
     tool: str = ""
-    #: For GROUPED, the value of the tool's `stage` argument.
-    stage: str = ""
     #: Why, when the answer is not obvious.
     reason: str = ""
-    #: Which server serves it. `scout` is the authenticated retrieval server;
-    #: `local` is the stdio server an operator runs beside a checkout. This
-    #: field exists so the authenticated server can derive its tool set from
-    #: the policy instead of repeating a literal list: audit finding F1 was
-    #: that `governance.py` read this table while `scout/mcp_server.py` built
-    #: its tools independently, so a pass there described the declared surface
-    #: and not the served one.
-    surface: str = "local"
+    #: Which server serves it. `scout` is the authenticated retrieval server,
+    #: and since leaf-4.3 it is the only one. This field exists so that server
+    #: can derive its tool set from the policy instead of repeating a literal
+    #: list: audit finding F1 was that `governance.py` read this table while
+    #: `scout/mcp_server.py` built its tools independently, so a pass there
+    #: described the declared surface and not the served one. The default is
+    #: the empty string — a command is served only by saying which server
+    #: serves it.
+    surface: str = ""
 
-
-#: The grouped verification tool's default stage — the full aggregate.
-VERIFY_TOOL = "verify"
-DEFAULT_VERIFY_STAGE = "all"
 
 POLICIES: tuple[ToolPolicy, ...] = (
     ToolPolicy(
@@ -69,25 +68,59 @@ POLICIES: tuple[ToolPolicy, ...] = (
         Exposure.HIDDEN,
         reason="an MCP client lists tools natively; a schema tool is redundant context",
     ),
-    ToolPolicy("check", Exposure.GROUPED, tool=VERIFY_TOOL, stage=DEFAULT_VERIFY_STAGE),
-    ToolPolicy("verify-vault", Exposure.GROUPED, tool=VERIFY_TOOL, stage="vault"),
-    ToolPolicy("verify-secrets", Exposure.GROUPED, tool=VERIFY_TOOL, stage="secrets"),
     ToolPolicy(
-        "verify-addresses", Exposure.GROUPED, tool=VERIFY_TOOL, stage="addresses"
-    ),
-    ToolPolicy(
-        "verify-groundedness", Exposure.GROUPED, tool=VERIFY_TOOL, stage="groundedness"
-    ),
-    # Read-only, and a stage of the verify tool rather than a new one: the
-    # surface stays the size it was while gaining the question "did the corpus
-    # arrive whole?", which nothing could ask before.
-    ToolPolicy(
-        "verify-extraction", Exposure.GROUPED, tool=VERIFY_TOOL, stage="extraction"
-    ),
-    ToolPolicy(
-        "mcp",
+        "check",
         Exposure.HIDDEN,
-        reason="the server cannot serve itself; an agent is already connected to it",
+        reason=(
+            "the grouped `verify` tool lived on the local stdio server, "
+            "deleted in leaf-4.3; verification runs as a CLI command and "
+            "ships as the snp-verify-page and snp-verify-vault skills"
+        ),
+    ),
+    ToolPolicy(
+        "verify-vault",
+        Exposure.HIDDEN,
+        reason=(
+            "the grouped `verify` tool lived on the local stdio server, "
+            "deleted in leaf-4.3; verification runs as a CLI command and "
+            "ships as the snp-verify-page and snp-verify-vault skills"
+        ),
+    ),
+    ToolPolicy(
+        "verify-secrets",
+        Exposure.HIDDEN,
+        reason=(
+            "the grouped `verify` tool lived on the local stdio server, "
+            "deleted in leaf-4.3; verification runs as a CLI command and "
+            "ships as the snp-verify-page and snp-verify-vault skills"
+        ),
+    ),
+    ToolPolicy(
+        "verify-addresses",
+        Exposure.HIDDEN,
+        reason=(
+            "the grouped `verify` tool lived on the local stdio server, "
+            "deleted in leaf-4.3; verification runs as a CLI command and "
+            "ships as the snp-verify-page and snp-verify-vault skills"
+        ),
+    ),
+    ToolPolicy(
+        "verify-groundedness",
+        Exposure.HIDDEN,
+        reason=(
+            "the grouped `verify` tool lived on the local stdio server, "
+            "deleted in leaf-4.3; verification runs as a CLI command and "
+            "ships as the snp-verify-page and snp-verify-vault skills"
+        ),
+    ),
+    ToolPolicy(
+        "verify-extraction",
+        Exposure.HIDDEN,
+        reason=(
+            "the grouped `verify` tool lived on the local stdio server, "
+            "deleted in leaf-4.3; verification runs as a CLI command and "
+            "ships as the snp-verify-page and snp-verify-vault skills"
+        ),
     ),
     ToolPolicy(
         "mcp-config",
@@ -185,9 +218,30 @@ POLICIES: tuple[ToolPolicy, ...] = (
             "job at a terminal. A task-capable client gets tasks/cancel natively"
         ),
     ),
-    ToolPolicy("plan-articles", Exposure.TOOL, tool="plan_articles"),
-    ToolPolicy("compile-plan", Exposure.TOOL, tool="compile_plan"),
-    ToolPolicy("compile-status", Exposure.TOOL, tool="compile_status"),
+    ToolPolicy(
+        "plan-articles",
+        Exposure.HIDDEN,
+        reason=(
+            "served by the local stdio server, deleted in leaf-4.3; it runs as a "
+            "CLI command and ships as the snp-plan-articles skill"
+        ),
+    ),
+    ToolPolicy(
+        "compile-plan",
+        Exposure.HIDDEN,
+        reason=(
+            "served by the local stdio server, deleted in leaf-4.3; it runs as a "
+            "CLI command and ships as the snp-compile-batch skill"
+        ),
+    ),
+    ToolPolicy(
+        "compile-status",
+        Exposure.HIDDEN,
+        reason=(
+            "served by the local stdio server, deleted in leaf-4.3; it runs as a "
+            "CLI command and ships as the snp-compile-batch skill"
+        ),
+    ),
 )
 
 _BY_COMMAND = {policy.command: policy for policy in POLICIES}
@@ -220,24 +274,4 @@ def scout_surface() -> dict[str, str]:
         policy.command: policy.tool
         for policy in POLICIES
         if policy.surface == "scout" and policy.exposure is Exposure.TOOL
-    }
-
-
-def stages() -> dict[str, CommandSpec]:
-    """Stage name → the command it runs, for the grouped verify tool."""
-    by_name = {spec.name: spec for spec in DECLARED}
-    return {
-        policy.stage: by_name[policy.command]
-        for policy in POLICIES
-        if policy.exposure is Exposure.GROUPED and policy.command in by_name
-    }
-
-
-def standalone_tools() -> dict[str, CommandSpec]:
-    """Tool name → the command it runs, for ungrouped tools."""
-    by_name = {spec.name: spec for spec in DECLARED}
-    return {
-        policy.tool: by_name[policy.command]
-        for policy in POLICIES
-        if policy.exposure is Exposure.TOOL and policy.command in by_name
     }

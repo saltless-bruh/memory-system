@@ -1,10 +1,12 @@
-"""`snpmemory mcp` — serve this repository's operations over stdio MCP, and
-`snpmemory mcp-config` — emit client configuration for this stack.
+"""`snpmemory mcp-config` — emit client configuration for this stack.
 
-The server carries the authority of whoever launches it. That is deliberate and
-documented in `scout/mcp/local_server.py`; it is also why this command offers no
-`--host` or `--port`. Exposing these tools on a socket needs an authorization
-design, not a flag.
+**`snpmemory mcp` is gone (leaf-4.3, 2026-09-24).** It served a second MCP
+surface over stdio, carrying the authority of whoever launched it. That server
+is deleted rather than mitigated: it held a duplicate copy of `wiki_search` and
+`wiki_read` that could drift from the ones actually served, and it occupied the
+`snpmemory` name the authenticated retrieval server takes next. What it offered
+did not disappear with it — `verify`, `plan-articles` and `compile-*` remain
+CLI commands, and ship as Agent Skills that run them.
 
 `mcp-config` prints by default and writes only when asked. Two properties it
 must not lose:
@@ -30,86 +32,6 @@ from scout.cli.result import CommandResult, ErrorKind, ExitCode
 
 #: Injected by the dispatcher; never a user-facing flag.
 Injected = Annotated[Any, Parameter(parse=False)]
-
-
-def mcp(
-    *, root: str | None = None, list_tools: bool = False, config: Injected = None
-) -> CommandResult:
-    """Serve the local MCP tools over stdio, or list them and exit."""
-    import os
-    from pathlib import Path
-
-    from scout.cli.config import find_repo_root
-    from scout.mcp.local_server import build_server, run
-
-    cfg: Config = config
-
-    # `SNP_MEMORY_ROOT` is the same pin by another door. A portable Agent
-    # Plugins package cannot express this one: `${PLUGIN_ROOT}` names the
-    # *installed plugin's* directory, every resolved path must stay inside it,
-    # and the checkout this server has to serve is outside it by construction.
-    # So `packages/snp-agent/mcp.json` ships the variable empty and the user
-    # fills it — and an empty one fails loudly below rather than serving the
-    # wrong tree.
-    if root is None:
-        root = os.environ.get("SNP_MEMORY_ROOT", "").strip() or None
-        if root is None and os.environ.get("SNP_MEMORY_ROOT") is not None:
-            raise input_error(
-                "SNP_MEMORY_ROOT is set but empty",
-                hint=(
-                    "put the path of your memory-system checkout in it, or pass "
-                    "--root; it ships empty because a portable plugin cannot "
-                    "know where your checkout is"
-                ),
-            )
-
-    if root is None:
-        cfg.require_repo()
-    else:
-        # Pin the working directory before anything runs. Every tool call
-        # resolves its configuration, its `.env`, and any relative plan path
-        # against the process cwd, so a client that launches this server from
-        # its own directory would otherwise serve a different checkout — or,
-        # launched from outside one, no checkout at all. Moving the process once
-        # at startup pins all of those together, which no amount of threading a
-        # root through individual call sites would.
-        requested = Path(root).expanduser()
-        checkout = find_repo_root(requested) if requested.is_dir() else None
-        if checkout is None:
-            raise input_error(
-                f"--root {root} is not inside a repository checkout",
-                hint="pass the directory holding pyproject.toml and AGENTS.md",
-                root=str(requested),
-            )
-        os.chdir(checkout)
-
-    if list_tools:
-        import asyncio
-
-        tools = asyncio.run(build_server().list_tools())
-        return CommandResult(
-            exit_code=ExitCode.SUCCESS,
-            data={
-                "tools": [
-                    {
-                        "name": tool.name,
-                        "read_only": bool(
-                            tool.annotations and tool.annotations.readOnlyHint
-                        ),
-                        "destructive": bool(
-                            tool.annotations and tool.annotations.destructiveHint
-                        ),
-                    }
-                    for tool in sorted(tools, key=lambda t: t.name)
-                ]
-            },
-            summary=f"{len(tools)} tool(s) available over stdio",
-        )
-
-    # Blocks until the client disconnects. Nothing is printed to stdout: the
-    # transport owns it, and a stray print would corrupt the JSON-RPC stream.
-    run()
-    return CommandResult(exit_code=ExitCode.SUCCESS, summary="mcp server stopped")
 
 
 def mcp_config(
@@ -143,8 +65,11 @@ def mcp_config(
             supported=list(SUPPORTED_CLIENTS),
         )
 
-    # The legacy clients' local-server entry pins this checkout. OpenCode uses
-    # only Scout's native remote connection and has no local authoring server.
+    # One server for every client: the authenticated Scout connection. `root`
+    # pinned the checkout the local stdio server served, and is now ignored by
+    # the exporter; it stays in the call because requiring a repository is
+    # still the right precondition for a command that writes this project's
+    # configuration.
     generated = generate_config(client, root=cfg.require_repo())
     server_key = {"opencode": "mcp", "vscode": "servers"}.get(client, "mcpServers")
     servers = sorted(generated[server_key])

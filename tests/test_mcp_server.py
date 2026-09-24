@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -229,11 +231,20 @@ async def test_both_auth_branches_register_only_v3_tools(protected: bool) -> Non
     else:
         config = _development_config()
     tools = await build_server(RecordingBackend(), auth_config=config).list_tools()
-    assert {tool.name for tool in tools} == {"wiki_search", "wiki_read"}
+    # The V3 surface is three retrieval tools (ADR-0001). `wiki_quote` is the
+    # third: AGENTS.md forbids fabricating a source or a quotation, and until
+    # it was served nothing on the surface could produce one, so an agent asked
+    # for the underlying evidence could only refuse.
+    assert {tool.name for tool in tools} == {
+        "wiki_search",
+        "wiki_read",
+        "wiki_quote",
+    }
     assert "rag_fetch" not in {tool.name for tool in tools}
     expected_parameters = {
         "wiki_search": {"query", "k", "seen", "department"},
         "wiki_read": {"path", "mode", "section", "department"},
+        "wiki_quote": {"path", "hint", "loc", "k", "department"},
     }
     for tool in tools:
         assert tool.annotations is not None
@@ -381,3 +392,107 @@ async def test_server_lifespan_closes_closeable_backend() -> None:
         backend.close.assert_not_awaited()  # type: ignore[attr-defined]
 
     backend.close.assert_awaited_once_with()  # type: ignore[attr-defined]
+
+
+# ── wiki_quote (leaf-4.1) ────────────────────────────────────────────────────
+
+
+async def test_wiki_quote_reaches_raw_through_a_wiki_scoped_backend() -> None:
+    """The served engine is wiki-scoped; `sources[]` addresses are not.
+
+    `scout/serve.py` builds the production backend with `corpus="wiki"`, which
+    is right for search and wrong for quoting: raw chunks carry no corpus
+    stamp, so a wiki-scoped read returns nothing for every address that exists
+    — and `no_source` is indistinguishable from a hint that genuinely retrieved
+    nothing. Without this, `wiki_quote` would ship as a tool that never works.
+    """
+    from scout.mcp_server import wiki_quote_tool
+
+    asked: list[str | None] = []
+
+    class _CorpusRecordingBackend:
+        def __init__(self, corpus: str | None) -> None:
+            self.corpus = corpus
+            self.embedder = None
+
+        def with_corpus(self, corpus: str | None) -> _CorpusRecordingBackend:
+            return _CorpusRecordingBackend(corpus)
+
+        async def retrieve(
+            self,
+            hint: str,
+            *,
+            path: str | None = None,
+            scope: object = None,
+            k: int = 10,
+        ) -> list[RagChunk]:
+            asked.append(self.corpus)
+            if self.corpus is not None:
+                return []
+            return [
+                RagChunk(
+                    text="a verbatim passage",
+                    file_path=path or "raw/papers/paper.pdf",
+                    loc="p.1",
+                    score=0.9,
+                )
+            ]
+
+    engine = SimpleNamespace(rag_backend=_CorpusRecordingBackend("wiki"))
+    result = await wiki_quote_tool(
+        cast(Any, engine),
+        identity=_identity("infra"),
+        path="raw/papers/paper.pdf",
+        hint="a verbatim passage",
+    )
+
+    assert asked == [None], f"quoting queried corpus {asked}, not the whole index"
+    assert result["status"] == "ok"
+    assert result["returned"] == 1
+    context = cast(list[dict[str, Any]], result["context"])
+    assert context[0]["text"] == "a verbatim passage"
+    assert context[0]["file_path"] == "raw/papers/paper.pdf"
+    assert result["citations"]
+
+
+async def test_wiki_quote_reports_no_source_rather_than_a_foreign_passage() -> None:
+    """An address that retrieves nothing on its own file returns nothing.
+
+    R-4.5: the fallback is the page the agent already has, never an approximate
+    passage from somewhere else.
+    """
+    from scout.mcp_server import wiki_quote_tool
+
+    class _OffPathBackend:
+        corpus = None
+        embedder = None
+
+        async def retrieve(
+            self,
+            hint: str,
+            *,
+            path: str | None = None,
+            scope: object = None,
+            k: int = 10,
+        ) -> list[RagChunk]:
+            # The post-filter's subject: a chunk from a different file.
+            return [
+                RagChunk(
+                    text="text belonging to another document",
+                    file_path="raw/articles/elsewhere.md",
+                    loc=None,
+                    score=0.99,
+                )
+            ]
+
+    engine = SimpleNamespace(rag_backend=_OffPathBackend())
+    result = await wiki_quote_tool(
+        cast(Any, engine),
+        identity=_identity("infra"),
+        path="raw/papers/paper.pdf",
+        hint="anything",
+    )
+
+    assert result["status"] == "no_source"
+    assert result["returned"] == 0
+    assert result["context"] == []

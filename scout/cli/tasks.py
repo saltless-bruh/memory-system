@@ -66,6 +66,14 @@ _MATERIAL_ARTICLE_FIELDS = ("slug", "title", "loc", "category", "department", "l
 class TaskState(StrEnum):
     """What a batch is doing, judged from the filesystem."""
 
+    #: The handle does not resolve to a readable plan -- it names nothing, or
+    #: the file it names cannot be parsed. Deliberately not `NOT_STARTED`:
+    #: `compile_plan` already records that reporting `not_started` for a batch
+    #: that did something is "the most misleading answer available, because it
+    #: says nothing happened when something did". A handle that names no batch
+    #: is the same lie pointing the other way -- it says a batch is waiting to
+    #: begin when there is no batch. `detail` distinguishes the two causes.
+    UNKNOWN = "unknown"
     NOT_STARTED = "not_started"
     RUNNING = "running"
     #: A run marker exists, but its process is gone and work is unfinished.
@@ -388,7 +396,7 @@ def status_for(
     if not plan_path.is_file():
         return TaskStatus(
             handle=handle,
-            state=TaskState.NOT_STARTED,
+            state=TaskState.UNKNOWN,
             total=0,
             done=0,
             detail=f"no plan at {handle}",
@@ -399,7 +407,7 @@ def status_for(
     except (OSError, json.JSONDecodeError, KeyError) as exc:
         return TaskStatus(
             handle=handle,
-            state=TaskState.NOT_STARTED,
+            state=TaskState.UNKNOWN,
             total=0,
             done=0,
             detail=f"plan could not be read: {exc}",

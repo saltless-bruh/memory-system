@@ -29,7 +29,7 @@
       },
       "requiredTools": {
         "note": "The declared tools are introspected against both in-process servers by tests/test_agent_package.py.",
-        "scout": ["wiki_search", "wiki_read"],
+        "scout": ["wiki_search", "wiki_read", "wiki_quote"],
         "snpmemory": [
           "verify",
           "plan_articles",
@@ -43,11 +43,14 @@
         "note": "The authoritative portable inventory; synchronization tests enforce both presence and byte identity.",
         "skills": [
           "snp-bootstrap-system",
+          "snp-compile-batch",
           "snp-compile-wiki",
           "snp-export-mcp",
           "snp-ingest-raw-data",
+          "snp-plan-articles",
           "snp-query-wiki",
           "snp-read-wiki-page",
+          "snp-verify-page",
           "snp-verify-vault"
         ],
         "workflows": [

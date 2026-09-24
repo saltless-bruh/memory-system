@@ -25,6 +25,7 @@ Scout is the only retrieval service an agent uses:
 ```text
 agent ── wiki_search ──> Scout ──> PostgreSQL hybrid index
 agent ── wiki_read   ──> Scout ──> canonical Markdown page
+agent ── wiki_quote  ──> Scout ──> verbatim passage from raw/
 ```
 
 Do not inspect the vault with filesystem reads, shell search, or a direct
@@ -42,6 +43,13 @@ read envelope.
    heading. Never answer from a search snippet alone.
 5. Pass previously returned `content_hash` values through `seen` in later
    searches so repeated pages return compact stubs.
+6. When the answer needs the evidence *under* a page rather than the page,
+   call `wiki_quote(path, hint, department)` with a `path`/`hint` pair taken
+   from that page's own `sources[]`. Passages are post-filtered to the
+   addressed file, so a hint cannot pull in a neighbouring document, and a hint
+   that retrieves nothing there returns `status: "no_source"` with no context.
+   Report `no_source`; never substitute an approximate passage, and never write
+   a quotation the tool did not return.
 
 `wiki_search` returns an envelope, not a bare list. The per-page rows live
 under `results`; alongside them the search reports `returned` (how many pages

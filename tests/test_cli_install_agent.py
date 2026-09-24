@@ -179,7 +179,7 @@ def test_native_install_uses_the_shared_shell_and_reports_the_client(
         "package": str(REPO_ROOT / "packages/snp-agent"),
         "servers": ["scout"],
     }
-    assert len(list((target / ".opencode/skills").glob("*/SKILL.md"))) == 7
+    assert len(list((target / ".opencode/skills").glob("*/SKILL.md"))) == 10
     assert not (target / ".agent").exists()
 
 

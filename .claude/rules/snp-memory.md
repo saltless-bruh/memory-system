@@ -6,6 +6,9 @@
 - Search snippets route the read; they are never answer text.
 - Cite the page path and relevant heading used in the answer.
 - Use read modes (`tldr`, `outline`, `section`, `full`) to limit context.
+- Use `wiki_quote(path, hint)` — from the page's own `sources[]` — when the
+  answer needs the underlying passage. `no_source` is an honest answer; a
+  fabricated quotation never is.
 - Do not read the vault through the filesystem, shell, or PostgreSQL.
 
 ## Security invariant

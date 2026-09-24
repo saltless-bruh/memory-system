@@ -201,7 +201,9 @@ def test_package_and_root_skills_synchronized() -> None:
     )
     pkg_skills = sorted(p.name for p in PACKAGE_DIR.glob("skills/snp-*"))
     assert root_skills == pkg_skills
-    assert len(pkg_skills) == 7
+    # Three scripted skills joined on 2026-09-22 (compile-batch,
+    # plan-articles, verify-page).
+    assert len(pkg_skills) == 10
 
 
 # ── the three config surfaces must not drift (T2.1) ───────────────────────
@@ -344,11 +346,14 @@ def test_installer_removes_retired_components_but_preserves_custom_files(
     installed = sorted(d.name for d in (agent_dir / "skills").glob("snp-*"))
     assert installed == [
         "snp-bootstrap-system",
+        "snp-compile-batch",
         "snp-compile-wiki",
         "snp-export-mcp",
         "snp-ingest-raw-data",
+        "snp-plan-articles",
         "snp-query-wiki",
         "snp-read-wiki-page",
+        "snp-verify-page",
         "snp-verify-vault",
     ]
     assert custom.read_text(encoding="utf-8") == "custom"

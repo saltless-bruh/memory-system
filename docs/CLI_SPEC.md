@@ -213,7 +213,7 @@ engine and canonical envelope.*
 | `snpmemory ingest --path │ --dir` | index into pgvector | |
 | `snpmemory ingest-wiki [--dir] [--dry-run]` | index every vault page into the wiki corpus tier | `2` database or embedding route unavailable |
 | `snpmemory extract --path │ --dir` | figures + tables → `derived/` | `3` path outside `raw/` |
-| `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started / failed / cancelled |
+| `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started / failed / cancelled · `3` handle names no readable plan |
 | `snpmemory compile-cancel <handle>` | ask a running batch to stop at its next article boundary | `3` unknown handle |
 | `snpmemory mcp [--root] [--list-tools]` | serve these operations to an agent over stdio | `3` `--root` is not a checkout |
 | `snpmemory verify-vault` | frontmatter + index lint | `1` lint errors |

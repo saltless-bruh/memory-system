@@ -346,6 +346,83 @@ def test_compile_status_reports_a_terminal_failure_as_a_finding(
     assert result.data["terminal"] is True
 
 
+def test_compile_status_refuses_a_handle_that_names_no_batch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exit 0 told a caller a typo'd handle was an idle batch.
+
+    Measured 2026-09-21: `compile-status <nonexistent>` exited 0 with
+    `detail: "no plan at …"`, `done: 0`, `pending: []`. A script or an agent
+    reading the exit code cannot tell that from a batch waiting to begin.
+    `compile-cancel` has always raised for the same condition, and CLI_SPEC §1
+    assigns an unresolvable identifier to input validation.
+    """
+    from scout.cli.commands.compile import compile_status
+
+    class _Cfg:
+        def require_repo(self) -> Path:
+            return tmp_path
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(CliError) as caught:
+        compile_status("a-handle-that-names-no-batch", config=_Cfg())
+
+    error = caught.value.to_result()
+    assert error.exit_code == ExitCode.INPUT_VALIDATION
+    assert error.error is not None
+    assert error.error.kind is ErrorKind.INPUT_VALIDATION
+    assert "no plan at" in error.error.message
+
+
+def test_compile_status_separates_an_absent_batch_from_an_unstarted_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The control, and the whole point of the distinction.
+
+    A plan that exists and has staged nothing is a real `not_started` batch: a
+    **finding** (exit 1, per CLI_SPEC §3), reported with its article count. A
+    handle that names no plan is an unresolvable argument (exit 3). Before the
+    split both returned exit 0, so neither could be told from the other — and
+    the one with a real total was the one being under-reported.
+    """
+    import json
+
+    from scout.cli.commands.compile import compile_status
+
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "source": "raw/x.pdf",
+                "articles": [
+                    {
+                        "section": "1",
+                        "title": "A",
+                        "loc": "p.1",
+                        "slug": "a",
+                        "category": "concept",
+                        "department": "ai_eng",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Cfg:
+        def require_repo(self) -> Path:
+            return tmp_path
+
+    monkeypatch.chdir(tmp_path)
+    result = compile_status("plan.json", config=_Cfg())
+
+    # A finding, not a refusal: the batch exists and has work to do.
+    assert result.exit_code == ExitCode.SEMANTIC_FAILURE
+    assert result.data["state"] == "not_started"
+    assert result.data["total"] == 1
+    assert result.error is None, "an existing batch is reported, never refused"
+
+
 # ── `snpmemory compile-cancel` ────────────────────────────────────────────
 
 

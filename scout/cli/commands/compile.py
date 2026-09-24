@@ -232,6 +232,7 @@ def compile_status(
 ) -> CommandResult:
     """Report a batch's progress, computed from the plan and its staging."""
     from scout import vault
+    from scout.cli.errors import input_error
     from scout.cli.tasks import TaskState, status_for
 
     cfg: Config = config
@@ -241,6 +242,21 @@ def compile_status(
     # to the same batch here — including when the two calls happen in different
     # directories, which for an MCP client is the normal case.
     status = status_for(Path(handle), wiki_dir=vault.WIKI_DIR, root=repo)
+
+    # A handle that resolves to no readable plan is a bad argument, not a batch
+    # in a bad state, and it is the one answer this command used to get wrong:
+    # it returned exit 0 with `done: 0, pending: []`, which a caller reading the
+    # exit code — a script, or an agent — cannot tell from an idle batch.
+    # `compile-cancel` has always raised here; this is the same refusal, and
+    # `docs/CLI_SPEC.md` §1 already assigns an unresolvable identifier to
+    # input validation.
+    if status.state is TaskState.UNKNOWN:
+        raise input_error(
+            status.detail or f"no plan at {handle}",
+            hint="pass the handle compile-plan returned",
+            handle=status.handle,
+        )
+
     # Exit 0 means the batch is fine: working, staged, or finished. Anything a
     # human has to act on is exit 1 — a finding, not a malfunction. `failed` and
     # `cancelled` belong here for the same reason `stalled` always did: a caller

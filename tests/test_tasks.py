@@ -60,10 +60,28 @@ def _stage(plan: Path, *slugs: str) -> None:
         (staging / f"{slug}.md").write_text("page\n", encoding="utf-8")
 
 
-def test_a_missing_plan_is_not_started(tmp_path: Path) -> None:
+def test_a_missing_plan_is_unknown_not_merely_unstarted(tmp_path: Path) -> None:
+    """A handle that names nothing is not a batch waiting to begin.
+
+    Both used to report `not_started` with `total: 0`, so a typo'd handle and
+    an idle batch were the same answer — and `compile-status` returned exit 0
+    for it. `compile_plan` already calls `not_started` for a batch that did
+    something "the most misleading answer available"; this is that lie pointing
+    the other way.
+    """
     status = status_for(tmp_path / "nope.json")
-    assert status.state is TaskState.NOT_STARTED
+    assert status.state is TaskState.UNKNOWN
     assert status.total == 0
+    assert "no plan at" in status.detail
+
+
+def test_an_unreadable_plan_is_unknown_and_says_why(tmp_path: Path) -> None:
+    """A plan that exists but cannot be parsed is also not `not_started`."""
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    status = status_for(broken)
+    assert status.state is TaskState.UNKNOWN
+    assert "plan could not be read" in status.detail
 
 
 def test_nothing_staged_is_not_started(tmp_path: Path) -> None:

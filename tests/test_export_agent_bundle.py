@@ -86,7 +86,9 @@ def test_bundle_package(tmp_path: Path) -> None:
             for name in names
             if name.startswith("workflows/") and name.endswith(".md")
         }
-        assert len(skill_names) == 7
+        # Three scripted skills joined the inventory on 2026-09-22
+        # (compile-batch, plan-articles, verify-page).
+        assert len(skill_names) == 10
         assert len(workflow_names) == 5
         assert "snp-auto-heal-vault" not in skill_names
         assert "snp-heal.md" not in workflow_names

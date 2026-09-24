@@ -187,7 +187,7 @@ def test_agent_snp_components_mirrored_in_package() -> None:
             assert (skill_dir / rel).read_bytes() == pkg_file.read_bytes(), (
                 f"Content mismatch for skills/{skill_dir.name}/{rel}"
             )
-    assert mirrored_skills == 7, f"Expected 7 snp-* skills, found {mirrored_skills}"
+    assert mirrored_skills == 10, f"Expected 10 snp-* skills, found {mirrored_skills}"
 
     agent_workflows = AGENT_DIR / "workflows"
     assert agent_workflows.is_dir(), f"Missing {agent_workflows}"

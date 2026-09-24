@@ -42,6 +42,7 @@ def test_the_tool_surface_is_smaller_than_the_command_surface() -> None:
     assert tool_names == {
         "wiki_search",
         "wiki_read",
+        "wiki_quote",
         "verify",
         "plan_articles",
         "compile_plan",

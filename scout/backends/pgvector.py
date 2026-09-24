@@ -10,6 +10,7 @@ Implements `RagBackend` protocol with:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import Callable, Sequence
 
@@ -262,6 +263,25 @@ class PgVectorRlsBackend(RagBackend):
         self.contested_rank_penalty = contested_rank_penalty
         self.dense_timeout_seconds = dense_timeout_seconds
         self.corpus = corpus
+
+    def with_corpus(self, corpus: str | None) -> PgVectorRlsBackend:
+        """A sibling reading another corpus tier, sharing this one's pool.
+
+        The served engine is scoped to `corpus="wiki"` (scout/serve.py), which
+        is right for `wiki_search`: the vault is what an agent searches. It is
+        wrong for `wiki_quote`, whose addresses point into `raw/`, where chunks
+        carry no corpus stamp -- a wiki-scoped backend would answer `no_source`
+        for every address that exists, which reads exactly like a hint that
+        retrieved nothing.
+
+        The pool is shared rather than duplicated: two pools against the same
+        database would double the connection budget for one extra WHERE clause.
+        """
+        if corpus == self.corpus:
+            return self
+        sibling = copy.copy(self)
+        sibling.corpus = corpus
+        return sibling
 
     async def _get_pool(self) -> asyncpg.Pool:
         """Lazily creates and returns the connection pool.

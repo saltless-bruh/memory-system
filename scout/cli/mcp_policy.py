@@ -150,14 +150,13 @@ POLICIES: tuple[ToolPolicy, ...] = (
             "its own work"
         ),
     ),
-    ToolPolicy(
-        "fetch",
-        Exposure.HIDDEN,
-        reason=(
-            "V3 withdraws direct address retrieval from the agent surface; "
-            "the operator command remains available for diagnostics only"
-        ),
-    ),
+    # Served as `wiki_quote` since 2026-09-21 (ADR-0001). The earlier decision
+    # withdrew it, on the reasoning that retrieval should end at the canonical
+    # page. What that left behind was a hole: AGENTS.md forbids fabricating a
+    # source or a quotation, and nothing on the surface could produce one, so an
+    # agent asked for the evidence under a page could only decline. The tool is
+    # still read-only and still post-filters to the addressed file.
+    ToolPolicy("fetch", Exposure.TOOL, tool="wiki_quote"),
     ToolPolicy("search", Exposure.TOOL, tool="wiki_search"),
     ToolPolicy("read", Exposure.TOOL, tool="wiki_read"),
     ToolPolicy(

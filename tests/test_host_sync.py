@@ -20,8 +20,37 @@ import scripts.host_sync as host_sync
 TEST_SECRET = b"unit-test-webhook-secret"
 
 
+#: Every environment knob `scripts/host_sync.py` reads. The fixture pins the
+#: four it needs and clears the rest, because a unit test must measure the code
+#: and not the shell it was started from.
+#:
+#: Measured 2026-09-24: `.env` sets `GIT_SYNC_USERNAME` and leaves
+#: `GIT_SYNC_PASSWORD_FILE` unset — correct, because the password file is
+#: mounted inside the container and does not exist on the host. `_git_auth_args`
+#: refuses a half-configured pair, so **11 tests here failed for anyone whose
+#: shell had sourced `.env`** — which is every shell that has run a live gate,
+#: since all of them require it. `webhook_delivery --group committed-tree-green`
+#: runs the suite with the ambient environment and had been reporting that as
+#: "the committed tree is not green", about a tree that was.
+_HOST_SYNC_ENV = (
+    "GIT_BRANCH",
+    "GIT_REMOTE",
+    "GIT_SYNC_ATTEMPTS",
+    "GIT_SYNC_PASSWORD_FILE",
+    "GIT_SYNC_RETRY_SECONDS",
+    "GIT_SYNC_URL",
+    "GIT_SYNC_USERNAME",
+    "GIT_TIMEOUT_SECONDS",
+    "SNAPSHOT_RETENTION",
+    "VAULT_REPLICA_DIR",
+    "WEBHOOK_SECRET",
+)
+
+
 @pytest.fixture(autouse=True)
 def reset_host_sync_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    for name in _HOST_SYNC_ENV:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(host_sync, "SECRET", TEST_SECRET)
     monkeypatch.setenv("GIT_BRANCH", "main")
     monkeypatch.setenv("GIT_REMOTE", "origin")

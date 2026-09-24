@@ -167,12 +167,17 @@ def group_no_write_capability() -> str:
     """
     # ── Assertion 1: No served tool performs push or vault write ──
     #
-    # SCOPE, stated because it is easy to misread: this reads the exposure
-    # POLICY (`scout/cli/mcp_policy.py`), which is the declared surface. It is
-    # not the served surface -- `scout/mcp_server.py` builds its tools
-    # independently and imports nothing from `scout.cli`. Until those are joined
-    # (leaf-4.2), a pass here means "the declared surface is safe", and that is
-    # what the output says.
+    # SCOPE, updated 2026-09-24 (leaf-4.2). This reads the exposure POLICY
+    # (`scout/cli/mcp_policy.py`). That used to describe only the *declared*
+    # surface, because `scout/mcp_server.py` built its tools from literals and
+    # imported nothing from `scout.cli` -- audit finding F1, and the reason this
+    # comment used to warn that a pass here proved less than it appeared to.
+    #
+    # The authenticated server now derives its tool set from `scout_surface()`
+    # in that same policy, and refuses to build when the policy names a command
+    # it has no adapter for. So a pass here now describes the surface that is
+    # actually served, and `server_is_generated.py` measures that coupling
+    # rather than leaving it to be believed.
     sys.path.insert(0, str(REPO_ROOT))
     from scout.cli.declarations import DECLARED  # noqa: PLC0415
     from scout.cli.mcp_policy import (  # noqa: PLC0415
@@ -320,9 +325,9 @@ services:
         )
 
     print(
-        "  surface read: scout/cli/mcp_policy.py (the DECLARED exposure policy). "
-        "Not the served surface: scout/mcp_server.py builds its tools "
-        "independently and imports nothing from scout.cli."
+        "  surface read: scout/cli/mcp_policy.py, which the authenticated "
+        "server now builds its tools from (scout_surface); the declared and "
+        "served surfaces are one statement since leaf-4.2."
     )
     return "NO WRITE CAPABILITY VERIFIED"
 

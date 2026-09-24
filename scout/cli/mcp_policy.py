@@ -49,6 +49,14 @@ class ToolPolicy:
     stage: str = ""
     #: Why, when the answer is not obvious.
     reason: str = ""
+    #: Which server serves it. `scout` is the authenticated retrieval server;
+    #: `local` is the stdio server an operator runs beside a checkout. This
+    #: field exists so the authenticated server can derive its tool set from
+    #: the policy instead of repeating a literal list: audit finding F1 was
+    #: that `governance.py` read this table while `scout/mcp_server.py` built
+    #: its tools independently, so a pass there described the declared surface
+    #: and not the served one.
+    surface: str = "local"
 
 
 #: The grouped verification tool's default stage — the full aggregate.
@@ -156,9 +164,9 @@ POLICIES: tuple[ToolPolicy, ...] = (
     # source or a quotation, and nothing on the surface could produce one, so an
     # agent asked for the evidence under a page could only decline. The tool is
     # still read-only and still post-filters to the addressed file.
-    ToolPolicy("fetch", Exposure.TOOL, tool="wiki_quote"),
-    ToolPolicy("search", Exposure.TOOL, tool="wiki_search"),
-    ToolPolicy("read", Exposure.TOOL, tool="wiki_read"),
+    ToolPolicy("fetch", Exposure.TOOL, tool="wiki_quote", surface="scout"),
+    ToolPolicy("search", Exposure.TOOL, tool="wiki_search", surface="scout"),
+    ToolPolicy("read", Exposure.TOOL, tool="wiki_read", surface="scout"),
     ToolPolicy(
         "install-agent",
         Exposure.HIDDEN,
@@ -198,6 +206,21 @@ def unknown_policies() -> tuple[str, ...]:
     """Policies naming a command that no longer exists. Must always be empty."""
     known = {spec.name for spec in DECLARED}
     return tuple(p.command for p in POLICIES if p.command not in known)
+
+
+def scout_surface() -> dict[str, str]:
+    """Command name -> served tool name, for the authenticated retrieval server.
+
+    The authenticated server builds its tools from this, so the served surface
+    and the declared surface cannot answer differently. A command added here
+    appears there without editing the server module; a command removed here
+    disappears from it.
+    """
+    return {
+        policy.command: policy.tool
+        for policy in POLICIES
+        if policy.surface == "scout" and policy.exposure is Exposure.TOOL
+    }
 
 
 def stages() -> dict[str, CommandSpec]:

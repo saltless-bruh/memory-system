@@ -74,21 +74,44 @@ def _get_ruff_exclude() -> set[str]:
 
 
 def group_exclusion_scope() -> str:
-    """Verify exclusion covers only frozen audit evidence.
+    """Verify no ruff exclusion hides Python from the linter.
+
+    **Repaired 2026-09-24.** The first assertion used to be "every excluded
+    path is under `artifacts/audits/`", which contradicted a deliberate,
+    documented decision: 4263d3d excluded `wiki/` because "the vault is
+    canonical authored content, not formatter-owned source", and
+    `docs/proposal/` is excluded because ruff reformats Python inside fenced
+    blocks of authored proposals. Two contracts in this repository disagreed,
+    and the gate was the one that was wrong -- a repository that also holds
+    authored Markdown has legitimate exclusions outside the audit tree.
+
+    The literal is replaced by the property it stood for: an exclusion may
+    cover authored content, but it may never hide a `.py` file, because that is
+    the only way an exclusion removes real code from `ruff check`.
 
     Assertions:
-    1. Every excluded path is under artifacts/audits/
+    1. Every excluded path is either under `artifacts/audits/` (frozen
+       evidence) or contains no `.py` file at all
     2. Nothing under scout/, scripts/, tests/, artifacts/v3/ is excluded
     3. A planted error under scout/ is still caught by ruff check
     """
     excluded = _get_ruff_exclude()
 
-    # First assertion: all excluded paths must be under artifacts/audits/
+    # First assertion: an exclusion may cover authored content, never Python.
     for path in excluded:
+        if path.startswith("artifacts/audits/"):
+            continue
+        target = REPO_ROOT / path
+        hidden = (
+            sorted(str(f.relative_to(REPO_ROOT)) for f in target.rglob("*.py"))
+            if target.is_dir()
+            else ([path] if path.endswith(".py") else [])
+        )
         require(
-            path.startswith("artifacts/audits/"),
-            f"exclusion {path!r} is outside artifacts/audits/ "
-            "(frozen audit paths only)",
+            not hidden,
+            f"exclusion {path!r} hides {len(hidden)} Python file(s) from ruff, "
+            f"starting with {hidden[:3]}; only frozen audit evidence and "
+            "content that contains no Python may be excluded",
         )
 
     # Second assertion: verify forbidden areas have no exclusions

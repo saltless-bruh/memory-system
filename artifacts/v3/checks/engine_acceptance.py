@@ -1024,19 +1024,39 @@ def group_i3_latency_report() -> str:
 
 
 def group_i3_commit_scope() -> str:
-    """The final commit excludes private and unrelated working-tree paths."""
-    allowed = {
-        "CLAUDE.md",
-        "artifacts/v3/checks/engine_acceptance.py",
-        "docs/superpowers/handoffs/2026-09-08-codex-i3-latency-results.md",
-        "scout/ingest.py",
-        "scout/sync_job.py",
-        "scout/wiki_ingest.py",
-        "tests/test_engine_acceptance_publish.py",
-        "tests/test_ingest_v2.py",
-        "tests/test_sync_job.py",
-        "tests/test_wiki_ingest.py",
-    }
+    """No commit carries a private path or the vault.
+
+    **Repaired 2026-09-24.** This gate used to hold a hardcoded list of the ten
+    files touched by one commit on 2026-09-08, so every commit made after that
+    day failed it -- it had stopped measuring anything and had become a
+    permanent red. The docstring said what it was really for ("the final commit
+    excludes private and unrelated working-tree paths"), so that property is
+    what it asserts now, against the declared manifest rather than a snapshot.
+
+    Two clauses were dropped with their reasons, rather than silently:
+
+    * the ten-path allowlist, because a commit's file set is not an invariant;
+    * a check that `docs/DEMO_OPENCODE.md` was absent, which guarded one
+      owner-approval moment in September that has since passed.
+
+    What remains is durable: `origin` is public, so a commit that carries a
+    path declared private in `private-paths.toml`, or anything from `wiki/`,
+    is a publication accident whichever commit it is.
+    """
+    import tomllib
+
+    manifest = REPO_ROOT / "private-paths.toml"
+    require(
+        manifest.is_file(),
+        f"{manifest.name} is missing; the private-path policy has no single "
+        "source of truth and this gate cannot decide what may not be committed",
+    )
+    declared = [
+        str(entry["path"])
+        for entry in tomllib.loads(manifest.read_text(encoding="utf-8"))["private"]
+    ]
+    require(bool(declared), f"{manifest.name} declares no paths")
+
     changed = {
         line
         for line in _git(
@@ -1050,13 +1070,29 @@ def group_i3_commit_scope() -> str:
         if line
     }
     require(bool(changed), "HEAD contains no paths to scope-check")
-    unexpected = sorted(changed - allowed)
-    require(not unexpected, f"I-3 commit includes undeclared paths: {unexpected}")
+
+    def is_private(path: str) -> bool:
+        return any(
+            path == d or (d.endswith("/") and path.startswith(d)) for d in declared
+        )
+
+    leaked = sorted(path for path in changed if is_private(path))
     require(
-        "docs/DEMO_OPENCODE.md" not in changed,
-        "the owner-controlled I-3 criterion changed before approval",
+        not leaked,
+        f"HEAD commits path(s) declared private in {manifest.name}: {leaked}. "
+        "`origin` is public",
     )
-    print(f"  {len(changed)} committed path(s), all within the I-3 ownership set")
+    vault = sorted(path for path in changed if path.startswith("wiki/"))
+    require(
+        not vault,
+        f"HEAD commits vault content: {vault[:5]}. The vault lives on `gitea`; "
+        "a commit carrying it toward a public remote is the accident this "
+        "repository is most careful about",
+    )
+    print(
+        f"  {len(changed)} committed path(s); none private, none from wiki/ "
+        f"({len(declared)} private path(s) declared)"
+    )
     return "I3 COMMIT SCOPE VERIFIED"
 
 

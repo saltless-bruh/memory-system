@@ -27,18 +27,56 @@ FEATURE_BRANCH = "feat/v3-retrieval-inversion"
 #: Paths deliberately left out of the branch. Every entry must be editor state,
 #: throwaway scratch, or an unreferenced binary -- never source, test, ledger or
 #: configuration. C1 enforces that classification rather than trusting the list.
-EXPECTED_EXCLUSIONS = {
-    # Already tracked Obsidian UI state. Left modified rather than committed
-    # or reverted: committing it puts per-machine editor preferences in the
-    # branch, and reverting it would silently change the owner's editor.
-    ".obsidian/app.json",
-    "Untitled.md",
-    "docs/image-conv-with-boss/Screenshot_20260827_215910.png",
-    "docs/image-conv-with-boss/Screenshot_20260827_215952.png",
-    "docs/image-conv-with-boss/Screenshot_20260827_220010.png",
-    "docs/image-conv-with-boss/Screenshot_20260827_220020.png",
-    "docs/image-conv-with-boss/Screenshot_20260828_081008.png",
-}
+#: The one declaration of what stays out of every commit. Read from
+#: `private-paths.toml` rather than repeated here: this set and CLAUDE.md's
+#: prose used to be two hand-maintained copies of one policy, and they drifted
+#: until CLAUDE.md required excluding three `.md` files that this gate forbade
+#: excluding -- making the gate impossible to satisfy. `_private_manifest`
+#: also asserts the two still agree, so the drift cannot return.
+PRIVATE_MANIFEST = REPO_ROOT / "private-paths.toml"
+
+
+def _private_manifest() -> list[dict[str, str]]:
+    """Every declared private path, checked against CLAUDE.md's own list."""
+    import tomllib
+
+    require(
+        PRIVATE_MANIFEST.is_file(),
+        f"{PRIVATE_MANIFEST.name} is missing; the private-path policy has no "
+        "single source of truth and this gate cannot decide what may be left out",
+    )
+    entries = tomllib.loads(PRIVATE_MANIFEST.read_text(encoding="utf-8")).get(
+        "private", []
+    )
+    require(bool(entries), f"{PRIVATE_MANIFEST.name} declares no paths")
+    for entry in entries:
+        for field in ("path", "category", "reason"):
+            require(
+                bool(str(entry.get(field, "")).strip()),
+                f"{PRIVATE_MANIFEST.name}: an entry is missing {field!r}: {entry}",
+            )
+
+    # The prose and the manifest must name the same paths. CLAUDE.md states the
+    # rule a human reads; this file states the rule the gate enforces. Two
+    # copies that disagree is the defect being fixed, not a style question.
+    claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    for entry in entries:
+        require(
+            f"`{entry['path'].rstrip('/')}`" in claude
+            or entry["path"].rstrip("/") in claude,
+            f"{entry['path']} is declared private but CLAUDE.md never names it",
+        )
+    return entries
+
+
+def _is_private(path: str, entries: list[dict[str, str]]) -> dict[str, str] | None:
+    """The manifest entry covering `path`, matching a directory by prefix."""
+    for entry in entries:
+        declared = entry["path"]
+        if path == declared or (declared.endswith("/") and path.startswith(declared)):
+            return entry
+    return None
+
 
 #: A path in history matching any of these is a hygiene failure. `.secrets/` and
 #: the real `.env` carry live credentials; `.obsidian/` is per-machine UI state.
@@ -318,24 +356,33 @@ def group_tree_clean() -> str:
     out to be source, a test, a ledger or configuration fails here rather than
     being quietly carried as "known".
     """
+    entries = _private_manifest()
     remaining = {path for _status, path in _porcelain()}
-    unexpected = sorted(remaining - EXPECTED_EXCLUSIONS)
+    unexpected = sorted(p for p in remaining if _is_private(p, entries) is None)
     require(
         not unexpected,
         f"{len(unexpected)} path(s) are uncommitted and unaccounted for: "
         f"{unexpected[:10]}",
     )
 
+    # The classification is still the assertion. What changed is that a
+    # deliberately unpublished document now has a category to be declared
+    # under, instead of being forbidden outright and therefore left undeclared.
     disallowed_suffixes = (".py", ".md", ".yml", ".yaml", ".toml", ".json", ".sql")
-    for path in sorted(EXPECTED_EXCLUSIONS & remaining):
+    for path in sorted(remaining):
+        entry = _is_private(path, entries)
+        if entry is None:  # already reported above
+            continue
         if path == "Untitled.md":
             continue  # classified below
-        if path.startswith(".obsidian/") or path.startswith("docs/image"):
-            continue  # editor state and unreferenced binaries are allowed out
+        if entry["category"] in {"editor-state", "unreferenced-binary"}:
+            continue
         require(
-            not path.endswith(disallowed_suffixes),
-            f"excluded path {path} looks like source, config or documentation; "
-            "only editor state, scratch and unreferenced binaries may be left out",
+            not path.endswith(disallowed_suffixes)
+            or entry["category"] == "private-authored",
+            f"excluded path {path} looks like source, config or documentation "
+            f"but is declared {entry['category']!r}; only `private-authored`, "
+            "with a reason, may keep an authored file out of every commit",
         )
     require(
         "Untitled.md" not in remaining
@@ -411,10 +458,11 @@ def group_committed_tree_green() -> str:
     # every one of them is editor state, scratch or an unreferenced binary, and
     # none is read by the suite, ruff or mypy. Anything else being dirty would
     # mean this gate measures uncommitted work and calls it the commit.
+    entries = _private_manifest()
     dirty = [
         path
         for status, path in _porcelain()
-        if status and status != "??" and path not in EXPECTED_EXCLUSIONS
+        if status and status != "??" and _is_private(path, entries) is None
     ]
     require(
         not dirty,

@@ -1,0 +1,52 @@
+# One declaration of what must never reach the public remote.
+#
+# This file exists because the same policy used to live in two hand-maintained
+# copies -- prose in CLAUDE.md and a literal `EXPECTED_EXCLUSIONS` set in
+# `artifacts/v3/checks/webhook_delivery.py` -- and they drifted until the
+# hygiene gate became impossible to satisfy without violating CLAUDE.md. Both
+# now read this file, and the gate fails when they disagree, so the drift
+# cannot come back.
+#
+# `origin` is a PUBLIC GitHub remote. A path listed here is expected to be
+# present in the working tree and absent from every commit.
+#
+# categories
+#   editor-state       per-machine UI state; committing it pushes one
+#                      developer's preferences onto everyone
+#   private-authored   authored text that is deliberately not published. This
+#                      is the category the old gate had no word for, which is
+#                      why it forbade excluding any `.md` at all.
+#   unreferenced-binary  images nothing in the repository links to
+#
+# A path ending in a source or document suffix may only be excluded under
+# `private-authored`, and only with a reason. Silence is not a justification.
+
+[[private]]
+path = ".obsidian/app.json"
+category = "editor-state"
+reason = "Obsidian UI state; already tracked, so it is left modified rather than committed or reverted -- reverting would silently change the owner's editor"
+
+[[private]]
+path = "artifacts/superpowers/execution.md"
+category = "private-authored"
+reason = "working notes; already on origin/main from earlier commits, kept as a record of work, but no further changes are published"
+
+[[private]]
+path = "artifacts/superpowers/plan.md"
+category = "private-authored"
+reason = "working notes; same history as execution.md"
+
+[[private]]
+path = "Untitled.md"
+category = "scratch"
+reason = "scratch buffer; the gate additionally refuses to let it become authored documentation"
+
+[[private]]
+path = "docs/agy/"
+category = "private-authored"
+reason = "client material; origin is public"
+
+[[private]]
+path = "docs/image-conv-with-boss/"
+category = "unreferenced-binary"
+reason = "screenshots of the owner's conversation with his boss"

@@ -190,7 +190,15 @@ config.update({
         "apiKey": "{env:SNP_REHEARSAL_GOOGLE_KEY}", "timeout": 20000
     }}},
     "permission": {
+        # OpenCode names an MCP tool `{config-key}_{tool}`, so the key the
+        # config uses for the server decides what these entries must say. It
+        # became `snpmemory` on 2026-09-24; `scout_*` is kept so a workspace
+        # still on the old key is not silently denied. An entry that matches
+        # nothing is harmless -- one that is missing falls through to
+        # `"*": "deny"` and the agent loses retrieval with no error naming why.
         "*": "deny",
+        "snpmemory_wiki_search": "allow",
+        "snpmemory_wiki_read": "allow",
         "scout_wiki_search": "allow",
         "scout_wiki_read": "allow",
         "skill": {

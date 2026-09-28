@@ -36,7 +36,7 @@ second one. The judge is given no tools and its entire contract is one JSON
 object with a fixed key set and a two-value verdict enum; anything else is a
 configuration failure (exit 2), never an approval. Reported claim text is
 flattened to a single bounded line before printing, so a hijacked model cannot
-forge additional report lines in a CI log. The residual risk is stated
+forge additional report lines in a terminal or log. The residual risk is stated
 honestly: a model that *obeys* injected text could return "supported" for an
 ungrounded page. Structure bounds what a hijacked judge can *do*; it cannot by
 itself make a model incorruptible, which is why this gate runs after — not
@@ -95,7 +95,7 @@ MAX_CONTEXT_CHARS = 24_000
 #: this module exists to remove. It is reported as a configuration failure.
 MAX_BODY_CHARS = 12_000
 
-#: Bounds on untrusted model output that reaches a CI log.
+#: Bounds on untrusted model output that reaches a terminal or log.
 MAX_CLAIMS = 25
 MAX_SENTENCE_CHARS = 400
 MAX_REASON_CHARS = 400
@@ -634,9 +634,10 @@ def git_changed_wiki_paths(
 
     Compares the *working tree* against the merge base, and adds untracked
     pages, so it reports the same set whether the change is committed (a real
-    PR) or materialized into the tree (the trusted CI checkout in
-    `.gitea/workflows/auto-healer.yaml`, which runs at the PR base sha and
-    copies the PR's Markdown in).
+    PR) or only materialized into the tree (edited, or copied in, and not yet
+    committed). No CI workflow runs this: the auto-heal subsystem and its
+    `.gitea/workflows/auto-healer.yaml` checkout were removed on 2026-09-06
+    (29f1f50), and it is run by hand or through `snpmemory verify-groundedness`.
 
     Raises `GroundednessError` when no base ref resolves — an unknown change
     set must not silently judge nothing.
@@ -865,9 +866,10 @@ def _probe_exit(judge_factory: JudgeFactory, *, out: TextIO | None = None) -> in
 
     So the only honest liveness signal is a real call, and this makes the
     smallest one there is: one trivial judgement whose answer is not used. It
-    costs **one** request, and `ci_address_gate` spends it before mutating
-    anything rather than discovering an outage after a heal has already rewritten
-    `sources[]`.
+    costs **one** request, so an operator can learn the judge is down before
+    starting a run that would spend a request per page. Its only automated
+    caller, `scripts/ci_address_gate.py`, was removed with the auto-heal
+    subsystem on 2026-09-06 (29f1f50); nothing calls it on a schedule.
     """
     try:
         judge = judge_factory()
@@ -976,8 +978,8 @@ def main(
         "--probe",
         action="store_true",
         help="judge nothing; answer only whether the judge route responds "
-        "(exit 0 operational, 2 not). One request. Used by ci_address_gate "
-        "before it mutates anything.",
+        "(exit 0 operational, 2 not). One request, so a full run need not be "
+        "the way an outage is discovered.",
     )
     args = parser.parse_args(argv)
 

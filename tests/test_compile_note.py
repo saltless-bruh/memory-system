@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import re
-import subprocess
 import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -44,7 +43,9 @@ def compiler_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
         (wiki / directory).mkdir(parents=True)
     (wiki / "index.md").write_bytes(b"original index\n")
     monkeypatch.setattr("scripts.compile_note.REPO_ROOT", tmp_path)
-    monkeypatch.setattr("scripts.compile_note._current_branch", lambda: "feature/wiki")
+    monkeypatch.setattr(
+        "scripts.compile_note._current_branch", lambda *_a: "feature/wiki"
+    )
     return tmp_path, "raw/reports/acme.md"
 
 
@@ -77,9 +78,13 @@ def minted() -> object:
     return _mint
 
 
-def _success_index_run(repo: Path) -> subprocess.CompletedProcess[str]:
+def _success_index_run(repo: Path) -> None:
+    """Stand-in for `_regenerate_index` in tests not exercising the index.
+
+    The fixture tree is not a lint-clean vault, so real regeneration would
+    refuse; `tests/test_compile_lane.py` exercises it against one that is.
+    """
     (repo / "wiki" / "index.md").write_bytes(b"regenerated index\n")
-    return subprocess.CompletedProcess([], 0, "", "")
 
 
 def _wire_body_seams(
@@ -388,7 +393,7 @@ def test_compile_success_mints_with_department_scope_and_explicit_loc(
         "scripts.compile_note.PgVectorRlsBackend", MagicMock(return_value=backend)
     )
     monkeypatch.setattr(
-        "scripts.compile_note.subprocess.run",
+        "scripts.compile_note._regenerate_index",
         lambda *_a, **_k: _success_index_run(repo),
     )
     _wire_body_seams(monkeypatch)
@@ -430,7 +435,7 @@ def test_valid_optional_wikilink_is_rendered(
     )
     monkeypatch.setattr("scripts.compile_note.PgVectorRlsBackend", MagicMock())
     monkeypatch.setattr(
-        "scripts.compile_note.subprocess.run",
+        "scripts.compile_note._regenerate_index",
         lambda *_a, **_k: _success_index_run(repo),
     )
     _wire_body_seams(monkeypatch)
@@ -473,10 +478,12 @@ def test_protected_branch_and_existing_page_are_rejected_before_model(
     repo, path = compiler_repo
     model = MagicMock()
     monkeypatch.setattr("scripts.compile_note.generate_model_data", model)
-    monkeypatch.setattr("scripts.compile_note._current_branch", lambda: "main")
+    monkeypatch.setattr("scripts.compile_note._current_branch", lambda *_a: "main")
     with pytest.raises(CompileNoteError, match="protected branch"):
         compile_note(path, "Protected", "concept", department="infra", loc="line 1")
-    monkeypatch.setattr("scripts.compile_note._current_branch", lambda: "feature/wiki")
+    monkeypatch.setattr(
+        "scripts.compile_note._current_branch", lambda *_a: "feature/wiki"
+    )
     existing = repo / "wiki" / "concepts" / "existing.md"
     existing.write_bytes(b"original page\n")
     with pytest.raises(CompileNoteError, match="already exists"):
@@ -557,13 +564,11 @@ def test_index_failure_atomically_rolls_back_page_and_index(
     monkeypatch.setattr("scripts.compile_note.PgVectorRlsBackend", MagicMock())
     _wire_body_seams(monkeypatch)
 
-    def failed_index(
-        *_args: object, **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def failed_index(*_args: object, **_kwargs: object) -> None:
         index.write_bytes(b"partially changed\n")
-        return subprocess.CompletedProcess([], 1, "", "lint failed")
+        raise CompileNoteError("index regeneration failed: lint failed")
 
-    monkeypatch.setattr("scripts.compile_note.subprocess.run", failed_index)
+    monkeypatch.setattr("scripts.compile_note._regenerate_index", failed_index)
 
     with pytest.raises(CompileNoteError, match="index"):
         compile_note(path, "Rollback", "concept", department="infra", loc="line 1")
@@ -704,7 +709,7 @@ def _wire_grounded_compile(
         "scripts.compile_note.LiteLLMJudge", MagicMock(from_env=lambda: MagicMock())
     )
     monkeypatch.setattr(
-        "scripts.compile_note.subprocess.run",
+        "scripts.compile_note._regenerate_index",
         lambda *_a, **_k: _success_index_run(repo),
     )
     return backend

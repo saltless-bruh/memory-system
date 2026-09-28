@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scout import vault  # noqa: E402
 from scout.backends.pgvector import PgVectorRlsBackend  # noqa: E402
 from scout.cli.tasks import (  # noqa: E402
+    BatchAlreadyRunning,
     TaskState,
     cancel_requested,
     clear_cancel,
@@ -47,6 +48,7 @@ from scout.types import RagBackend  # noqa: E402
 from scripts.compile_note import (  # noqa: E402
     CATEGORY_PLURALS,
     CompileNoteError,
+    DraftOnlyRefusal,
     PreparedPage,
     _atomic_write,
     _close_backend,
@@ -70,6 +72,15 @@ class CompilePlanCancelled(CompilePlanError):
     A subclass, so every existing handler treats it as the semantic outcome it
     is rather than as an infrastructure failure — but distinguishable, so the
     run is not then recorded as `failed`. It stopped because somebody said to.
+    """
+
+
+class CompilePlanBusy(CompilePlanError):
+    """Raised when another live process is already running this batch.
+
+    Distinguishable for the same reason as `CompilePlanCancelled`: the marker
+    on disk belongs to the *other* run, so recording `failed` into it would
+    report a working batch as dead.
     """
 
 
@@ -182,15 +193,41 @@ def _staged_path(staging: Path, article: PlannedArticle) -> Path:
     return staging / f"{article.slug}.md"
 
 
-def publish_batch(prepared: list[PreparedPage], *, dry_run: bool = False) -> list[Path]:
+def _vault(repo_root: Path | None, wiki_dir: Path | None) -> Path:
+    """The vault a batch publishes into. See `compile_note._checkout`."""
+    if wiki_dir is not None:
+        return wiki_dir
+    return (REPO_ROOT if repo_root is None else repo_root) / "wiki"
+
+
+def publish_batch(
+    prepared: list[PreparedPage],
+    *,
+    dry_run: bool = False,
+    wiki_dir: Path | None = None,
+) -> list[Path]:
     """Publish a fully prepared batch, compensating for a partial publish.
 
     Compensation is idempotent: removing a page that is already gone is a
     no-op, so a retried compensation is safe.
+
+    Every target is checked before anything is written. `prepare_page` refuses
+    a destination that exists, but a batch can sit in staging for as long as an
+    operator likes -- after a cancel, across a resume -- and a page a human
+    wrote in Obsidian meanwhile was replaced without a word. The snapshot taken
+    below exists to roll back *our* writes, never to license overwriting theirs.
     """
     if dry_run:
         return [page.path for page in prepared]
-    index_path = REPO_ROOT / "wiki" / "index.md"
+    taken = [page.path for page in prepared if page.path.exists()]
+    if taken:
+        raise CompilePlanError(
+            "Refusing to publish: a page already exists at "
+            + ", ".join(str(path) for path in taken)
+            + ". It appeared after this batch was staged; nothing was written. "
+            "Reconcile it with the staged draft, then re-run."
+        )
+    index_path = _vault(None, wiki_dir) / "index.md"
     index_before = _snapshot(index_path)
     published: list[tuple[Path, Any]] = []
     try:
@@ -198,7 +235,7 @@ def publish_batch(prepared: list[PreparedPage], *, dry_run: bool = False) -> lis
             before = _snapshot(page.path)
             _atomic_write(page.path, page.content.encode("utf-8"))
             published.append((page.path, before))
-        _regenerate_index()
+        _regenerate_index(wiki_dir)
     except BaseException as exc:
         failures: list[str] = []
         for path, before in reversed(published):
@@ -276,9 +313,21 @@ def compile_plan(
     dry_run: bool = False,
     resume: bool = True,
     allow_uncertain: bool = False,
+    repo_root: Path | None = None,
+    wiki_dir: Path | None = None,
 ) -> list[Path]:
-    """Compile every article in an approved plan. Writes nothing until all pass."""
+    """Compile every article in an approved plan. Writes nothing until all pass.
+
+    `repo_root` and `wiki_dir` are the checkout and vault the batch is for. The
+    CLI pins them; left unset they are this package's own, which is right only
+    for a command run from inside the checkout it ships in.
+
+    Publishing is draft-only on a vault whose index is authored: the batch
+    stages every page and then refuses, naming the staging directory where the
+    drafts are kept.
+    """
     source, articles = load_plan(plan_path)
+    vault_dir = _vault(repo_root, wiki_dir)
 
     staging = staging_dir(plan_path)
     staging.mkdir(parents=True, exist_ok=True)
@@ -292,17 +341,24 @@ def compile_plan(
     # nobody watching it, and with no marker to record the refusal against,
     # `compile-status` could only report `not_started` — the most misleading
     # answer available, because it says nothing happened when something did.
-    write_run_marker(
-        plan_path,
-        pid=os.getpid(),
-        fingerprint=fingerprint,
-        article_fingerprints=article_fingerprints,
-    )
+    try:
+        write_run_marker(
+            plan_path,
+            pid=os.getpid(),
+            fingerprint=fingerprint,
+            article_fingerprints=article_fingerprints,
+        )
+    except BatchAlreadyRunning as exc:
+        raise CompilePlanBusy(str(exc)) from exc
     # Starting is an intent to run. A request left over from a previous attempt
     # must not silently kill this one.
     clear_cancel(plan_path)
 
     preflight = run_preflight(source, articles)
+    # Pre-flight of a large plan can take long enough on its own for the
+    # `running` claim written above to expire before the first article is
+    # staged, and a working batch then reads `stalled`.
+    heartbeat(plan_path)
     unmintable = [(a, why) for a, ok, why in preflight if not ok]
     for article, ok, why in preflight:
         print(
@@ -340,11 +396,17 @@ def compile_plan(
             content = staged.read_text(encoding="utf-8")
             page = vault.parse_page(staged)
             target = (
-                REPO_ROOT
-                / "wiki"
-                / CATEGORY_PLURALS[article.category]
-                / f"{article.slug}.md"
+                vault_dir / CATEGORY_PLURALS[article.category] / f"{article.slug}.md"
             )
+            # Resume skips `prepare_page`, and with it the only check that the
+            # destination is free. Say so now, before more generations are paid
+            # for; `publish_batch` checks again at the moment of writing.
+            if target.exists():
+                raise CompilePlanError(
+                    f"{article.slug}: a page already exists at {target}. It "
+                    "appeared after this article was staged; the staged draft is "
+                    f"kept at {staged}. Reconcile the two, then re-run."
+                )
             prepared.append(PreparedPage(target, page.frontmatter, content))
             continue
         print(f"  compiling {article.slug} …", file=sys.stderr)
@@ -357,6 +419,8 @@ def compile_plan(
             wikilinks=article.links,
             skip_groundedness=skip_groundedness,
             extra_known_slugs=all_slugs,
+            repo_root=repo_root,
+            wiki_dir=vault_dir,
         )
         # Checkpoint immediately: this page cost two generations and a judge.
         _atomic_write(staged, page_result.content.encode("utf-8"))
@@ -365,7 +429,12 @@ def compile_plan(
         # rather than resting forever on a pid that may have been reused.
         heartbeat(plan_path)
 
-    published = publish_batch(prepared, dry_run=dry_run)
+    try:
+        published = publish_batch(prepared, dry_run=dry_run, wiki_dir=vault_dir)
+    except DraftOnlyRefusal as exc:
+        raise CompilePlanError(
+            f"{exc} The batch's {len(prepared)} draft(s) are kept in {staging}."
+        ) from exc
     if not dry_run:
         shutil.rmtree(staging, ignore_errors=True)
     return published
@@ -378,6 +447,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-groundedness", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--allow-uncertain", action="store_true")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="the checkout to compile into (default: the one this script is in)",
+    )
+    parser.add_argument(
+        "--wiki-dir",
+        type=Path,
+        default=None,
+        help="the vault to publish into (default: <repo-root>/wiki)",
+    )
     args = parser.parse_args(argv)
     plan_path = Path(args.plan)
     try:
@@ -387,7 +468,13 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             resume=not args.no_resume,
             allow_uncertain=args.allow_uncertain,
+            repo_root=args.repo_root,
+            wiki_dir=args.wiki_dir,
         )
+    except CompilePlanBusy as exc:
+        # The marker belongs to the run that is working; leave it alone.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     except CompilePlanCancelled as exc:
         # Already recorded as `cancelled` at the boundary where it stopped.
         # Recording `failed` over it would misreport a deliberate stop.

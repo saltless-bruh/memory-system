@@ -35,6 +35,16 @@
 # one: on a split-horizon network a public resolver cannot see internal names,
 # and sending internal hostnames to a third party leaks infrastructure detail.
 #
+# When a public resolver IS the right choice: litellm's routes in
+# config/litellm/config.yaml name only public model providers (no api_base,
+# no internal host), so it never resolves an internal name and a public
+# resolver leaks nothing. On a host that moves between networks — a laptop on
+# Wi-Fi — a site resolver is the WRONG choice, because it stops answering the
+# moment the host leaves that site. That is this deployment's case (owner
+# decision 2026-09-29): its local .env sets SNP_DNS_SERVERS=1.1.1.1 and
+# SNP_DNS_FALLBACK=8.8.8.8 and lists this file in COMPOSE_FILE. Re-check the
+# routes before copying that choice: one internal api_base makes it a leak.
+#
 # The host-wide alternative is `{"dns": [...]}` in /etc/docker/daemon.json.
 # That is the more permanent fix, but it is global to the machine and changes
 # every unrelated Docker workload on it, so it belongs to the host's
@@ -48,3 +58,6 @@ services:
   litellm:
     dns:
       - ${SNP_DNS_SERVERS:?set SNP_DNS_SERVERS to your site resolver, e.g. SNP_DNS_SERVERS=10.0.0.53}
+      # Optional second resolver, tried when the first does not answer. It
+      # falls back to the first value, so leaving it unset changes nothing.
+      - ${SNP_DNS_FALLBACK:-${SNP_DNS_SERVERS}}

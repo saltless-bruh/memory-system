@@ -169,36 +169,65 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
     )
 
     cfg: Config = config
-    addresses = _collect_addresses(vault.load_pages(_resolved_wiki_dir(cfg)))
-    if not addresses:
+    collection = _collect_addresses(vault.load_pages(_resolved_wiki_dir(cfg)))
+    # A page whose addresses sit under a non-canonical department is a finding
+    # about the page (exit 1). It used to escape as `PolicyValidationError` and
+    # reach the dispatcher as an INFRASTRUCTURE failure (exit 2), which on the
+    # production vault meant this gate could never complete (defect #7).
+    invalid = [
+        {"page": finding.page_path, "department": finding.department}
+        for finding in collection.invalid_departments
+    ]
+    skipped = len(collection.skipped_pages)
+    messages = tuple(
+        f"{item['page']}: department {item['department']!r} is not canonical; "
+        "its sources[] were not verified"
+        for item in invalid
+    )
+    footer = (
+        f" · {len(invalid)} page(s) with a non-canonical department" if invalid else ""
+    ) + f" · {skipped} page(s) skipped (no sources[] address)"
+
+    reports: list[Any] = []
+    if collection.addresses:
+        backend = _pgvector_backend(cfg)
+
+        async def run() -> list[Any]:
+            try:
+                return await verify_all(backend, collection.addresses)
+            finally:
+                await _close_backend(backend)
+
+        try:
+            reports = asyncio.run(run())
+        except Exception as exc:  # noqa: BLE001 - driver text may carry a DSN
+            raise infrastructure_error(
+                f"address verification could not complete ({type(exc).__name__})",
+                hint="check that PostgreSQL and the LiteLLM gateway are reachable",
+            ) from exc
+    elif not invalid:
         return CommandResult(
-            data={"checked": 0, "pass": 0, "fail": 0, "drift": 0, "status": "pass"},
-            summary="No sources[] addresses found in the vault. Nothing to verify.",
+            data={
+                "checked": 0,
+                "pass": 0,
+                "fail": 0,
+                "drift": 0,
+                "skipped_pages": skipped,
+                "status": "pass",
+            },
+            summary="No sources[] addresses found in the vault. Nothing to verify."
+            + footer,
         )
 
-    backend = _pgvector_backend(cfg)
-
-    async def run() -> list[Any]:
-        try:
-            return await verify_all(backend, addresses)
-        finally:
-            await _close_backend(backend)
-
-    try:
-        reports = asyncio.run(run())
-    except Exception as exc:  # noqa: BLE001 - driver text may carry a DSN
-        raise infrastructure_error(
-            f"address verification could not complete ({type(exc).__name__})",
-            hint="check that PostgreSQL and the LiteLLM gateway are reachable",
-        ) from exc
-
     counts = {s.value: sum(1 for r in reports if r.status is s) for s in VerifyStatus}
-    ok = all(r.status is VerifyStatus.PASS for r in reports)
+    ok = not invalid and all(r.status is VerifyStatus.PASS for r in reports)
     return CommandResult(
         exit_code=ExitCode.SUCCESS if ok else ExitCode.SEMANTIC_FAILURE,
         data={
             "checked": len(reports),
             **counts,
+            "skipped_pages": skipped,
+            "invalid_departments": invalid,
             "status": "pass" if ok else "fail",
             "addresses": [
                 {
@@ -219,8 +248,9 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
             # Reported separately because it needs a different fix: FAIL and
             # DRIFT say re-mint the hint, NO_EVIDENCE says the source itself
             # yields nothing and no hint can repair that (SH-2).
-            f"{counts.get('no_evidence', 0)} NO_EVIDENCE"
+            f"{counts.get('no_evidence', 0)} NO_EVIDENCE" + footer
         ),
+        messages=messages,
     )
 
 

@@ -794,3 +794,155 @@ def test_verify_extraction_scopes_the_read_to_the_canonical_departments(
     assert calls[0][0].startswith("SELECT set_config('scout.current_depts'")
     assert calls[0][1][0] == ",".join(sorted(CANONICAL_DEPARTMENTS))
     assert calls[1][0] == "fetch", "the scope must be set before the read"
+
+
+# ── verify-addresses: a page shape is a finding, never an outage (defect #7) ──
+
+
+def _address_vault(tmp_path: Path, pages: dict[str, str]) -> Path:
+    """A fixture checkout holding only the pages given -- never the real vault."""
+    concepts = tmp_path / "wiki" / "concepts"
+    concepts.mkdir(parents=True)
+    for slug, frontmatter in pages.items():
+        (concepts / f"{slug}.md").write_text(
+            f"---\n{frontmatter}---\n\n# {slug}\n", encoding="utf-8"
+        )
+    return tmp_path
+
+
+_ADDRESSED = (
+    "department: infra\nsources:\n  - path: raw/a.md\n    hint: kerberoasting\n"
+)
+
+
+def _fake_address_backend(
+    monkeypatch: pytest.MonkeyPatch, *, error: Exception | None = None
+) -> list[object]:
+    """Stand in for PostgreSQL + LiteLLM; record every scope it is queried under."""
+    from scout.types import RagChunk
+
+    scopes: list[object] = []
+
+    class _Backend:
+        async def retrieve(
+            self, hint: str, *, path: object = None, scope: object = None, k: int = 10
+        ) -> list[RagChunk]:
+            scopes.append(scope)
+            if error is not None:
+                raise error
+            return [
+                RagChunk(
+                    text="kerberoasting service tickets",
+                    file_path="raw/a.md",
+                    score=1.0,
+                )
+            ]
+
+    monkeypatch.setattr(
+        "scout.cli.commands.verify._pgvector_backend", lambda _cfg: _Backend()
+    )
+    return scopes
+
+
+def test_verify_addresses_skips_departmentless_pages_that_address_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production-vault shape used to abort with exit 2 before any check."""
+    from scout.cli.commands.verify import verify_addresses
+
+    repo = _address_vault(
+        tmp_path,
+        {
+            "bare": "title: Bare\n",
+            "empty-dept": "department: ''\n",
+            "addressed": _ADDRESSED,
+        },
+    )
+    scopes = _fake_address_backend(monkeypatch)
+
+    result = verify_addresses(config=_cfg(repo))
+
+    assert result.exit_code is ExitCode.SUCCESS
+    assert result.data["checked"] == 1
+    assert result.data["pass"] == 1
+    assert result.data["skipped_pages"] == 2
+    assert "2 page(s) skipped" in result.summary
+    assert len(scopes) == 1
+
+
+def test_verify_addresses_reports_an_invalid_department_as_a_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed department on an addressed page is content: exit 1, not 2."""
+    from scout.cli.commands.verify import verify_addresses
+
+    repo = _address_vault(
+        tmp_path,
+        {
+            "bad": _ADDRESSED.replace("department: infra", "department: all"),
+            "good": _ADDRESSED,
+        },
+    )
+    scopes = _fake_address_backend(monkeypatch)
+
+    result = verify_addresses(config=_cfg(repo))
+
+    assert result.exit_code is ExitCode.SEMANTIC_FAILURE
+    assert result.error is None
+    assert result.data["status"] == "fail"
+    [finding] = result.data["invalid_departments"]
+    assert finding["page"].endswith("wiki/concepts/bad.md")
+    assert finding["department"] == "all"
+    assert any("bad.md" in message for message in result.messages)
+    assert result.data["pass"] == 1
+    assert len(scopes) == 1, "the invalid page must never reach the backend"
+
+
+def test_verify_addresses_with_only_invalid_departments_is_still_a_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scout.cli.commands.verify import verify_addresses
+
+    repo = _address_vault(
+        tmp_path,
+        {"bad": _ADDRESSED.replace("department: infra", "department: ''")},
+    )
+    scopes = _fake_address_backend(monkeypatch)
+
+    result = verify_addresses(config=_cfg(repo))
+
+    assert result.exit_code is ExitCode.SEMANTIC_FAILURE
+    assert result.data["checked"] == 0
+    assert scopes == []
+
+
+def test_verify_addresses_keeps_a_real_outage_an_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix narrows exit 2 to outages; it must not turn outages into findings."""
+    from scout.cli.commands.verify import verify_addresses
+
+    repo = _address_vault(tmp_path, {"good": _ADDRESSED})
+    _fake_address_backend(monkeypatch, error=ConnectionError("dsn-secret"))
+
+    with pytest.raises(CliError) as caught:
+        verify_addresses(config=_cfg(repo))
+
+    result = caught.value.to_result()
+    assert result.exit_code is ExitCode.INFRASTRUCTURE
+    assert result.error is not None
+    assert "dsn-secret" not in json.dumps(result.error.to_dict())
+
+
+def test_check_reaches_the_address_stage_verdict_on_departmentless_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scout.cli.commands.verify import verify_addresses
+
+    repo = _address_vault(tmp_path, {"bare": "title: Bare\n", "good": _ADDRESSED})
+    _fake_address_backend(monkeypatch)
+
+    result = check(stages=[("addresses", verify_addresses)], config=_cfg(repo))
+
+    assert result.exit_code is ExitCode.SUCCESS
+    assert result.data["stages"]["addresses"]["skipped_pages"] == 1

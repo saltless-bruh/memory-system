@@ -7,7 +7,9 @@ admits it, and an address PASSes only when the file it names both wins the
 ranking and is lexically backed by its own text — see the criterion note below
 `TOP_RANK`. Exit codes are total: ``0`` every address passed, ``1`` at least
 one semantic FAIL/DRIFT, ``2`` infrastructure or configuration (never a
-mutation trigger, and never a silent green).
+mutation trigger, and never a silent green). A page's own shape is always a
+``0``/``1`` outcome: a page with no address is skipped and counted, and an
+addressed page under a non-canonical department is a FAIL, never a ``2``.
 """
 
 from __future__ import annotations
@@ -29,8 +31,17 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scout import vault  # noqa: E402
 from scout.core import normalize_path, post_filter  # noqa: E402
-from scout.policy import validate_caller_departments  # noqa: E402
-from scout.types import RagBackend, RagChunk, Scope, ScopedAddress  # noqa: E402
+from scout.policy import (  # noqa: E402
+    PolicyValidationError,
+    validate_caller_departments,
+)
+from scout.types import (  # noqa: E402
+    Address,
+    RagBackend,
+    RagChunk,
+    Scope,
+    ScopedAddress,
+)
 
 # ── The pass criterion (B1) ──────────────────────────────────────────────────
 #
@@ -349,38 +360,102 @@ def _no_backend_configured() -> RagBackend | None:
     return None
 
 
-def _collect_addresses(pages: Iterable[vault.Page]) -> list[ScopedAddress]:
-    """Collect page-scoped sources without collapsing duplicate addresses."""
-    collected: list[ScopedAddress] = []
-    for page in pages:
-        department = next(iter(validate_caller_departments([page.department])))
-        raw_sources = page.frontmatter.get("sources", [])
-        if not isinstance(raw_sources, list):
-            continue
-        for source_index, source in enumerate(raw_sources):
-            if not isinstance(source, dict):
-                continue
-            path = source.get("path")
-            hint = source.get("hint")
-            if not path or not hint:
-                continue
-            from scout.types import Address
+@dataclass(frozen=True, slots=True)
+class InvalidDepartment:
+    """A page that declares addresses under a department no caller can hold."""
 
-            loc = source.get("loc")
-            collected.append(
-                ScopedAddress(
-                    page_path=page.rel,
-                    page_slug=page.slug,
-                    source_index=source_index,
-                    department=department,
-                    address=Address(
-                        path=str(path),
-                        hint=str(hint),
-                        loc=str(loc) if loc else None,
-                    ),
-                )
+    page_path: str
+    department: str
+
+
+@dataclass(frozen=True, slots=True)
+class AddressCollection:
+    """What the vault offers the gate, sorted into checkable and not.
+
+    `skipped_pages` contribute no ``path``+``hint`` address, so nothing of theirs
+    is ever queried and their department is never used as a scope. They are
+    counted, not judged: 432 of 434 production pages have this shape, and
+    treating it as an error is what made the gate unable to finish (defect #7).
+
+    `invalid_departments` do contribute addresses, under a department that is
+    not canonical. Those addresses are withheld from the backend -- a page must
+    not certify under ``all`` or an empty scope -- and each page is a content
+    finding (exit 1), never an infrastructure failure (exit 2).
+    """
+
+    addresses: list[ScopedAddress]
+    skipped_pages: tuple[str, ...] = ()
+    invalid_departments: tuple[InvalidDepartment, ...] = ()
+
+
+def _page_addresses(page: vault.Page) -> list[tuple[int, Address]]:
+    """The page's well-formed ``sources[]`` entries, with their original index."""
+    raw_sources = page.frontmatter.get("sources", [])
+    if not isinstance(raw_sources, list):
+        return []
+    found: list[tuple[int, Address]] = []
+    for source_index, source in enumerate(raw_sources):
+        if not isinstance(source, dict):
+            continue
+        path = source.get("path")
+        hint = source.get("hint")
+        if not path or not hint:
+            continue
+        loc = source.get("loc")
+        found.append(
+            (
+                source_index,
+                Address(path=str(path), hint=str(hint), loc=str(loc) if loc else None),
             )
-    return collected
+        )
+    return found
+
+
+def _collect_addresses(pages: Iterable[vault.Page]) -> AddressCollection:
+    """Collect page-scoped sources without collapsing duplicate addresses.
+
+    The department is validated only for a page that actually contributes an
+    address, because only then does it become a retrieval scope. Validating
+    every page first raised `PolicyValidationError` on the first page without a
+    department, which escaped to the command boundary as an outage.
+    """
+    collected: list[ScopedAddress] = []
+    skipped: list[str] = []
+    invalid: list[InvalidDepartment] = []
+    for page in pages:
+        page_addresses = _page_addresses(page)
+        if not page_addresses:
+            skipped.append(page.rel)
+            continue
+        try:
+            department = next(iter(validate_caller_departments([page.department])))
+        except PolicyValidationError:
+            invalid.append(InvalidDepartment(page.rel, page.department))
+            continue
+        collected.extend(
+            ScopedAddress(
+                page_path=page.rel,
+                page_slug=page.slug,
+                source_index=source_index,
+                department=department,
+                address=address,
+            )
+            for source_index, address in page_addresses
+        )
+    return AddressCollection(collected, tuple(skipped), tuple(invalid))
+
+
+def _print_collection_findings(collection: AddressCollection) -> None:
+    for finding in collection.invalid_departments:
+        print(
+            f"FAIL  {finding.page_path} -> department {finding.department!r} is "
+            f"not canonical; its sources[] were not verified"
+        )
+    if collection.skipped_pages:
+        print(
+            f"note: {len(collection.skipped_pages)} page(s) skipped — "
+            f"no sources[] path+hint address to verify"
+        )
 
 
 def _print_report(reports: Sequence[VerifyReport]) -> None:
@@ -428,13 +503,17 @@ async def _close_backend(backend: RagBackend) -> None:
 async def _execute(backend: RagBackend, pages_loader: PagesLoader) -> int:
     try:
         pages = list(pages_loader())
-        addresses = _collect_addresses(pages)
-        if not addresses:
+        collection = _collect_addresses(pages)
+        _print_collection_findings(collection)
+        if not collection.addresses:
+            if collection.invalid_departments:
+                return 1
             print("No sources[] addresses found in the vault. Nothing to verify.")
             return 0
-        reports = await verify_all(backend, addresses)
+        reports = await verify_all(backend, collection.addresses)
         _print_report(reports)
-        return 1 if any(r.status is not VerifyStatus.PASS for r in reports) else 0
+        failed = any(r.status is not VerifyStatus.PASS for r in reports)
+        return 1 if failed or collection.invalid_departments else 0
     finally:
         await _close_backend(backend)
 

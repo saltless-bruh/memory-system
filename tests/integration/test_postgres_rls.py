@@ -6,12 +6,20 @@ using the non-superuser `rag_app_role`.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
+from pathlib import Path
 
 import asyncpg
 import pytest
 
+from scout.cli.commands.verify import verify_extraction
+from scout.cli.config import Config
+from scout.cli.registry import Prerequisite
+from scout.cli.result import ExitCode
 from scout.config import postgres_settings
+from scout.ingest import DocumentAclMap, reconcile_deletions
 
 pytestmark = pytest.mark.integration
 
@@ -278,3 +286,168 @@ async def test_runtime_roles_are_not_privileged_or_owners() -> None:
         assert owners == 0
     finally:
         await conn.close()
+
+
+#: Every wiki page is written with all four departments (scout/wiki_ingest.py,
+#: WIKI_ALLOWED_DEPARTMENTS). The rows above carry one department or `all`, so
+#: nothing here showed that narrowing to one department still sees the wiki.
+WIKI_DEPARTMENTS = ["redteam", "blueteam", "ai_eng", "infra"]
+
+
+@pytest.mark.asyncio
+async def test_a_wiki_row_is_visible_under_every_single_department_narrowing() -> None:
+    """Narrowing is a no-op on the wiki tier, and it still fails closed unscoped."""
+    master = await get_master_connection()
+    doc_id = uuid.uuid4()
+    try:
+        await master.execute(
+            "INSERT INTO rag_documents (doc_id, source_uri, allowed_depts, title) "
+            "VALUES ($1, $2, $3, $4)",
+            doc_id,
+            f"wiki/rls_{doc_id}.md",
+            WIKI_DEPARTMENTS,
+            "Wiki RLS page",
+        )
+        await master.execute(
+            "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text, metadata) "
+            "VALUES ($1, 0, 'wiki tier text', $2::jsonb)",
+            doc_id,
+            '{"corpus": "wiki"}',
+        )
+
+        app_conn = await get_app_connection()
+        try:
+            unscoped = await app_conn.fetchval(
+                "SELECT count(*) FROM rag_chunks WHERE doc_id = $1", doc_id
+            )
+            assert unscoped == 0, "an unscoped caller must see no wiki chunk"
+
+            for department in WIKI_DEPARTMENTS:
+                async with app_conn.transaction():
+                    await app_conn.execute(
+                        "SELECT set_config('scout.current_depts', $1, true)",
+                        department,
+                    )
+                    docs = await app_conn.fetchval(
+                        "SELECT count(*) FROM rag_documents WHERE doc_id = $1",
+                        doc_id,
+                    )
+                    chunks = await app_conn.fetchval(
+                        "SELECT count(*) FROM rag_chunks WHERE doc_id = $1", doc_id
+                    )
+                assert (docs, chunks) == (1, 1), (
+                    f"a caller narrowed to {department!r} lost the wiki page"
+                )
+        finally:
+            await app_conn.close()
+    finally:
+        await master.execute("DELETE FROM rag_documents WHERE doc_id = $1", doc_id)
+        await master.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purges_a_row_whose_file_no_acl_rule_grants(
+    tmp_path: Path,
+) -> None:
+    """Revoking a rule revokes access: the unmapped branch of reconcile_deletions.
+
+    The file is still on disk, so only the ACL map can condemn it. Every row is
+    under a directory name unique to this run, and reconcile acts only on rows
+    under the directory it is given, so no other row in the database is at risk.
+    """
+    root = tmp_path / f"rlsraw_{uuid.uuid4().hex}"
+    (root / "kept").mkdir(parents=True)
+    (root / "revoked").mkdir()
+    (root / "kept" / "a.md").write_text("# kept\n", encoding="utf-8")
+    (root / "revoked" / "b.md").write_text("# revoked\n", encoding="utf-8")
+    acl_file = root / ".acl.yaml"
+    acl_file.write_text(
+        'version: 1\nrules:\n  - path: "kept/**"\n    departments: [infra]\n',
+        encoding="utf-8",
+    )
+    acl = DocumentAclMap.from_file(acl_file)
+    kept_uri = f"{root.name}/kept/a.md"
+    revoked_uri = f"{root.name}/revoked/b.md"
+
+    conn = await get_ingest_connection()
+    ids = {kept_uri: uuid.uuid4(), revoked_uri: uuid.uuid4()}
+    try:
+        for uri, doc_id in ids.items():
+            await conn.execute(
+                "INSERT INTO rag_documents (doc_id, source_uri, allowed_depts, title) "
+                "VALUES ($1, $2, $3, $4)",
+                doc_id,
+                uri,
+                ["infra"],
+                uri,
+            )
+            await conn.execute(
+                "INSERT INTO rag_chunks (doc_id, chunk_index, chunk_text) "
+                "VALUES ($1, 0, 'untiered raw text')",
+                doc_id,
+            )
+
+        deleted = await reconcile_deletions(root, conn=conn, acl=acl)
+
+        assert deleted == [revoked_uri]
+        remaining = {
+            row["source_uri"]
+            for row in await conn.fetch(
+                "SELECT source_uri FROM rag_documents WHERE doc_id = ANY($1::uuid[])",
+                list(ids.values()),
+            )
+        }
+        assert remaining == {kept_uri}
+    finally:
+        await conn.execute(
+            "DELETE FROM rag_documents WHERE doc_id = ANY($1::uuid[])",
+            list(ids.values()),
+        )
+        await conn.close()
+
+
+def test_verify_extraction_reads_single_department_rows_as_the_query_role() -> None:
+    """The scoped SELECT behind `snpmemory verify-extraction`, under real RLS.
+
+    The command runs as the `query` role, which sees nothing until
+    `scout.current_depts` is set. Its offline tests stub asyncpg, so none showed
+    that the clearance it sets reaches a row granted to one department.
+    Synchronous because the command itself calls `asyncio.run`.
+    """
+    doc_id = uuid.uuid4()
+    uri = f"raw/extraction_{doc_id}.pdf"
+
+    async def seed() -> None:
+        master = await get_master_connection()
+        try:
+            await master.execute(
+                "INSERT INTO rag_documents "
+                "(doc_id, source_uri, allowed_depts, title, extraction_status) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb)",
+                doc_id,
+                uri,
+                ["redteam"],
+                "Extraction RLS probe",
+                '{"complete": false, "incomplete": ["figures"]}',
+            )
+        finally:
+            await master.close()
+
+    async def remove() -> None:
+        master = await get_master_connection()
+        try:
+            await master.execute("DELETE FROM rag_documents WHERE doc_id = $1", doc_id)
+        finally:
+            await master.close()
+
+    asyncio.run(seed())
+    try:
+        result = verify_extraction(
+            config=Config(prerequisite=Prerequisite.LOCAL, values=dict(os.environ))
+        )
+    finally:
+        asyncio.run(remove())
+
+    named = {document["source_uri"] for document in result.data["documents"]}
+    assert uri in named, "a redteam-only row was invisible to verify-extraction"
+    assert result.exit_code is ExitCode.SEMANTIC_FAILURE

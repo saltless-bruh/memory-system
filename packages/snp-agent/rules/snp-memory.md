@@ -18,6 +18,10 @@
 - **Request scope boundary:** Verified identity supplies nonempty canonical
   departments. A request may narrow that set but cannot add or expand
   authority. Document ACL `all` is not caller clearance.
+- **What scope restricts today:** source passages are filtered by department;
+  wiki pages are not yet department-scoped — every page is readable by any
+  authenticated caller. Restriction is planned, not present; never describe a
+  wiki page as department-restricted.
 
 ## Authoring invariant
 

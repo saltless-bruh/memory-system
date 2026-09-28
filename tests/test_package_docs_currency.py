@@ -282,3 +282,34 @@ def test_package_source_of_truth_is_named_consistently(relative: str) -> None:
 def test_readme_names_the_package_as_the_edit_point() -> None:
     text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "export_agent_bundle.py --sync" in text
+
+
+# ── department scoping on the wiki tier ─────────────────────────────────────
+
+
+def test_docs_do_not_promise_wiki_department_scoping_the_code_lacks() -> None:
+    """Every wiki page is indexed for every department, and `wiki_read` never
+    compares a page's department to the caller's. Until that changes the
+    docs must say so, and say it is planned (owner ruling, 2026-09-26),
+    rather than imply the filesystem route is the only thing that bypasses
+    scoping. When wiki scoping lands this test fails, and the fix is to
+    rewrite those sentences, not this assertion."""
+    from scout.policy import CANONICAL_DEPARTMENTS
+    from scout.wiki_ingest import WIKI_ALLOWED_DEPARTMENTS
+
+    if set(WIKI_ALLOWED_DEPARTMENTS) != set(CANONICAL_DEPARTMENTS):
+        pytest.skip("wiki pages carry their own ACL; re-derive this check")
+    for relative in (
+        "AGENTS.md",
+        "README.md",
+        "CLAUDE.md",
+        "packages/snp-agent/rules/snp-memory.md",
+    ):
+        text = " ".join(
+            (REPO_ROOT / relative).read_text(encoding="utf-8").split()
+        ).lower()
+        assert "not yet department-scoped" in text, (
+            f"{relative} must state that wiki pages are not yet "
+            "department-scoped while wiki_ingest grants every department"
+        )
+        assert "bypass scope enforcement" not in text, relative

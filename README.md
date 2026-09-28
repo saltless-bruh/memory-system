@@ -42,8 +42,13 @@ Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
   `status: "no_source"`. `rag_fetch` is no longer an agent-facing MCP tool;
   `wiki_quote` and `scripts/verify_addresses.py` call the same engine function
   internally.
-- PostgreSQL RLS applies the authenticated caller's canonical departments:
-  `redteam`, `blueteam`, `ai_eng`, and `infra`.
+- PostgreSQL RLS applies the authenticated caller's canonical departments
+  (`redteam`, `blueteam`, `ai_eng`, `infra`) to every indexed row. Source
+  chunks carry the departments `raw/.acl.yaml` grants them, so source
+  retrieval is department-scoped. Wiki pages are **not yet department-scoped**:
+  ingestion grants every page all four departments, whatever its frontmatter
+  says, and `wiki_read` reads a page by path without comparing departments.
+  Per-department wiki restriction is planned, not present.
 - `rag_app_role` is the least-privilege query identity. `rag_ingest_role` is
   the least-privilege ingestion identity. Migration administration is confined
   to the one-shot migration/provisioning service.

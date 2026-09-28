@@ -1,5 +1,5 @@
 ---
-description: Answers questions through the V3 Scout page-retrieval contract with scope enforcement, bounded context, and page citations.
+description: Answers questions through the V3 Scout page-retrieval contract with the caller's verified scope, bounded context, and page citations.
 ---
 
 # /snp-query

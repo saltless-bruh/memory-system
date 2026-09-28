@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "snp-memory-agent",
   "version": "2.0.0",
-  "description": "Connects an AI coding agent to the SNP Memory System V3 page-retrieval and authoring contracts through Scout and snpmemory MCP servers.",
+  "description": "Connects an AI coding agent to the SNP Memory System V3 page-retrieval and authoring contracts through the one snpmemory MCP server, served by the scout container.",
   "author": {
     "name": "SNP Architecture Team"
   },

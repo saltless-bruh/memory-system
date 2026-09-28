@@ -135,7 +135,7 @@ def test_compile_without_confirm_writes_nothing_and_says_how(
     )
     monkeypatch.setattr(
         "scripts.compile_note.publish_page",
-        lambda prepared: published.append(prepared.path),
+        lambda prepared, **_k: published.append(prepared.path),
     )
 
     with pytest.raises(CliError) as caught:
@@ -167,7 +167,7 @@ def test_compile_dry_run_writes_nothing(
     )
     monkeypatch.setattr(
         "scripts.compile_note.publish_page",
-        lambda prepared: published.append(prepared.path),
+        lambda prepared, **_k: published.append(prepared.path),
     )
 
     result = compile_cmd(
@@ -189,7 +189,7 @@ def test_compile_with_confirm_publishes(
     target = tmp_path / "wiki" / "concepts" / "pooling.md"
     published: list[Path] = []
 
-    def _publish(prepared: _Prepared) -> Path:
+    def _publish(prepared: _Prepared, **_k: object) -> Path:
         published.append(prepared.path)
         return prepared.path
 
@@ -232,6 +232,77 @@ def test_an_existing_page_is_a_conflict_not_an_overwrite(
             config=_config(tmp_path),
         )
     assert caught.value.to_result().exit_code == ExitCode.CONFLICT
+
+
+def test_compile_writes_into_the_pinned_checkout_not_the_package_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The page, its raw source and its index all belong to `cfg.repo_root`.
+
+    `scripts/compile_note.py` falls back to its own `REPO_ROOT` when a caller
+    names no checkout. That fallback is pointed at a decoy here, standing in for
+    the package tree: nothing may be read from it or written into it.
+    """
+    from unittest.mock import MagicMock
+
+    from scout.types import Address
+    from scripts.compile_note import GeneratedMetadata
+    from scripts.mint import MintResult, MintStatus
+    from tests.test_compile_lane import _generated_vault
+    from tests.test_compile_note import _wire_body_seams
+
+    checkout = tmp_path / "checkout"
+    wiki = _generated_vault(checkout, monkeypatch)  # lint-clean, generated index
+    index_before = (wiki / "index.md").read_text(encoding="utf-8")
+    (checkout / "raw" / "reports").mkdir(parents=True)
+    (checkout / "raw" / "reports" / "acme.md").write_text(
+        "# Acme\n\nSource facts.\n", encoding="utf-8"
+    )
+    decoy = tmp_path / "package-tree"
+    (decoy / "wiki" / "concepts").mkdir(parents=True)
+    monkeypatch.setattr("scripts.compile_note.REPO_ROOT", decoy)
+
+    branches: list[Path] = []
+
+    def _branch(repo: Path) -> str:
+        branches.append(repo)
+        return "feature/wiki"
+
+    async def _mint(*_a: object, path: str, department: str, loc: str, **_k: object):
+        return MintResult(
+            path=path,
+            department=department,
+            address=Address(path=path, hint="Acme source facts", loc=loc),
+            status=MintStatus.MINTED,
+            tried=(),
+        )
+
+    monkeypatch.setattr("scripts.compile_note._current_branch", _branch)
+    monkeypatch.setattr(
+        "scripts.compile_note.generate_model_data",
+        lambda *_a: GeneratedMetadata(entities=("acme",), hint="Acme source facts"),
+    )
+    monkeypatch.setattr("scripts.compile_note.mint_address", _mint)
+    monkeypatch.setattr("scripts.compile_note.PgVectorRlsBackend", MagicMock())
+    _wire_body_seams(monkeypatch)
+
+    result = compile_cmd(
+        path="raw/reports/acme.md",
+        title="Acme Capability",
+        category="concept",
+        dept="blueteam",
+        loc="Section Acme",
+        confirm=True,
+        config=_config(checkout),
+    )
+
+    assert result.data["status"] == "written"
+    assert result.data["path"] == "wiki/concepts/acme-capability.md"
+    assert (wiki / "concepts" / "acme-capability.md").is_file()
+    index_after = (wiki / "index.md").read_text(encoding="utf-8")
+    assert index_after != index_before  # this vault's index was regenerated
+    assert branches == [checkout]
+    assert sorted(p.name for p in decoy.rglob("*") if p.is_file()) == []
 
 
 # ── propose ───────────────────────────────────────────────────────────────

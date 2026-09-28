@@ -272,7 +272,8 @@ def test_propose_without_confirm_creates_no_branch(
     result = caught.value.to_result()
     assert result.exit_code == ExitCode.CONFIRMATION_REQUIRED
     assert result.error is not None
-    assert result.error.details["proposed"]["base_branch"] == "feature/x"
+    # The branch is cut from the PR target, not from where the caller stands.
+    assert result.error.details["proposed"]["base_branch"] == "main"
     assert calls == []
 
 
@@ -295,8 +296,9 @@ def test_propose_never_commits_to_the_branch_you_are_on(
 ) -> None:
     """R-6.4 / R-7.3: the page moves to a new branch, always.
 
-    The delegated script cuts `wiki/<slug>-<timestamp>` before staging anything,
-    so the branch recorded here is the one being left, not the one committed to.
+    The delegated script cuts `wiki/<slug>-<timestamp>` from `--base` before
+    staging anything, so the branch recorded here is the one it descends from,
+    not the one committed to.
     """
     seen: list[list[str]] = []
     monkeypatch.setattr("scripts.propose_page._normalize_page", lambda p: p)
@@ -323,3 +325,37 @@ def test_a_page_that_does_not_exist_is_a_caller_mistake(tmp_path: Path) -> None:
     with pytest.raises(CliError) as caught:
         propose(page="wiki/concepts/never-written.md", config=_config(tmp_path))
     assert caught.value.to_result().exit_code == ExitCode.INPUT_VALIDATION
+
+
+def test_propose_pushes_to_the_private_remote_unless_told_otherwise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`origin` is public; a bare `--push` must never be aimed at it.
+
+    The command and the script each declare a default. They must agree, and
+    both must name the private remote, or the command re-introduces the leak
+    the script guards against.
+    """
+    from scripts import propose_page
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr("scripts.propose_page._normalize_page", lambda p: p)
+    monkeypatch.setattr("scripts.propose_page._staged_paths", lambda: set())
+    monkeypatch.setattr(
+        "scripts.propose_page.wiki_changes",
+        lambda allowed: ["wiki/concepts/pooling.md"],
+    )
+    monkeypatch.setattr("scripts.propose_page.current_branch", lambda: "main")
+    monkeypatch.setattr(
+        "scripts.propose_page.main", lambda argv: seen.append(argv) or 0
+    )
+
+    propose(
+        page="wiki/concepts/pooling.md",
+        push=True,
+        confirm=True,
+        config=_config(tmp_path),
+    )
+
+    argv = seen[0]
+    assert argv[argv.index("--remote") + 1] == propose_page.PRIVATE_REMOTE == "gitea"

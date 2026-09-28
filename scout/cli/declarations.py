@@ -878,7 +878,16 @@ command(
             "--title", "string", description="Used in the branch and commit message."
         ),
         ArgSpec("--base", "string", default="main", description="PR target branch."),
-        ArgSpec("--remote", "string", default="origin"),
+        ArgSpec(
+            "--remote",
+            "string",
+            default="gitea",
+            description=(
+                "Push target. Defaults to the private remote; a push anywhere "
+                "else is refused unless the branch's wiki/ tree matches that "
+                "remote's main."
+            ),
+        ),
         ArgSpec("--push", "boolean", default=False),
         ArgSpec(
             "--confirm",

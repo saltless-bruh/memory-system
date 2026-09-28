@@ -209,7 +209,7 @@ engine and canonical envelope.*
 | `snpmemory compile --path --title --category --dept --loc` | compile a draft page | `7` page exists / protected branch |
 | `snpmemory plan-articles <path> --dept [--category] [--max-depth] [--out]` | propose a decomposition from the source's own headings; no model call, byte-stable output | `1` no numbered headings |
 | `snpmemory compile-plan <plan> --confirm [--background] [--dry-run] [--no-resume] [--allow-uncertain]` | compile every article in an approved plan; writes nothing unless all pass | `1` an article cannot mint or ground · `5` no `--confirm` |
-| `snpmemory propose --page` | PR-first commit | `7` pre-staged work |
+| `snpmemory propose --page [--base] [--remote] [--push]` | PR-first commit on a branch cut from `--base`; `--remote` defaults to the private `gitea`, and a push elsewhere is refused unless the branch's `wiki/` tree equals that remote's `main` (or, with no `main` known, holds at most the 12-file public sample) | `1` push refused · `7` pre-staged work |
 | `snpmemory ingest --path │ --dir` | index into pgvector | |
 | `snpmemory ingest-wiki [--dir] [--dry-run]` | index every vault page into the wiki corpus tier | `2` database or embedding route unavailable |
 | `snpmemory extract --path │ --dir` | figures + tables → `derived/` | `3` path outside `raw/` |

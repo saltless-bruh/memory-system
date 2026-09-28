@@ -28,6 +28,14 @@ from scout.cli.result import CommandResult, ErrorKind, ExitCode
 #: Injected by the dispatcher; never a user-facing flag.
 Injected = Annotated[Any, Parameter(parse=False)]
 
+#: A token forwarded to compose untouched. cyclopts refuses any leading-hyphen
+#: token it was not told about -- `snpmemory up --build` exited 3 "Unknown
+#: option" before it ever reached compose -- so the forwarding promise above
+#: holds only because this lets such tokens fall through to the var-positional.
+#: Options this tool *does* declare (`down --confirm`) are still matched first,
+#: wherever they appear, and never leak into compose's argv.
+Forwarded = Annotated[str, Parameter(allow_leading_hyphen=True)]
+
 #: Services `down` would stop. Named so a refusal can say what is at stake.
 _STATEFUL = ("postgres", "git")
 
@@ -97,7 +105,7 @@ def _services(cwd: Any) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: row["service"])
 
 
-def up(*extra: str, config: Injected = None) -> CommandResult:
+def up(*extra: Forwarded, config: Injected = None) -> CommandResult:
     """Start the stack. Unrecognised arguments are forwarded to compose."""
     cfg: Config = config
     repo = cfg.require_repo()
@@ -115,7 +123,9 @@ def up(*extra: str, config: Injected = None) -> CommandResult:
     )
 
 
-def down(*extra: str, confirm: bool = False, config: Injected = None) -> CommandResult:
+def down(
+    *extra: Forwarded, confirm: bool = False, config: Injected = None
+) -> CommandResult:
     """Stop the stack. Requires `--confirm`: `postgres` holds the corpus."""
     from scout.cli.errors import CliError
 
@@ -135,14 +145,21 @@ def down(*extra: str, confirm: bool = False, config: Injected = None) -> Command
 
 
 def logs(
-    service: str | None = None, *extra: str, config: Injected = None
+    service: Forwarded | None = None, *extra: Forwarded, config: Injected = None
 ) -> CommandResult:
-    """Show recent logs for one service, or for all of them."""
+    """Show recent logs for one service, or for all of them.
+
+    Everything after `logs` goes to compose in the order it was typed, and
+    compose -- which knows its own grammar -- decides what is a service and what
+    is a flag's value. This tool cannot: in `logs --tail 20 scout` only compose
+    knows that `20` belongs to `--tail`. So `service` is only a name given
+    *first*; after a leading flag it is reported as null rather than guessed.
+    """
     cfg: Config = config
     repo = cfg.require_repo()
-    args = ["logs", "--no-color", *extra]
-    if service:
-        args.append(service)
+    forwarded = [*([service] if service is not None else []), *extra]
+    named = service if service is not None and not service.startswith("-") else None
+    args = ["logs", "--no-color", *forwarded]
     completed = _compose(args, cwd=repo)
     if completed.returncode != 0:
         raise infrastructure_error(
@@ -152,7 +169,7 @@ def logs(
         )
     lines = completed.stdout.splitlines()
     return CommandResult(
-        data={"service": service, "lines": lines},
+        data={"service": named, "lines": lines},
         summary=completed.stdout.rstrip("\n"),
     )
 

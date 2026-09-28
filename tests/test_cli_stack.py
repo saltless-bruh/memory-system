@@ -220,3 +220,74 @@ def test_logs_puts_the_log_on_stdout(
     result = stack.logs("scout", config=_config(tmp_path))
     assert result.data["lines"] == ["line one", "line two"]
     assert result.summary == "line one\nline two"
+
+
+# ── forwarding through the real dispatcher ───────────────────────────────────
+#
+# The tests above call the command functions directly, which is exactly why the
+# forwarding promise went unchecked: cyclopts, not the function, decides whether
+# `--build` ever reaches `*extra`. These go through `main`, the operator's path.
+
+
+def _dispatch(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> tuple[int, list[list[str]]]:
+    from scout.cli.app import main
+
+    calls: list[list[str]] = []
+
+    def _record(args: list[str], **_k: object) -> _Completed:
+        calls.append(list(args))
+        return _Completed("")
+
+    monkeypatch.setattr(stack, "_compose", _record)
+    monkeypatch.setattr(stack, "_services", lambda _cwd: [])
+    monkeypatch.chdir(REPO_ROOT)
+    return main([*argv, "-o", "json"]), calls
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["up", "--build"], ["up", "-d", "--build"]),
+        (["up", "--build", "scout"], ["up", "-d", "--build", "scout"]),
+        (["down", "--confirm", "-v"], ["down", "-v"]),
+        (["down", "-v", "--confirm"], ["down", "-v"]),
+        (
+            ["logs", "sync-job", "--tail", "20"],
+            ["logs", "--no-color", "sync-job", "--tail", "20"],
+        ),
+        (["logs", "--tail", "20"], ["logs", "--no-color", "--tail", "20"]),
+        (
+            ["logs", "--tail", "20", "sync-job"],
+            ["logs", "--no-color", "--tail", "20", "sync-job"],
+        ),
+    ],
+)
+def test_unrecognised_flags_reach_compose_through_the_dispatcher(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: list[str]
+) -> None:
+    """The module docstring promises `snpmemory up --build` just works."""
+    code, calls = _dispatch(monkeypatch, argv)
+    assert code == ExitCode.SUCCESS
+    assert calls == [expected]
+
+
+def test_logs_names_the_service_only_when_it_comes_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In `--tail 20 scout` only compose knows `20` is a value; never guess."""
+    monkeypatch.setattr(stack, "_compose", lambda *a, **k: _Completed("x\n"))
+    first = stack.logs("scout", "--tail", "5", config=_config(tmp_path))
+    assert first.data["service"] == "scout"
+    flag_first = stack.logs("--tail", "5", "scout", config=_config(tmp_path))
+    assert flag_first.data["service"] is None
+
+
+def test_down_still_refuses_without_confirm_when_flags_are_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forwarding must not let `--confirm` slip into compose's argv unread."""
+    code, calls = _dispatch(monkeypatch, ["down", "-v"])
+    assert code == ExitCode.CONFIRMATION_REQUIRED
+    assert calls == []

@@ -700,7 +700,12 @@ command(
     errors=(ErrorKind.INFRASTRUCTURE,),
     example=("sync-job", "--tail", "20"),
     output_fields=(
-        FieldSpec("service", "string", nullable=True),
+        FieldSpec(
+            "service",
+            "string",
+            nullable=True,
+            description="The service named first; null when a flag came first.",
+        ),
         FieldSpec("lines", "array", items=FieldSpec("line", "string")),
     ),
 )

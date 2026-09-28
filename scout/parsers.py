@@ -461,13 +461,23 @@ def _pdf_figure_sections(
     return sections
 
 
-def parse_csv(content: str, source_uri: str) -> ParsedDocument:
-    """Parses CSV tabular data into structured row representations."""
+def parse_csv(
+    content: str, source_uri: str, *, delimiter: str | None = None
+) -> ParsedDocument:
+    """Parses CSV or TSV tabular data into structured row representations.
+
+    The delimiter follows the file's own declaration, its suffix, unless the
+    caller names one. A ``.tsv`` read with the comma default does not fail: each
+    row becomes a single tab-joined cell, the header/value pairing that is the
+    table's meaning is gone, and the document still records as ingested.
+    """
     title = Path(source_uri).stem.replace("-", " ").title()
     sections: list[ParsedSection] = []
+    if delimiter is None:
+        delimiter = "\t" if Path(source_uri).suffix.lower() == ".tsv" else ","
 
     try:
-        reader = csv.reader(io.StringIO(content))
+        reader = csv.reader(io.StringIO(content), delimiter=delimiter)
         rows = list(reader)
         if rows:
             header = rows[0]

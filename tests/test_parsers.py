@@ -55,6 +55,21 @@ def test_parse_csv_chunks_tabular_data() -> None:
     assert "Row 1: id: 1 | name: Alice | role: Admin" in doc.sections[0].text
 
 
+def test_parse_file_splits_tsv_on_tabs(tmp_path: Path) -> None:
+    """A .tsv keeps its header/value pairing; a comma reader flattens each row."""
+    source = tmp_path / "users.tsv"
+    source.write_text("id\tname, full\trole\n1\tAlice, A.\tAdmin\n", encoding="utf-8")
+    doc = parse_file(source, tmp_path)
+    text = doc.sections[0].text
+    assert "Columns: id, name, full, role" in text
+    assert "Row 1: id: 1 | name, full: Alice, A. | role: Admin" in text
+
+
+def test_parse_csv_still_splits_on_commas_for_csv() -> None:
+    doc = parse_csv("a,b\n1,2\n", "raw/data/t.csv")
+    assert "Row 1: a: 1 | b: 2" in doc.sections[0].text
+
+
 def test_parse_markdown_ignores_hash_lines_inside_code_fences() -> None:
     content = (
         "# Runbook\n"

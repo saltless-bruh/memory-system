@@ -1,10 +1,14 @@
 """What the parser could actually do, recorded with what it produced.
 
 Two runs of the same parser over the same bytes can produce different corpora,
-because "the same parser" is not the same thing in two environments. The host
-here has `pdfplumber`; the deployed image deliberately does not (T5.1), so a
-host ingest emits table sections `sync-job` cannot produce and will drop
-unannounced on its next pass. Reproducible-pipeline practice names this exactly:
+because "the same parser" is not the same thing in two environments. Until
+2026-09-06 the host had `pdfplumber` and Pillow and the deployed image
+deliberately had neither (T5.1), so a host ingest emitted table sections
+`sync-job` could not produce and would drop unannounced on its next pass.
+`d287896` put both into the image, which now extracts tables and hands figures
+to the `snp-vlm` route (7 of 7 described for the audited paper, 2026-09-21);
+the fingerprint is what catches the two environments diverging again.
+Reproducible-pipeline practice names this exactly:
 capturing preprocessing parameters and environment revealed that "identical"
 datasets had gone through different pipelines.
 

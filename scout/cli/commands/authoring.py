@@ -137,13 +137,20 @@ def compile(  # noqa: A001 - the specified command name
     skip_groundedness: bool = False,
     config: Injected = None,
 ) -> CommandResult:
-    """Compile one source section into a grounded wiki page."""
+    """Compile one source section into a grounded wiki page.
+
+    The raw source, the vault and the regenerated index all come from the
+    checkout the dispatcher pinned (`cfg.require_repo()`, `WIKI_DIR`), never
+    from the directory `scripts/compile_note.py` happens to be installed in.
+    """
+    from scout.cli.commands.compile import _vault_dir
     from scout.cli.commands.rag import _scope_for
     from scripts.compile_note import CompileNoteError, prepare_page, publish_page
 
     cfg: Config = config
-    cfg.require_repo()
+    repo = cfg.require_repo().resolve()
     _scope_for(dept)
+    wiki_dir = _vault_dir(cfg)
 
     try:
         prepared = prepare_page(
@@ -153,6 +160,8 @@ def compile(  # noqa: A001 - the specified command name
             department=dept,
             loc=loc,
             skip_groundedness=skip_groundedness,
+            repo_root=repo,
+            wiki_dir=wiki_dir,
         )
     except CompileNoteError as exc:
         # The page exists, or the branch is protected: a state conflict, not a
@@ -171,7 +180,7 @@ def compile(  # noqa: A001 - the specified command name
             cause=type(exc).__name__,
         ) from exc
 
-    target = prepared.path.relative_to(cfg.require_repo()).as_posix()
+    target = prepared.path.relative_to(repo).as_posix()
     proposed = {
         "path": target,
         "title": title,
@@ -193,10 +202,10 @@ def compile(  # noqa: A001 - the specified command name
             proposed=proposed,
         )
 
-    written = publish_page(prepared)
+    written = publish_page(prepared, wiki_dir=wiki_dir)
     return CommandResult(
         data={"status": "written", **proposed},
-        summary=f"wrote {written.relative_to(cfg.require_repo()).as_posix()}",
+        summary=f"wrote {written.relative_to(repo).as_posix()}",
     )
 
 

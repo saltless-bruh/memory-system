@@ -1,9 +1,10 @@
 """The parsing environment, recorded so two corpora cannot silently differ.
 
-The failure this exists to end: the host has `pdfplumber` and the deployed image
-deliberately does not (T5.1), so a host ingest emits table sections `sync-job`
-cannot produce and drops unannounced on its next pass. Same parser, same bytes,
-different corpus.
+The failure this exists to end: until 2026-09-06 the host had `pdfplumber` and
+the deployed image deliberately did not (T5.1), so a host ingest emitted table
+sections `sync-job` could not produce and dropped unannounced on its next pass.
+Same parser, same bytes, different corpus. `d287896` put both extractors in the
+image; the fingerprint is what catches the environments diverging again.
 """
 
 from __future__ import annotations
@@ -63,7 +64,8 @@ def test_a_changed_extractor_availability_is_a_difference() -> None:
     """The measured host/container split, as data.
 
     Host: `pdfplumber` and Pillow present. Deployed image: neither. Verified live
-    against the running `scout` container on 2026-08-26.
+    against the running `scout` container on 2026-08-26, before `d287896`
+    (2026-09-06) added both to the image.
     """
     host = {
         "schema_version": 1,
@@ -172,7 +174,7 @@ def test_a_differing_environment_is_named_not_merely_flagged() -> None:
     mismatch = asyncio.run(
         corpus_fingerprint_mismatch(_Conn(), Path("raw"), Path("."))  # type: ignore[arg-type]
     )
-    # The host running these tests has pdfplumber and Pillow; the image does not.
+    # The stored fingerprint has neither extractor; a test host carrying them differs.
     if mismatch:
         assert "raw/papers/x.pdf" in mismatch
         assert "->" in mismatch, "the difference must be named, not just reported"

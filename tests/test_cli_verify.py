@@ -831,7 +831,10 @@ _ADDRESSED = (
 
 
 def _fake_address_backend(
-    monkeypatch: pytest.MonkeyPatch, *, error: Exception | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    error: Exception | None = None,
+    degraded: bool = False,
 ) -> list[object]:
     """Stand in for PostgreSQL + LiteLLM; record every scope it is queried under."""
     from scout.types import RagChunk
@@ -850,6 +853,9 @@ def _fake_address_backend(
                     text="kerberoasting service tickets",
                     file_path="raw/a.md",
                     score=1.0,
+                    meta={"degraded": "true", "degraded_reason": "embedding_error"}
+                    if degraded
+                    else {},
                 )
             ]
 
@@ -947,6 +953,26 @@ def test_verify_addresses_keeps_a_real_outage_an_infrastructure_failure(
     assert result.exit_code is ExitCode.INFRASTRUCTURE
     assert result.error is not None
     assert "dsn-secret" not in json.dumps(result.error.to_dict())
+
+
+def test_verify_addresses_refuses_a_pass_from_a_degraded_dense_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sparse-only retrieval is a gateway outage, reported as one (exit 2)."""
+    from scout.cli.commands.verify import verify_addresses
+
+    repo = _address_vault(tmp_path, {"good": _ADDRESSED})
+    _fake_address_backend(monkeypatch, degraded=True)
+
+    with pytest.raises(CliError) as caught:
+        verify_addresses(config=_cfg(repo))
+
+    result = caught.value.to_result()
+    assert result.exit_code is ExitCode.INFRASTRUCTURE
+    assert result.error is not None
+    assert "dense" in result.error.message
+    assert result.error.details["degraded_addresses"] == 1
+    assert result.error.details["checked"] == 1
 
 
 def test_check_reaches_the_address_stage_verdict_on_departmentless_pages(

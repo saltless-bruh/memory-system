@@ -36,25 +36,24 @@ def _require_vision_route() -> None:
         pytest.fail("live vision test requires LITELLM_BASE_URL")
 
 
-def test_the_deployed_image_reports_figure_extraction_as_unavailable() -> None:
-    """The contract that is actually true of what ships, asserted as such.
+def test_figure_extraction_is_real_with_pillow_and_refuses_without_it() -> None:
+    """Extraction finds the document's figures, or says it could not look.
 
-    This slot held a positive VLM test requiring
-    `raw/images/agent_memory_architecture.svg`, which is not in the tracked tree,
-    **and** a figure-extraction capability the deployed image deliberately does
-    not have: `scout/requirements.txt` installs `pypdf` only, so Pillow and
-    `pdfplumber` are both absent (T5.1, decided 2026-08-25). A test requiring an
-    absent asset and an absent capability cannot pass by construction, which is
-    worse than no test — it reads as coverage while proving nothing.
+    This slot once held a positive VLM test requiring
+    `raw/images/agent_memory_architecture.svg`, which is not in the tracked
+    tree, while the deployed image lacked Pillow and `pdfplumber` (T5.1,
+    decided 2026-08-25). It was then rewritten to assert that the image reports
+    figure extraction as `unavailable`. That stopped being true on 2026-09-06:
+    `d287896` added both extractors to `scout/requirements.txt` and the lock,
+    and the live index recorded 7 of 7 figures described through the `snp-vlm`
+    route for this paper on 2026-09-21.
 
-    So it asserts the deployment contract instead: with Pillow absent, figure
-    extraction reports `unavailable` and produces **no count**, because a count
-    of zero from a parser that could not look is not a count of zero. This is
-    true today and it fails the day the capability silently returns — which is
-    the only thing worth catching here.
-
-    The positive test and a committed asset belong in a vision-enabled profile,
-    to be built if and when that feature is approved.
+    So it asserts the contract in both directions. Where Pillow is installed --
+    the deployed image and a synced host -- extraction must actually find the
+    figures, so the test never becomes vacuous. Where it is absent, extraction
+    must refuse rather than return an empty list, because a count of zero from
+    a parser that could not look is not a count of zero. Whether each figure is
+    then *described* depends on the `snp-vlm` route and is not asserted here.
     """
     from scout.pdf_structure import PdfStructureError, extract_figures
 
@@ -65,13 +64,13 @@ def test_the_deployed_image_reports_figure_extraction_as_unavailable() -> None:
     try:
         import PIL  # noqa: F401
     except ImportError:
-        # The deployed condition. Extraction must refuse, not return an empty list.
+        # No Pillow here. Extraction must refuse, not return an empty list.
         with pytest.raises(PdfStructureError, match="Pillow"):
             extract_figures(pdf)
         return
 
-    # A host with Pillow installed is *not* what ships. Assert only that the
-    # capability is real there, so this test never silently becomes vacuous.
+    # Pillow is installed, as it is in the deployed image since d287896: the
+    # capability must be real, so this test never silently becomes vacuous.
     assert extract_figures(pdf), (
         "Pillow is installed here, so extraction must actually find the "
         "document's figures; an empty result would mean the capability is "

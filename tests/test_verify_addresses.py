@@ -706,3 +706,103 @@ def test_the_neutral_probe_never_asks_an_empty_question() -> None:
     # Degenerate input must still yield a question.
     # Degenerate input must still yield a question rather than an empty one.
     assert _neutral_probe("raw/x.md") == "x"
+
+
+# ── a sparse-only answer is not a verification (dense arm degraded) ────────
+#
+# `PgVectorRlsBackend` answers from the relaxed sparse arm when the embedding
+# route is down and marks every chunk `meta["degraded"] == "true"`. Rank-1 on a
+# sparse-only ranking is not the criterion this gate certifies, so a run that
+# saw any such answer must exit 2, never a green 0 and never a content verdict.
+
+
+def _degraded(chunk: RagChunk) -> RagChunk:
+    return RagChunk(
+        text=chunk.text,
+        file_path=chunk.file_path,
+        score=chunk.score,
+        loc=chunk.loc,
+        meta={"degraded": "true", "degraded_reason": "embedding_error"},
+    )
+
+
+def test_verify_address_records_a_degraded_lookup() -> None:
+    import asyncio
+
+    chunk = RagChunk(text="kerberoasting tickets", file_path="raw/a.md", score=1.0)
+    healthy = asyncio.run(
+        verify_address(RecordingBackend([chunk]), _scoped(hint="kerberoasting"))
+    )
+    degraded = asyncio.run(
+        verify_address(
+            RecordingBackend([_degraded(chunk)]), _scoped(hint="kerberoasting")
+        )
+    )
+
+    assert healthy.degraded is False
+    assert degraded.degraded is True
+    assert degraded.status is VerifyStatus.PASS  # the sparse ranking alone passes
+
+
+def test_main_refuses_a_pass_that_came_from_the_sparse_arm_alone(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = RecordingBackend(
+        [
+            _degraded(
+                RagChunk(
+                    text="kerberoasting service tickets",
+                    file_path="raw/a.md",
+                    score=1.0,
+                )
+            )
+        ]
+    )
+    rc = main(
+        backend_factory=lambda: backend,
+        pages_loader=lambda: [
+            _page("page", [{"path": "raw/a.md", "hint": "kerberoasting", "loc": "p.1"}])
+        ],
+    )
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert backend.closed
+    assert "dense" in out.lower() and "degraded" in out.lower()
+    assert "1 of 1" in out
+
+
+@dataclass
+class _Health:
+    degraded_total: int = 0
+
+
+@dataclass
+class _EmptyDegradedBackend(RecordingBackend):
+    """Every lookup degrades and returns nothing, so no row carries the flag."""
+
+    health: _Health = field(default_factory=_Health)
+
+    async def retrieve(
+        self,
+        hint: str,
+        *,
+        path: str | None = None,
+        scope: Scope | None = None,
+        k: int = 10,
+    ) -> Sequence[RagChunk]:
+        self.health.degraded_total += 1
+        return ()
+
+
+def test_main_counts_a_degraded_lookup_that_returned_no_rows() -> None:
+    """No rows carry no flag, so the backend's own dense-arm counter is read too."""
+    backend = _EmptyDegradedBackend()
+    rc = main(
+        backend_factory=lambda: backend,
+        pages_loader=lambda: [
+            _page("page", [{"path": "raw/a.md", "hint": "kerberoasting", "loc": "p.1"}])
+        ],
+    )
+    # Without the counter this is NO_EVIDENCE (exit 1): a content verdict drawn
+    # from a retrieval that never ran in full.
+    assert rc == 2

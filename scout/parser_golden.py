@@ -9,9 +9,12 @@ The hash covers the **parsed structure** — section locs, section text, section
 metadata, and the document's metadata — not the raw bytes. Raw bytes would only
 prove the fixture had not been edited.
 
-Two environments legitimately produce different corpora from the same file (the
-host has `pdfplumber` and `pillow`; the deployed image deliberately does not),
-so one golden hash would be ambiguous. Goldens are therefore keyed by capability.
+Two environments legitimately produce different corpora from the same file: one
+with `pdfplumber` and `pillow` extracts tables and figures, one without them
+cannot. Until 2026-09-06 that split was host versus deployed image (T5.1);
+`d287896` put both extractors into the image, but a host or image missing
+either still parses differently, so one golden hash would be ambiguous.
+Goldens are therefore keyed by capability.
 """
 
 from __future__ import annotations

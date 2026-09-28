@@ -186,6 +186,7 @@ def parse_pdf(
     source_uri: str,
     *,
     vision_extractor: Callable[[Path, str], str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ParsedDocument:
     """Parse a PDF into prose pages plus its tables and figures.
 
@@ -199,6 +200,7 @@ def parse_pdf(
 
     Structural extraction never costs the caller the prose: a failure in either
     extractor is recorded in `metadata` and the page text is returned regardless.
+    `env` decides the vision route for the figures; see `vision_route`.
     """
     from pypdf import PdfReader
 
@@ -233,7 +235,7 @@ def parse_pdf(
 
     sections.extend(_pdf_table_sections(file_path, source_uri, metadata))
     sections.extend(
-        _pdf_figure_sections(file_path, source_uri, metadata, vision_extractor)
+        _pdf_figure_sections(file_path, source_uri, metadata, vision_extractor, env=env)
     )
 
     return ParsedDocument(
@@ -330,6 +332,8 @@ def _pdf_figure_sections(
     source_uri: str,
     metadata: dict[str, Any],
     vision_extractor: Callable[[Path, str], str] | None,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> list[ParsedSection]:
     """Vision descriptions of the document's captioned figures.
 
@@ -355,10 +359,8 @@ def _pdf_figure_sections(
         metadata["figures_status"] = FIGURES_NO_EVIDENCE
         return []
 
-    have_route = bool(
-        os.environ.get("LITELLM_BASE_URL") or os.environ.get("LITELLM_MASTER_KEY")
-    )
-    if vision_extractor is None and not have_route:
+    extractor = vision_extractor or vision_route(env)
+    if extractor is None:
         metadata["figures_status"] = FIGURES_UNCONFIGURED
         logger.warning(
             "No vision route configured; %d figure(s) in %s are not described.",
@@ -376,7 +378,6 @@ def _pdf_figure_sections(
             path.write_bytes(figure.data)
             uri = f"{source_uri}#{figure.loc}"
             try:
-                extractor = vision_extractor or extract_image_via_vlm
                 described_text = extractor(path, uri)
             except ParserError as exc:
                 logger.warning("No vision text for %s: %s", uri, exc)
@@ -482,7 +483,7 @@ def extract_image_via_vlm(
     base = (
         base_url or os.environ.get("LITELLM_BASE_URL", "http://localhost:4000")
     ).rstrip("/")
-    key = api_key or os.environ.get("LITELLM_MASTER_KEY", "")
+    key = api_key if api_key is not None else os.environ.get("LITELLM_MASTER_KEY", "")
     vlm_model = model or os.environ.get("LITELLM_VLM_MODEL", "snp-vlm")
 
     suffix = file_path.suffix.lower()
@@ -561,11 +562,53 @@ def extract_image_via_vlm(
     raise ParserError(f"No content returned from vision model for {source_uri}")
 
 
+def vision_route(
+    env: Mapping[str, str] | None = None,
+) -> Callable[[Path, str], str] | None:
+    """The LiteLLM vision extractor `env` configures, or None when it has none.
+
+    Whether a route exists is a question about *configuration*, and the caller
+    decides which configuration that is. It used to be answered from
+    `os.environ` here, below every caller. `snpmemory ingest` resolves the
+    project `.env` into a mapping and never exports it, so on a host shell
+    without LITELLM_* every image and figure was recorded `unconfigured` -- and
+    an image that yields no chunks purges the good rows an earlier run had
+    published. The same defect was fixed for the connection and the embedder in
+    `ingest_directory`; this is the place it was missed.
+
+    ``None`` means this process's own environment, the way `postgres_settings`
+    reads it: the sync-job container is configured through its real
+    environment. A mapping is authoritative, including about what it lacks --
+    the shell does not leak back in behind it, or the answer would again
+    depend on how the command happened to be launched.
+    """
+    source = os.environ if env is None else env
+    base_url = source.get("LITELLM_BASE_URL") or ""
+    api_key = source.get("LITELLM_MASTER_KEY") or ""
+    if not (base_url or api_key):
+        return None
+    model = source.get("LITELLM_VLM_MODEL") or "snp-vlm"
+
+    def extract(file_path: Path, source_uri: str) -> str:
+        # Looked up at call time so a test can replace the network call while
+        # the route decision above stays real.
+        return extract_image_via_vlm(
+            file_path,
+            source_uri,
+            base_url=base_url or "http://localhost:4000",
+            api_key=api_key,
+            model=model,
+        )
+
+    return extract
+
+
 def parse_image(
     file_path: Path,
     source_uri: str,
     *,
     vision_extractor: Callable[[Path, str], str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ParsedDocument:
     """Parses image assets via Gemini Vision VLM extraction or custom extractor.
 
@@ -581,6 +624,8 @@ def parse_image(
         source_uri: Repo-relative address recorded on the document.
         vision_extractor: Optional injected extractor, used instead of the
             configured LiteLLM vision route.
+        env: The configuration that decides the vision route; see
+            `vision_route`. ``None`` means this process's own environment.
 
     Returns:
         A ``ParsedDocument`` with ``metadata["vlm_status"] == VLM_STATUS_OK`` and
@@ -600,14 +645,10 @@ def parse_image(
     status = VLM_STATUS_OK
     failure = ""
 
-    if vision_extractor is not None:
+    extractor = vision_extractor or vision_route(env)
+    if extractor is not None:
         try:
-            extracted_markdown = vision_extractor(file_path, source_uri)
-        except ParserError as exc:
-            status, failure = VLM_STATUS_UNAVAILABLE, str(exc)
-    elif os.environ.get("LITELLM_BASE_URL") or os.environ.get("LITELLM_MASTER_KEY"):
-        try:
-            extracted_markdown = extract_image_via_vlm(file_path, source_uri)
+            extracted_markdown = extractor(file_path, source_uri)
         except ParserError as exc:
             status, failure = VLM_STATUS_UNAVAILABLE, str(exc)
     else:
@@ -652,8 +693,14 @@ def parse_file(
     base_dir: Path | None = None,
     *,
     vision_extractor: Callable[[Path, str], str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ParsedDocument:
-    """Unified entrypoint to parse any supported file format."""
+    """Unified entrypoint to parse any supported file format.
+
+    `env` is the configuration the vision route is read from. A caller that has
+    resolved its configuration -- the CLI, from the project `.env` -- must pass
+    it; ``None`` means this process's own environment. See `vision_route`.
+    """
     if not file_path.is_file():
         raise ParserError(f"Source is not a regular file: {file_path}")
     rel_uri = (
@@ -668,7 +715,7 @@ def parse_file(
         content = file_path.read_text(encoding="utf-8", errors="replace")
         return parse_markdown(content, rel_uri)
     elif suffix == ".pdf":
-        return parse_pdf(file_path, rel_uri, vision_extractor=vision_extractor)
+        return parse_pdf(file_path, rel_uri, vision_extractor=vision_extractor, env=env)
     elif suffix in (".csv", ".tsv"):
         content = file_path.read_text(encoding="utf-8", errors="replace")
         return parse_csv(content, rel_uri)
@@ -676,5 +723,7 @@ def parse_file(
         content = file_path.read_text(encoding="utf-8", errors="replace")
         return parse_code(content, rel_uri)
     elif suffix in (".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"):
-        return parse_image(file_path, rel_uri, vision_extractor=vision_extractor)
+        return parse_image(
+            file_path, rel_uri, vision_extractor=vision_extractor, env=env
+        )
     raise ParserError(f"unsupported source format: {suffix or '<none>'}")

@@ -461,3 +461,140 @@ def test_a_document_with_nothing_structural_is_complete_by_construction() -> Non
         "extractors": {},
         "complete": True,
     }
+
+
+# ── the vision route comes from the resolved configuration ─────────────────
+#
+# `snpmemory ingest` resolves the project `.env` into `cfg.values` and hands it
+# to `ingest_directory` as `env`. The vision route used to be decided from
+# `os.environ` inside the parser instead, so a host shell that had not exported
+# LITELLM_* recorded every image as `unconfigured` -- and, because an image
+# with no description yields no chunks, purged the good rows an earlier run had
+# published. These tests put the route ONLY in the mapping.
+
+_VISION_ENV = {
+    "LITELLM_BASE_URL": "http://gateway.from-dotenv:4000",
+    "LITELLM_MASTER_KEY": "sk-from-dotenv",
+    "LITELLM_VLM_MODEL": "vlm-from-dotenv",
+}
+
+
+def _without_vision_route_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("LITELLM_BASE_URL", "LITELLM_MASTER_KEY", "LITELLM_VLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _recording_vlm(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace only the network call; the route decision stays real."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_vlm(path: Path, uri: str, **kwargs: Any) -> str:
+        calls.append({"uri": uri, **kwargs})
+        return "## Visual Overview\n\n" + ("A gateway fronts the index. " * 40)
+
+    monkeypatch.setattr("scout.parsers.extract_image_via_vlm", fake_vlm)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_directory_ingest_takes_the_vision_route_from_the_env_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_vision_route_in_process(monkeypatch)
+    calls = _recording_vlm(monkeypatch)
+
+    raw = tmp_path / "raw"
+    (raw / "images").mkdir(parents=True)
+    (raw / "images" / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    statements: list[str] = []
+
+    class Connection:
+        @asynccontextmanager
+        async def transaction(self) -> AsyncIterator[None]:
+            yield
+
+        async def fetch(self, _query: str, *_args: object) -> list[Any]:
+            return []
+
+        async def fetchrow(self, _query: str, *_args: object) -> dict[str, int]:
+            return {"doc_id": 1}
+
+        async def execute(self, query: str, *_args: object) -> str:
+            statements.append(query)
+            return "DELETE 1" if query.lstrip().startswith("DELETE") else "OK"
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_env: Any = None) -> Connection:
+        return Connection()
+
+    monkeypatch.setattr("scout.ingest.get_pg_connection", connect)
+
+    results = await ingest_directory(
+        raw,
+        ["infra"],
+        reconcile=False,
+        embedder=FakeEmbedder(),
+        env=_VISION_ENV,
+    )
+
+    (row,) = results
+    assert row["source_uri"] == "raw/images/diagram.png"
+    assert row["status"] != "purged_empty", "a good image row was purged"
+    assert row["chunks_count"] > 0
+    assert not any("DELETE FROM rag_documents" in query for query in statements)
+    assert calls and calls[0]["base_url"] == "http://gateway.from-dotenv:4000"
+    assert calls[0]["api_key"] == "sk-from-dotenv"
+    assert calls[0]["model"] == "vlm-from-dotenv"
+
+
+def test_pdf_figures_take_the_vision_route_from_the_env_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scout import parsers
+    from scout.pdf_structure import ExtractedFigure
+
+    _without_vision_route_in_process(monkeypatch)
+    calls = _recording_vlm(monkeypatch)
+    figure = ExtractedFigure(
+        page=2,
+        number="1",
+        caption="Figure 1: the pipeline",
+        name="Im1",
+        data=b"\x89PNG\r\n\x1a\n",
+        digest="ab" * 32,
+    )
+    monkeypatch.setattr("scout.pdf_structure.extract_figures", lambda _p: [figure])
+
+    metadata: dict[str, Any] = {}
+    sections = parsers._pdf_figure_sections(
+        tmp_path / "paper.pdf",
+        "raw/papers/paper.pdf",
+        metadata,
+        None,
+        env=_VISION_ENV,
+    )
+
+    assert metadata["figures_status"] == parsers.FIGURES_OK
+    assert len(sections) == 1
+    assert calls[0]["base_url"] == "http://gateway.from-dotenv:4000"
+
+
+def test_an_env_mapping_without_the_route_is_unconfigured_whatever_the_shell_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mapping is the configuration; the shell does not leak back in."""
+    from scout.parsers import VLM_STATUS_UNCONFIGURED
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://shell-only:4000")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-shell-only")
+    calls = _recording_vlm(monkeypatch)
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    doc = parse_file(image, base_dir=tmp_path, env={})
+
+    assert doc.metadata["vlm_status"] == VLM_STATUS_UNCONFIGURED
+    assert calls == []

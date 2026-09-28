@@ -266,7 +266,11 @@ class ParseCache:
         self.parses = 0
 
     def parsed(
-        self, file_path: Path, *, base_dir: Path | None = None
+        self,
+        file_path: Path,
+        *,
+        base_dir: Path | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> ParsedDocument:
         try:
             stat = file_path.stat()
@@ -274,14 +278,14 @@ class ParseCache:
         except OSError:
             # Cannot establish identity, so cannot safely reuse. Parse it.
             self.parses += 1
-            return parse_file(file_path, base_dir=base_dir)
+            return parse_file(file_path, base_dir=base_dir, env=env)
 
         cached = self._entries.get(file_path)
         if cached is not None and (cached[0], cached[1]) == key:
             return cached[2]
 
         self.parses += 1
-        document = parse_file(file_path, base_dir=base_dir)
+        document = parse_file(file_path, base_dir=base_dir, env=env)
         self._entries[file_path] = (key[0], key[1], document)
         return document
 
@@ -314,8 +318,15 @@ async def ingest_document(
     parse_cache: ParseCache | None = None,
     document_transform: Callable[[ParsedDocument], ParsedDocument] | None = None,
     stage_observer: IngestStageObserver | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Parses, chunks, embeds, and ingests a single document into PostgreSQL."""
+    """Parses, chunks, embeds, and ingests a single document into PostgreSQL.
+
+    `env` is the resolved configuration the parser reads its vision route from
+    (``None``: this process's environment). It matters beyond the figures: an
+    image the parser wrongly believes unconfigured yields no chunks, and a
+    source with no chunks has its previously published rows purged below.
+    """
     allowed_depts = validate_allowed_depts(allowed_depts)
     chunker = chunker or ContextualChunker()
     embedder = embedder or LiteLLMBatchEmbedder()
@@ -323,9 +334,9 @@ async def ingest_document(
     # 1. Parse document. A retry after a failed embed must not re-parse a corpus
     # that has not changed — see `ParseCache`.
     if parse_cache is None:
-        parsed_doc = parse_file(file_path, base_dir=base_dir)
+        parsed_doc = parse_file(file_path, base_dir=base_dir, env=env)
     else:
-        parsed_doc = parse_cache.parsed(file_path, base_dir=base_dir)
+        parsed_doc = parse_cache.parsed(file_path, base_dir=base_dir, env=env)
     if document_transform is not None:
         parsed_doc = document_transform(parsed_doc)
     chunks = chunker.chunk_document(parsed_doc)
@@ -396,7 +407,7 @@ async def ingest_document(
     # 3. Transactional Upsert into PostgreSQL
     close_conn = False
     if conn is None:
-        conn = await get_pg_connection()
+        conn = await get_pg_connection(env)
         close_conn = True
 
     try:
@@ -875,6 +886,11 @@ async def ingest_directory(
                     base_dir=dir_path.parent,
                     dry_run=dry_run,
                     parse_cache=parse_cache,
+                    # The vision route too. Deciding it from `os.environ`
+                    # below here recorded every image `unconfigured` and
+                    # purged its good rows whenever the `.env` the CLI
+                    # resolved had not also been exported into the shell.
+                    env=env,
                 )
                 results.append(res)
 

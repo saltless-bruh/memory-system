@@ -228,6 +228,10 @@ class PgVectorDirectIndexer:
                 dry_run=False,
                 embedder=self.embedder,
                 parse_cache=self.parse_cache,
+                # This container is configured through its real environment,
+                # so that is the configuration it names -- explicitly, because
+                # the parser's vision route is read from whatever is passed.
+                env=os.environ,
             )
             count = len(results)
             # The cycle finished. Holding a corpus-worth of parsed text past

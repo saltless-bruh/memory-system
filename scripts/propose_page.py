@@ -21,10 +21,13 @@ PRIVATE_REMOTE = "gitea"
 PUBLIC_SAMPLE_WIKI_FILES = 12
 
 
-def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def git(
+    *args: str, check: bool = True, stdin: str | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=REPO_ROOT,
+        input=stdin,
         capture_output=True,
         text=True,
         check=check,
@@ -111,56 +114,150 @@ def run_verify() -> bool:
     return result.returncode == 0
 
 
-def _push_url(remote: str) -> str | None:
-    """The URL a push to the named remote reaches, or None if it is not one."""
-    resolved = git("remote", "get-url", "--push", remote, check=False)
-    if resolved.returncode != 0:
-        return None
-    return resolved.stdout.strip().rstrip("/") or None
+def _url(raw: str) -> str:
+    return raw.strip().rstrip("/")
+
+
+def _push_urls(remote: str) -> set[str]:
+    """Every URL a push to the named remote reaches; empty if it is not one.
+
+    A remote may carry several push URLs and `git push` sends to all of them,
+    so judging only the first would let a second, public one ride along.
+    """
+    listed = git("remote", "get-url", "--push", "--all", remote, check=False)
+    if listed.returncode != 0:
+        return set()
+    return {_url(line) for line in listed.stdout.splitlines() if line.strip()}
+
+
+def _private_urls() -> set[str]:
+    """The URLs known to reach the private remote's repository.
+
+    Its fetch URL is where the vault is read from, so it is private by
+    construction. A single push URL is the same repository by another route
+    (ssh beside https, say). Several push URLs mean the name fans out, and
+    nothing here can tell which of them is private, so none is trusted.
+    """
+    fetched = git("remote", "get-url", PRIVATE_REMOTE, check=False)
+    if fetched.returncode != 0:
+        return set()
+    pushed = _push_urls(PRIVATE_REMOTE)
+    return {_url(fetched.stdout)} | (pushed if len(pushed) == 1 else set())
+
+
+def _ref_exists(ref: str) -> bool:
+    return git("rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0
+
+
+def _owning_remote(target: str) -> str | None:
+    """The configured remote whose refs record what `target` already holds.
+
+    `git push` takes a URL as readily as a name, and origin's own URL is still
+    origin: what it has published is recorded under `origin/*`, and that record
+    is what the guard must compare against. A URL that no configured remote
+    fetches from or pushes to has no such record, and None says so.
+    """
+    names = git("remote", check=False).stdout.split()
+    if target in names:
+        return target
+    url = _url(target)
+    owners = [
+        name
+        for name in names
+        if url in _push_urls(name)
+        or url == _url(git("remote", "get-url", name, check=False).stdout)
+    ]
+    # Only an owner whose `main` has been fetched can say what is published,
+    # so it is preferred; otherwise any owner is as uninformative as another.
+    for name in owners:
+        if _ref_exists(f"refs/remotes/{name}/main"):
+            return name
+    return owners[0] if owners else None
+
+
+def _wiki_trees(commits: Sequence[str]) -> list[str | None]:
+    """Each commit's wiki/ tree id, in order, or None where it has no wiki/."""
+    answered = git(
+        "cat-file",
+        "--batch-check=%(objectname)",
+        stdin="".join(f"{commit}:wiki\n" for commit in commits),
+    )
+    return [
+        None if line.endswith(" missing") else line.strip()
+        for line in answered.stdout.splitlines()
+    ]
 
 
 def public_push_refusal(remote: str, ref: str) -> str | None:
     """Why pushing `ref` to `remote` could publish the vault, or None if it cannot.
 
-    A push is safe when it reaches the private remote, whatever it carries.
-    Anywhere else, `ref`'s wiki/ tree must be byte-identical to what that
-    remote's `main` already holds, so the push adds nothing it has not already
-    published. When that remote's `main` has never been fetched there is
-    nothing to compare against, and the only safe bound is the size of the
-    public sample. Every failure to answer refuses: an unknown tree is not a
-    known-public one. The remote-tracking ref may be stale; that errs toward
-    refusing, since a stale public tree differs from anything newly proposed.
+    A push is safe when it reaches only the private remote, whatever it
+    carries. Anywhere else the question is not what `ref`'s tip holds but what
+    the push sends, and `git push` sends every commit reachable from `ref` that
+    the remote lacks. A branch that once added the vault and later deleted it
+    has a clean tip and the whole vault in its history.
+
+    So when the remote's `main` is known here, every commit reachable from
+    `ref` and absent from that remote's tracked refs must carry exactly the
+    wiki/ tree its `main` already publishes; a commit that differs would add
+    pages the remote does not have. When nothing is known about the remote,
+    nothing counts as published, and the only safe bound is that the whole
+    reachable history never names more wiki/ files than the public sample.
+    Every failure to answer refuses: an unknown tree is not a known-public one.
+    Remote-tracking refs may be stale; that errs toward refusing, since a
+    commit the remote gained later is judged as not yet sent.
     """
     # Compared by URL, not name, so a second name for the private remote is
-    # still private and a bare URL (git push accepts one) is judged by itself.
-    private_url = _push_url(PRIVATE_REMOTE)
-    target_url = _push_url(remote) or remote.rstrip("/")
-    if private_url is not None and target_url == private_url:
+    # still private. A URL is pushed to exactly as given, so it is judged by
+    # itself, never by the push URLs of whichever remote happens to own it.
+    private_urls = _private_urls()
+    target_urls = _push_urls(remote) or {_url(remote)}
+    if private_urls and target_urls <= private_urls:
         return None
 
-    tree = git("rev-parse", "--verify", "--quiet", f"{ref}:wiki", check=False)
-    if tree.returncode != 0:
-        return f"cannot read the wiki/ tree of {ref}; refusing to push to {remote}"
-    published = git(
-        "rev-parse", "--verify", "--quiet", f"{remote}/main:wiki", check=False
-    )
-    if published.returncode == 0:
-        if published.stdout.strip() != tree.stdout.strip():
+    if not _ref_exists(f"{ref}^{{commit}}"):
+        return f"cannot read {ref}; refusing to push to {remote}"
+    # A remote's tracking refs record one repository. When the push fans out
+    # to several URLs, they say nothing about the others, so none is trusted.
+    owner = _owning_remote(remote) if len(target_urls) == 1 else None
+    if owner is not None and _ref_exists(f"refs/remotes/{owner}/main"):
+        unsent = git("rev-list", ref, "--not", f"--remotes={owner}", check=False)
+        if unsent.returncode != 0:
+            return f"cannot list what {ref} would send; refusing to push to {remote}"
+        commits = unsent.stdout.split()
+        published, *sent = _wiki_trees([f"refs/remotes/{owner}/main", *commits])
+        differing = sum(1 for tree in sent if tree != published)
+        if len(sent) != len(commits) or differing:
             return (
-                f"{ref}'s wiki/ tree differs from {remote}/main:wiki; pushing it "
-                f"to {remote} would publish vault pages. Push to "
-                f"{PRIVATE_REMOTE} instead."
+                f"{differing or 'some'} commit(s) reachable from {ref} and not yet "
+                f"on {owner} carry a wiki/ tree that differs from "
+                f"{owner}/main:wiki; pushing them to {remote} would publish vault "
+                f"pages. Push to {PRIVATE_REMOTE} instead."
             )
         return None
-    listed = git("ls-tree", "-r", "--name-only", ref, "--", "wiki/", check=False)
-    if listed.returncode != 0:
-        return f"cannot list wiki/ in {ref}; refusing to push to {remote}"
-    count = len([line for line in listed.stdout.splitlines() if line.strip()])
-    if count > PUBLIC_SAMPLE_WIKI_FILES:
+
+    # Renames count as a delete and an add, and merges are diffed against
+    # every parent, so no file that ever existed on the way escapes the count.
+    history = git(
+        "log",
+        ref,
+        "-m",
+        "--no-renames",
+        "--format=",
+        "--name-only",
+        "--",
+        "wiki/",
+        check=False,
+    )
+    if history.returncode != 0:
+        return f"cannot read the history of {ref}; refusing to push to {remote}"
+    named = {line for line in history.stdout.splitlines() if line.strip()}
+    if len(named) > PUBLIC_SAMPLE_WIKI_FILES:
         return (
-            f"{ref} carries {count} wiki/ files, more than the "
-            f"{PUBLIC_SAMPLE_WIKI_FILES}-file public sample, and {remote}/main is "
-            f"unknown here; push to {PRIVATE_REMOTE} instead."
+            f"the history reachable from {ref} names {len(named)} wiki/ files, "
+            f"more than the {PUBLIC_SAMPLE_WIKI_FILES}-file public sample, and "
+            f"nothing on {remote} is known here to be published already; push "
+            f"to {PRIVATE_REMOTE} instead."
         )
     return None
 

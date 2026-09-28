@@ -218,9 +218,9 @@ def propose(
     only the named page and its generated companions are committed to it.
 
     `--push` goes to the private remote by default. A push anywhere else is
-    refused by the script unless the branch's wiki/ tree is already what that
-    remote publishes; `origin` is public, and one push of a vault-bearing
-    branch there cannot be taken back. The guard lives in the script so the
+    refused by the script unless every commit the push would send carries only
+    the wiki/ tree that remote already publishes; `origin` is public, and one
+    push of a vault-bearing history there cannot be taken back. The guard lives in the script so the
     command and the script cannot disagree about it.
     """
     from scripts import propose_page

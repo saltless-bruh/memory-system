@@ -173,6 +173,33 @@ def render_index(pages: list[vault.Page], wiki_dir: Path | None = None) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+#: The one command that regenerates a generated index. The CLI has no `index`
+#: command; a hint that named one sent operators to a remedy that did not exist.
+REGENERATE_COMMAND = "python scripts/gen_index.py"
+
+#: Printed when an authored index differs from the render. It is a warning:
+#: AGENTS.md section 4 makes `index.md` an authored control document that is
+#: never replaced with generated descriptions, and `write_mode_allowed` refuses
+#: to do so, so failing on the difference is a check that can never pass whose
+#: only remedy is forbidden.
+AUTHORED_INDEX_WARNING = (
+    "INDEX AUTHORED: wiki/index.md is an authored control document (no "
+    "generated header) and differs from the summary-built render; it is "
+    "maintained by hand and is not compared as generated output."
+)
+
+
+def index_is_authored(text: str) -> bool:
+    """True when `text` is an index a person wrote, not one this module rendered.
+
+    The generator's own header is the marker: every render begins with it, and
+    an authored catalogue does not carry it. An absent or empty index is not
+    authored -- there is nothing to preserve, and a tree that expects a
+    generated index should be told it is missing.
+    """
+    return bool(text.strip()) and not text.startswith(GENERATED_HEADER)
+
+
 SUMMARY_COVERAGE_FLOOR = 0.5
 
 
@@ -310,18 +337,23 @@ def main() -> int:
         return 0 if lint.ok else 1
 
     if args.check:
-        if not index_current:
+        authored = not index_current and index_is_authored(current)
+        index_ok = index_current or authored
+        if authored:
+            print(f"LINT WARN:  {AUTHORED_INDEX_WARNING}")
+        elif not index_current:
             print(
                 "INDEX STALE: wiki/index.md is out of date — "
-                "run `python scripts/gen_index.py` to regenerate."
+                f"run `{REGENERATE_COMMAND}` to regenerate."
             )
-        status = "PASS" if (lint.ok and index_current) else "FAIL"
+        ok = lint.ok and index_ok
+        state = "current" if index_current else "authored" if authored else "STALE"
         print(
             f"\n{len(pages)} pages · {len(lint.errors)} errors · "
-            f"{len(lint.warnings)} warnings · index "
-            f"{'current' if index_current else 'STALE'} — {status}"
+            f"{len(lint.warnings)} warnings · index {state} — "
+            f"{'PASS' if ok else 'FAIL'}"
         )
-        return 0 if (lint.ok and index_current) else 1
+        return 0 if ok else 1
 
     # Write mode: refuse to regenerate the index if lint has hard errors —
     # a broken vault should be fixed before its index is stamped as good.

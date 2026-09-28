@@ -81,24 +81,42 @@ REQUIRED_TREE = (
 _FM_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _SENTENCE_TERMINATOR_RE = re.compile(r"[.!?](?=\s|$)")
-#: Headings every page **must** carry, in this order. Only headings a page can
-#: honestly supply from its own material are required: `TL;DR` summarises the
-#: page's own text, and `Cross-References` gathers links the body already holds.
-#: `Technical Specifications` and `Provenance` are optional for the same reason
-#: `Works Cited` is — a concept page has no specifications, and Provenance is a
-#: dated sourcing changelog that cannot be written retroactively without
-#: inventing the dates. Requiring either would make fabrication the only route
-#: to a green lint.
-REQUIRED_HEADINGS = (
+#: The authored page contract is AGENTS.md section 4, which ADR-0003 makes
+#: authoritative. These constants restate it; `tests/test_agent_contract_
+#: matches_code.py` fails when either side moves. An earlier version kept
+#: `TL;DR` required and `Provenance` unconditionally optional -- the inverse of
+#: AGENTS.md on both -- so an agent following the operating contract wrote
+#: pages this linter rejected (371 of 433 real pages carry no TL;DR).
+#:
+#: Headings every authored page **must** carry, exactly once, in this order.
+REQUIRED_HEADINGS = ("Cross-References",)
+
+#: "Recommended, not mandatory" (AGENTS.md). A page may omit it; when present
+#: it appears once and ahead of every mandated heading, because the ingester
+#: makes it chunk 0 of the indexed page.
+RECOMMENDED_HEADINGS = ("TL;DR",)
+
+#: "Required when sources are declared" (AGENTS.md). Provenance here is source
+#: attribution and conflicts -- what the page's own `sources:` already names --
+#: so a sourced page can always write it honestly. It sits before
+#: `Cross-References`.
+SOURCED_HEADINGS = ("Provenance",)
+
+#: The exact sequence `scripts/compile_note.py` emits. The compiled frame is a
+#: generator check, not the authoring contract: the generator always writes a
+#: TL;DR, and demanding exactly that is how drift in it is caught.
+COMPILED_HEADINGS = (
     "TL;DR",
     "Cross-References",
 )
 
-#: Headings a page **may** carry, each at a fixed position immediately before
-#: the required heading it is anchored to. Several may stack before the same
-#: anchor; they are emitted in this dict's order, so this mapping defines the
-#: canonical sequence between `TL;DR` and `Cross-References`. `Works Cited`
-#: (T4.2) lists the works the page's own source passages cite.
+#: Headings a **compiled** page may carry, each at a fixed position immediately
+#: before the compiled heading it is anchored to. Several may stack before the
+#: same anchor; they are emitted in this dict's order, so this mapping defines
+#: the canonical sequence between `TL;DR` and `Cross-References`. `Works Cited`
+#: (T4.2) lists the works the page's own source passages cite. This is the
+#: generator's layout only: on an authored page these are free-form sections,
+#: except that Provenance is mandated by `SOURCED_HEADINGS` on a sourced page.
 OPTIONAL_HEADINGS: dict[str, str] = {
     "Technical Specifications": "Cross-References",
     "Provenance": "Cross-References",
@@ -146,8 +164,13 @@ def headings_are_valid(
     *,
     frame: HeadingFrame = HeadingFrame.COMPILED,
     body: dict[str, Any] | None = None,
+    sources_declared: bool = False,
 ) -> bool:
     """True when `actual` satisfies `frame`.
+
+    `sources_declared` says whether the page's frontmatter declares `sources:`;
+    only the authored frame reads it, because AGENTS.md makes Provenance
+    conditional on it.
 
     The default is the stricter frame on purpose: a caller that does not name
     one keeps the behaviour it had before frames existed, so relaxing a check
@@ -156,39 +179,78 @@ def headings_are_valid(
     if frame is HeadingFrame.COMPILED:
         return _headings_are_ordered(actual)
 
-    # A vault that declares its own body contract governs by it. Without one the
-    # historical list applies, so a tree that has not adopted a schema is
-    # unaffected. Measured: the historical list required `TL;DR`, which
-    # AGENTS.md section 4 calls "Recommended, not mandatory", and 173 authored
-    # pages were failed for omitting something optional.
-    required: tuple[str, ...] = REQUIRED_HEADINGS
-    if body is not None:
-        declared = body.get("requiredHeadings")
-        if isinstance(declared, list) and declared:
-            required = tuple(str(h) for h in declared)
+    mandated = authored_required_headings(body, sources_declared=sources_declared)
 
-    # Required headings, in order, exactly once each. Duplication is rejected
+    # Mandated headings, in order, exactly once each. Duplication is rejected
     # explicitly rather than falling out of the arithmetic: two `## TL;DR`
     # sections is precisely the defect an automated pass introduces, and a
-    # plain "is it present" test would wave it through.
-    for heading in required:
+    # plain "is it present" test would wave it through. A recommended heading
+    # may be absent, but never duplicated.
+    for heading in mandated:
         if actual.count(heading) != 1:
             return False
-    positions = [actual.index(heading) for heading in required]
+    present = [h for h in RECOMMENDED_HEADINGS if h in actual and h not in mandated]
+    for heading in present:
+        if actual.count(heading) != 1:
+            return False
+    positions = [actual.index(heading) for heading in (*present, *mandated)]
     return positions == sorted(positions)
 
 
+def authored_required_headings(
+    body: dict[str, Any] | None = None, *, sources_declared: bool = False
+) -> tuple[str, ...]:
+    """The headings an authored page must carry, in order.
+
+    A vault that declares its own body contract (`x-body.requiredHeadings` in
+    its `note-schema.json`) governs by it; otherwise AGENTS.md's list applies.
+    Either way a page that declares `sources:` must also carry Provenance, ahead
+    of `Cross-References` when that is mandated and last otherwise.
+    """
+    required: list[str] = list(REQUIRED_HEADINGS)
+    if body is not None:
+        declared = body.get("requiredHeadings")
+        if isinstance(declared, list) and declared:
+            required = [str(h) for h in declared]
+    if sources_declared:
+        for heading in SOURCED_HEADINGS:
+            if heading in required:
+                continue
+            if "Cross-References" in required:
+                required.insert(required.index("Cross-References"), heading)
+            else:
+                required.append(heading)
+    return tuple(required)
+
+
+def sources_are_declared(frontmatter: dict[str, Any]) -> bool:
+    """True when a page's frontmatter declares at least one source.
+
+    Authored pages mostly carry URL strings and compiled ones carry address
+    mappings; both declare sources, so any nonempty entry counts.
+    """
+    declared = frontmatter.get("sources")
+    if isinstance(declared, str):
+        return bool(declared.strip())
+    if isinstance(declared, list):
+        return any(
+            (isinstance(entry, str) and entry.strip()) or isinstance(entry, dict)
+            for entry in declared
+        )
+    return False
+
+
 def _headings_are_ordered(actual: tuple[str, ...]) -> bool:
-    """True when `actual` is the required sequence, optionally interleaved.
+    """True when `actual` is the compiled sequence, optionally interleaved.
 
     Every optional heading present in `actual` is expected in front of the
-    required heading it is anchored to, in `OPTIONAL_HEADINGS` order — so
+    compiled heading it is anchored to, in `OPTIONAL_HEADINGS` order — so
     several may stack before the same anchor, but an optional that appears
     twice, or ahead of a different anchor, breaks the sequence. The order stays
     a contract rather than a suggestion.
     """
     expected: list[str] = []
-    for heading in REQUIRED_HEADINGS:
+    for heading in COMPILED_HEADINGS:
         anchored = [
             optional
             for optional, before in OPTIONAL_HEADINGS.items()
@@ -558,22 +620,30 @@ def lint_page(
         match.group(1).strip()
         for match in re.finditer(r"^##[ \t]+(.+?)[ \t]*$", page.body, re.MULTILINE)
     )
-    if not headings_are_valid(actual_headings, frame=frame, body=body_contract(schema)):
-        optional = ", ".join(
-            f"{name} (before {before})" for name, before in OPTIONAL_HEADINGS.items()
-        )
-        body = body_contract(schema)
-        declared = (body or {}).get("requiredHeadings")
-        shown = (
-            tuple(str(h) for h in declared)
-            if isinstance(declared, list) and declared
-            else REQUIRED_HEADINGS
-        )
-        res.errors.append(
-            f"{page.rel}: section headings must appear exactly once in order: "
-            + " -> ".join(shown)
-            + f"; optional: {optional}"
-        )
+    body = body_contract(schema)
+    sourced = sources_are_declared(fm)
+    if not headings_are_valid(
+        actual_headings, frame=frame, body=body, sources_declared=sourced
+    ):
+        if frame is HeadingFrame.COMPILED:
+            optional = ", ".join(
+                f"{name} (before {before})"
+                for name, before in OPTIONAL_HEADINGS.items()
+            )
+            res.errors.append(
+                f"{page.rel}: section headings must appear exactly once in order: "
+                + " -> ".join(COMPILED_HEADINGS)
+                + f"; optional: {optional}"
+            )
+        else:
+            shown = authored_required_headings(body, sources_declared=sourced)
+            recommended = ", ".join(RECOMMENDED_HEADINGS)
+            res.errors.append(
+                f"{page.rel}: section headings must appear exactly once in order: "
+                + " -> ".join(shown)
+                + (" (Provenance because sources are declared)" if sourced else "")
+                + f"; recommended, at most once and first: {recommended}"
+            )
 
     # 8. Wikilinks validation
     if known_slugs is not None:

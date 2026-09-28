@@ -441,10 +441,12 @@ def test_a_duplicated_section_is_still_an_error() -> None:
 
 
 def test_only_derivable_headings_are_required() -> None:
-    """Provenance is dated sourcing; requiring it would require inventing it."""
-    from scout.vault import OPTIONAL_HEADINGS, REQUIRED_HEADINGS
+    """The compiled frame keeps its generator sequence; the authored contract
+    is AGENTS.md's (owner ruling), pinned in test_agent_contract_matches_code."""
+    from scout.vault import COMPILED_HEADINGS, OPTIONAL_HEADINGS, REQUIRED_HEADINGS
 
-    assert REQUIRED_HEADINGS == ("TL;DR", "Cross-References")
+    assert COMPILED_HEADINGS == ("TL;DR", "Cross-References")
+    assert REQUIRED_HEADINGS == ("Cross-References",)
     assert "Provenance" in OPTIONAL_HEADINGS
     assert "Technical Specifications" in OPTIONAL_HEADINGS
 
@@ -533,12 +535,11 @@ def test_the_authored_frame_permits_a_page_to_have_its_own_sections() -> None:
 
 
 def test_the_authored_frame_still_requires_both_headings_in_order() -> None:
-    """Relaxed is not absent. The two required headings carry machine meaning:
-    TL;DR becomes chunk 0 of the indexed page, and Cross-References is where
-    wikilinks are gathered."""
+    """Relaxed is not absent. Cross-References is required, and a TL;DR, which
+    AGENTS.md makes recommended rather than mandatory, still comes first."""
     from scout.vault import HeadingFrame, headings_are_valid
 
-    assert not headings_are_valid(
+    assert headings_are_valid(
         ("Trade-offs", "Cross-References"), frame=HeadingFrame.AUTHORED
     )
     assert not headings_are_valid(("TL;DR", "Trade-offs"), frame=HeadingFrame.AUTHORED)
@@ -585,6 +586,7 @@ def test_an_authored_page_lints_clean_under_the_authored_frame(
     page.body = (
         "## TL;DR\n\nDense summary.\n\n"
         "## Trade-offs\n\nWhat this costs.\n\n"
+        "## Provenance\n\nFrom the declared source.\n\n"
         "## Cross-References\n\n[[other-page]]\n"
     )
     from scout.vault import HeadingFrame

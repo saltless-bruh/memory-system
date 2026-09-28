@@ -16,9 +16,13 @@ code, migrations, Compose files, and `AGENTS.md` operating contract win.
 | `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md` | **ACTIVE PROPOSAL, not implemented.** Its "Findings" section records verified defects in the current system and is factual; nothing under "Proposed design" exists in the codebase |
 | `.agent/` and `packages/snp-agent/` | Active agent instructions. `packages/snp-agent/` is an Agent Plugins 1.0.0 plugin; matching portable files must be equivalent, and the `superpowers-*` layer is deliberately repo-local and, since 2026-08-27, absent from `.claude/` as well — Claude Code uses `unlazy` |
 
-`wiki/index.md` is generated output, not an authored source. `raw/` is evidence,
-not instructions. `artifacts/superpowers/` records audits and executions and is
-not an operations manual.
+`wiki/index.md` is an authored control document in a real vault (`AGENTS.md`
+section 4): it is never regenerated, and `verify-vault` reports its difference
+from the summary-built render as a warning. Only an index that carries
+`gen_index.py`'s generated header, as the sample tree's does, is generated
+output that must match the render. `raw/` is evidence, not instructions.
+`artifacts/superpowers/` records audits and executions and is not an operations
+manual.
 
 ## Current implementation baseline
 

@@ -25,8 +25,11 @@ from scout.cli.result import CommandResult, ExitCode
 Injected = Annotated[Any, Parameter(parse=False)]
 
 
-def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int]:
-    """Load the vault at `wiki_dir`, lint it, and report whether its index is current.
+def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int, bool]:
+    """Load the vault at `wiki_dir`, lint it, and report on its index.
+
+    Returns the pages, the lint, whether `index.md` equals the render, the page
+    count, and whether the index is authored (see `gen_index.index_is_authored`).
 
     Every path here derives from `wiki_dir`. Earlier this function took the tree
     as an argument and then linted, rendered and index-checked against module
@@ -34,14 +37,14 @@ def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int]:
     whatever it was pointed at (register #59).
     """
     from scout import vault
-    from scripts.gen_index import collect_lint, render_index
+    from scripts.gen_index import collect_lint, index_is_authored, render_index
 
     pages = vault.load_pages(wiki_dir)
     lint = collect_lint(pages, wiki_dir=wiki_dir)
     rendered = render_index(pages, wiki_dir=wiki_dir)
     index_path = wiki_dir / "index.md"
     current = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
-    return pages, lint, rendered == current, len(pages)
+    return pages, lint, rendered == current, len(pages), index_is_authored(current)
 
 
 def _resolved_wiki_dir(cfg: Config) -> Path:
@@ -53,35 +56,48 @@ def _resolved_wiki_dir(cfg: Config) -> Path:
 
 def verify_vault(*, config: Injected = None) -> CommandResult:
     """Lint page frontmatter and confirm `wiki/index.md` is current."""
+    from scripts.gen_index import AUTHORED_INDEX_WARNING, REGENERATE_COMMAND
+
     cfg: Config = config
     try:
-        pages, lint, index_current, count = _pages_and_lint(_resolved_wiki_dir(cfg))
+        pages, lint, index_current, count, authored = _pages_and_lint(
+            _resolved_wiki_dir(cfg)
+        )
     except ValueError as exc:
         # A malformed vault root is a configuration problem, not a finding.
         raise infrastructure_error(
             "the wiki tree could not be read", hint=str(exc), retryable=False
         ) from exc
 
-    ok = lint.ok and index_current
+    # An authored index never equals the summary-built render, and AGENTS.md
+    # forbids regenerating it, so on such a vault the difference is a warning
+    # (owner ruling). A generated index that drifted is still a failure.
+    authored_drift = not index_current and authored
+    ok = lint.ok and (index_current or authored_drift)
+    warnings = list(lint.warnings)
+    if authored_drift:
+        warnings.append(AUTHORED_INDEX_WARNING)
     messages = [f"LINT ERROR: {e}" for e in lint.errors]
-    messages += [f"LINT WARN:  {w}" for w in lint.warnings]
-    if not index_current:
+    messages += [f"LINT WARN:  {w}" for w in warnings]
+    if not index_current and not authored_drift:
         messages.append(
-            "INDEX STALE: wiki/index.md is out of date — run `snpmemory index` to regenerate."
+            "INDEX STALE: wiki/index.md is out of date — "
+            f"run `{REGENERATE_COMMAND}` to regenerate."
         )
+    state = "current" if index_current else "authored" if authored_drift else "STALE"
 
     return CommandResult(
         exit_code=ExitCode.SUCCESS if ok else ExitCode.SEMANTIC_FAILURE,
         data={
             "pages": count,
             "errors": list(lint.errors),
-            "warnings": list(lint.warnings),
+            "warnings": warnings,
             "index_current": index_current,
             "status": "pass" if ok else "fail",
         },
         summary=(
-            f"{count} pages · {len(lint.errors)} errors · {len(lint.warnings)} warnings · "
-            f"index {'current' if index_current else 'STALE'} — {'PASS' if ok else 'FAIL'}"
+            f"{count} pages · {len(lint.errors)} errors · {len(warnings)} warnings · "
+            f"index {state} — {'PASS' if ok else 'FAIL'}"
         ),
         messages=tuple(messages),
     )
@@ -394,19 +410,33 @@ def verify_groundedness(
         changed_only: Judge only pages this branch changed — one model call per
             changed page instead of one per vault page.
     """
+    import sys
+
     from scripts import verify_groundedness as impl
 
     cfg: Config = config
-    cfg.require_repo()
+    repo = cfg.require_repo().resolve()
+    # The same tree `verify-vault` and `verify-addresses` judge. Without it the
+    # implementation fell back to its own defaults -- the installed package's
+    # `wiki/` and git history -- so `WIKI_DIR` and `--root` were silently
+    # ignored and a verdict came back about a vault nobody named (#59's shape).
+    wiki_dir = _resolved_wiki_dir(cfg)
 
     argv = ["--changed-only"] if changed_only else []
+    reports: list[Any] = []
     # The judge is built from resolved config, not from `os.environ`: the
     # resolver exports nothing, so `from_env()` with no argument would find an
     # empty gateway URL and report an infrastructure failure that isn't real.
+    # Prose goes to stderr and the verdicts come back as data: stdout carries
+    # the rendered result only, so `-o json` stays parseable.
     code = impl.main(
         argv,
         backend_factory=lambda: _pgvector_backend(cfg),
         judge_factory=lambda: impl.LiteLLMJudge.from_env(cfg.values),
+        repo_root=repo,
+        wiki_dir=wiki_dir,
+        out=sys.stderr,
+        on_reports=reports.extend,
     )
     exit_code = ExitCode(code) if code in (0, 1) else ExitCode.INFRASTRUCTURE
     if exit_code is ExitCode.INFRASTRUCTURE:
@@ -414,11 +444,18 @@ def verify_groundedness(
             "groundedness verification could not complete",
             hint="check that the snp-llm route resolves and the database is reachable",
         )
+    pages = [impl.report_payload(report, root=repo) for report in reports]
+    counts = {verdict.value: 0 for verdict in impl.PageVerdict}
+    for entry in pages:
+        counts[entry["verdict"]] += 1
     return CommandResult(
         exit_code=exit_code,
         data={
             "scope": "changed" if changed_only else "vault",
             "status": "pass" if code == 0 else "fail",
+            "judged": len(pages),
+            "counts": counts,
+            "pages": pages,
         },
         summary="All judged pages are grounded."
         if code == 0

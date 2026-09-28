@@ -75,7 +75,10 @@ def test_inventory_classifies_every_document_authority() -> None:
         assert heading in content
     for path in ACTIVE_FILES:
         assert f"`{path.relative_to(REPO_ROOT).as_posix()}`" in content
-    assert "`wiki/index.md` is generated output" in content
+    # AGENTS.md section 4 makes an authored index a control document; the
+    # inventory used to call it "generated output" and this test pinned that.
+    assert "`wiki/index.md` is an authored control document" in content
+    assert "`wiki/index.md` is generated output" not in content
     assert "`raw/` is evidence" in content
     assert "`artifacts/superpowers/`" in content
 

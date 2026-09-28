@@ -25,8 +25,11 @@ from scout.cli.result import CommandResult, ExitCode
 Injected = Annotated[Any, Parameter(parse=False)]
 
 
-def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int]:
-    """Load the vault at `wiki_dir`, lint it, and report whether its index is current.
+def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int, bool]:
+    """Load the vault at `wiki_dir`, lint it, and report on its index.
+
+    Returns the pages, the lint, whether `index.md` equals the render, the page
+    count, and whether the index is authored (see `gen_index.index_is_authored`).
 
     Every path here derives from `wiki_dir`. Earlier this function took the tree
     as an argument and then linted, rendered and index-checked against module
@@ -34,14 +37,14 @@ def _pages_and_lint(wiki_dir: Any) -> tuple[Any, Any, bool, int]:
     whatever it was pointed at (register #59).
     """
     from scout import vault
-    from scripts.gen_index import collect_lint, render_index
+    from scripts.gen_index import collect_lint, index_is_authored, render_index
 
     pages = vault.load_pages(wiki_dir)
     lint = collect_lint(pages, wiki_dir=wiki_dir)
     rendered = render_index(pages, wiki_dir=wiki_dir)
     index_path = wiki_dir / "index.md"
     current = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
-    return pages, lint, rendered == current, len(pages)
+    return pages, lint, rendered == current, len(pages), index_is_authored(current)
 
 
 def _resolved_wiki_dir(cfg: Config) -> Path:
@@ -53,35 +56,48 @@ def _resolved_wiki_dir(cfg: Config) -> Path:
 
 def verify_vault(*, config: Injected = None) -> CommandResult:
     """Lint page frontmatter and confirm `wiki/index.md` is current."""
+    from scripts.gen_index import AUTHORED_INDEX_WARNING, REGENERATE_COMMAND
+
     cfg: Config = config
     try:
-        pages, lint, index_current, count = _pages_and_lint(_resolved_wiki_dir(cfg))
+        pages, lint, index_current, count, authored = _pages_and_lint(
+            _resolved_wiki_dir(cfg)
+        )
     except ValueError as exc:
         # A malformed vault root is a configuration problem, not a finding.
         raise infrastructure_error(
             "the wiki tree could not be read", hint=str(exc), retryable=False
         ) from exc
 
-    ok = lint.ok and index_current
+    # An authored index never equals the summary-built render, and AGENTS.md
+    # forbids regenerating it, so on such a vault the difference is a warning
+    # (owner ruling). A generated index that drifted is still a failure.
+    authored_drift = not index_current and authored
+    ok = lint.ok and (index_current or authored_drift)
+    warnings = list(lint.warnings)
+    if authored_drift:
+        warnings.append(AUTHORED_INDEX_WARNING)
     messages = [f"LINT ERROR: {e}" for e in lint.errors]
-    messages += [f"LINT WARN:  {w}" for w in lint.warnings]
-    if not index_current:
+    messages += [f"LINT WARN:  {w}" for w in warnings]
+    if not index_current and not authored_drift:
         messages.append(
-            "INDEX STALE: wiki/index.md is out of date — run `snpmemory index` to regenerate."
+            "INDEX STALE: wiki/index.md is out of date — "
+            f"run `{REGENERATE_COMMAND}` to regenerate."
         )
+    state = "current" if index_current else "authored" if authored_drift else "STALE"
 
     return CommandResult(
         exit_code=ExitCode.SUCCESS if ok else ExitCode.SEMANTIC_FAILURE,
         data={
             "pages": count,
             "errors": list(lint.errors),
-            "warnings": list(lint.warnings),
+            "warnings": warnings,
             "index_current": index_current,
             "status": "pass" if ok else "fail",
         },
         summary=(
-            f"{count} pages · {len(lint.errors)} errors · {len(lint.warnings)} warnings · "
-            f"index {'current' if index_current else 'STALE'} — {'PASS' if ok else 'FAIL'}"
+            f"{count} pages · {len(lint.errors)} errors · {len(warnings)} warnings · "
+            f"index {state} — {'PASS' if ok else 'FAIL'}"
         ),
         messages=tuple(messages),
     )

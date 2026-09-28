@@ -66,7 +66,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -618,9 +618,19 @@ def _git(args: Sequence[str], *, repo_root: Path) -> subprocess.CompletedProcess
 
 
 def git_changed_wiki_paths(
-    *, base_refs: Sequence[str] = DEFAULT_BASE_REFS, repo_root: Path = REPO_ROOT
+    *,
+    base_refs: Sequence[str] = DEFAULT_BASE_REFS,
+    repo_root: Path = REPO_ROOT,
+    wiki_dir: Path | None = None,
 ) -> tuple[str, ...]:
     """Wiki pages this branch changed, relative to the first resolvable base.
+
+    Paths come back relative to `repo_root`, and only pages beneath `wiki_dir`
+    (default `<repo_root>/wiki`) count. Both name the *caller's* checkout: the
+    CLI passes the tree it resolved from `--root` and `WIKI_DIR`, because
+    asking git about whichever package happens to be installed answers a
+    question nobody asked. `--relative` puts `diff` on the same footing as
+    `ls-files`, which already reports paths relative to the working directory.
 
     Compares the *working tree* against the merge base, and adds untracked
     pages, so it reports the same set whether the change is committed (a real
@@ -631,6 +641,11 @@ def git_changed_wiki_paths(
     Raises `GroundednessError` when no base ref resolves — an unknown change
     set must not silently judge nothing.
     """
+    pathspec = (
+        "wiki"
+        if wiki_dir is None
+        else Path(os.path.relpath(wiki_dir, repo_root)).as_posix()
+    )
     try:
         base = ""
         for ref in base_refs:
@@ -643,9 +658,12 @@ def git_changed_wiki_paths(
                 "no base ref resolved from "
                 f"{', '.join(base_refs)} — cannot determine the changed pages"
             )
-        diff = _git(["diff", "--name-only", base, "--", "wiki"], repo_root=repo_root)
+        diff = _git(
+            ["diff", "--relative", "--name-only", base, "--", pathspec],
+            repo_root=repo_root,
+        )
         untracked = _git(
-            ["ls-files", "--others", "--exclude-standard", "--", "wiki"],
+            ["ls-files", "--others", "--exclude-standard", "--", pathspec],
             repo_root=repo_root,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -668,23 +686,70 @@ def select_pages(
     *,
     changed: Iterable[str] | None = None,
     explicit: Iterable[str] | None = None,
+    root: Path = REPO_ROOT,
 ) -> list[vault.Page]:
-    """Narrow the vault to the pages this run must judge."""
+    """Narrow the vault to the pages this run must judge.
+
+    Pages and requested paths are compared as absolute locations, a relative
+    request anchored at `root`. Comparing `page.rel` strings only worked while
+    the vault sat inside this package: `rel` is relative to the package, so for
+    any other checkout it is an absolute path that never equals the
+    repo-relative names git reports -- and `--changed-only` then judged nothing
+    and reported success.
+    """
+
+    def located(paths: Iterable[str]) -> set[Path]:
+        return {(root / path).resolve() for path in paths}
+
     selected = list(pages)
     if explicit is not None:
-        wanted = {Path(path).as_posix() for path in explicit}
-        selected = [page for page in selected if page.rel in wanted]
+        wanted = located(explicit)
+        selected = [page for page in selected if page.path.resolve() in wanted]
     if changed is not None:
-        touched = {Path(path).as_posix() for path in changed}
-        selected = [page for page in selected if page.rel in touched]
+        touched = located(changed)
+        selected = [page for page in selected if page.path.resolve() in touched]
     return selected
 
 
 # ── reporting and CLI ────────────────────────────────────────────────────────
 
 
-def print_reports(reports: Sequence[GroundednessReport]) -> None:
-    """Render per-page verdicts and the summary line."""
+def report_payload(report: GroundednessReport, *, root: Path) -> dict[str, Any]:
+    """One page's verdict as plain data, its path relative to `root`.
+
+    This is what the CLI's structured result carries, so `-o json` names the
+    pages that failed and why, rather than leaving a caller to scrape prose.
+    """
+    location = Path(report.page_path)
+    if not location.is_absolute():
+        location = vault.REPO_ROOT / location
+    try:
+        page = location.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        page = location.as_posix()
+    return {
+        "page": page,
+        "verdict": report.verdict.value,
+        "claims": [
+            {
+                "sentence": claim.sentence,
+                "reason": claim.reason,
+                "anchored": claim.anchored,
+            }
+            for claim in report.claims
+        ],
+        "detail": report.detail,
+        "empty_sources": list(report.empty_sources),
+        "source_count": report.source_count,
+        "passage_count": report.passage_count,
+    }
+
+
+def print_reports(
+    reports: Sequence[GroundednessReport], *, out: TextIO | None = None
+) -> None:
+    """Render per-page verdicts and the summary line to `out` (default stdout)."""
+    stream = sys.stdout if out is None else out
     for report in reports:
         summary = ""
         if report.verdict is PageVerdict.GROUNDED:
@@ -692,16 +757,22 @@ def print_reports(reports: Sequence[GroundednessReport]) -> None:
                 f"  ({report.source_count} source(s), "
                 f"{report.passage_count} passage(s))"
             )
-        print(f"{report.verdict.value.upper():12s} {report.page_path}{summary}")
+        print(
+            f"{report.verdict.value.upper():12s} {report.page_path}{summary}",
+            file=stream,
+        )
         for claim in report.claims:
             anchor = "" if claim.anchored else "  [not found verbatim in body]"
-            print(f'      claim: "{claim.sentence}"{anchor}')
+            print(f'      claim: "{claim.sentence}"{anchor}', file=stream)
             if claim.reason:
-                print(f"      reason: {claim.reason}")
+                print(f"      reason: {claim.reason}", file=stream)
         if report.verdict is PageVerdict.UNSUPPORTED and not report.claims:
-            print("      reason: judge reported unsupported but quoted no sentence")
+            print(
+                "      reason: judge reported unsupported but quoted no sentence",
+                file=stream,
+            )
         if report.detail:
-            print(f"      note: {report.detail}")
+            print(f"      note: {report.detail}", file=stream)
     counts = {verdict: 0 for verdict in PageVerdict}
     for report in reports:
         counts[report.verdict] += 1
@@ -710,7 +781,8 @@ def print_reports(reports: Sequence[GroundednessReport]) -> None:
         f"{counts[PageVerdict.GROUNDED]} GROUNDED · "
         f"{counts[PageVerdict.UNSUPPORTED]} UNSUPPORTED · "
         f"{counts[PageVerdict.NO_CONTEXT]} NO_CONTEXT · "
-        f"{counts[PageVerdict.UNSOURCED]} UNSOURCED (not judged)"
+        f"{counts[PageVerdict.UNSOURCED]} UNSOURCED (not judged)",
+        file=stream,
     )
 
 
@@ -718,11 +790,21 @@ BackendFactory = Callable[[], RagBackend | None]
 JudgeFactory = Callable[[], Judge | None]
 PagesLoader = Callable[[], Iterable[vault.Page]]
 ChangedPathsGetter = Callable[[Sequence[str]], Sequence[str]]
+ReportsSink = Callable[[Sequence[GroundednessReport]], None]
 
 
-def _default_changed_paths(base_refs: Sequence[str]) -> Sequence[str]:
+def _default_changed_paths(
+    base_refs: Sequence[str],
+    *,
+    repo_root: Path = REPO_ROOT,
+    wiki_dir: Path | None = None,
+) -> Sequence[str]:
     """Resolve the changed pages, honouring any ``--base-ref`` overrides."""
-    return git_changed_wiki_paths(base_refs=tuple(base_refs) or DEFAULT_BASE_REFS)
+    return git_changed_wiki_paths(
+        base_refs=tuple(base_refs) or DEFAULT_BASE_REFS,
+        repo_root=repo_root,
+        wiki_dir=wiki_dir,
+    )
 
 
 def _no_backend_configured() -> RagBackend | None:
@@ -749,17 +831,29 @@ async def _close_backend(backend: RagBackend) -> None:
 
 
 async def _execute(
-    backend: RagBackend, pages: Sequence[vault.Page], judge: Judge
+    backend: RagBackend,
+    pages: Sequence[vault.Page],
+    judge: Judge,
+    *,
+    out: TextIO | None = None,
+    on_reports: ReportsSink | None = None,
 ) -> int:
     try:
         reports = await verify_pages(backend, pages, judge)
-        print_reports(reports)
+        print_reports(reports, out=out)
+        if on_reports is not None:
+            on_reports(reports)
         return 1 if any(report.failed for report in reports) else 0
     finally:
         await _close_backend(backend)
 
 
-def _probe_exit(judge_factory: JudgeFactory) -> int:
+def _say(out: TextIO | None, line: str) -> None:
+    """Write one line of operator prose to `out`, stdout when none is given."""
+    print(line, file=sys.stdout if out is None else out)
+
+
+def _probe_exit(judge_factory: JudgeFactory, *, out: TextIO | None = None) -> int:
     """Answer one question: does the judge route respond?
 
     Exists because `GET /health?model=snp-judge` cannot answer it. That endpoint
@@ -778,13 +872,13 @@ def _probe_exit(judge_factory: JudgeFactory) -> int:
     try:
         judge = judge_factory()
     except GroundednessError as exc:
-        print(f"INFRASTRUCTURE ERROR: {exc}")
+        _say(out, f"INFRASTRUCTURE ERROR: {exc}")
         return 2
     except Exception:  # noqa: BLE001 - configuration errors are redacted
-        print("INFRASTRUCTURE ERROR: judge configuration failed.")
+        _say(out, "INFRASTRUCTURE ERROR: judge configuration failed.")
         return 2
     if judge is None:
-        print("No judge configured; groundedness cannot run.")
+        _say(out, "No judge configured; groundedness cannot run.")
         return 2
 
     try:
@@ -794,9 +888,9 @@ def _probe_exit(judge_factory: JudgeFactory) -> int:
             context=[SourceContext(path="probe", loc=None, text="The sky is blue.")],
         )
     except Exception:  # noqa: BLE001 - transport detail may carry a credential
-        print("INFRASTRUCTURE ERROR: the judge route did not respond.")
+        _say(out, "INFRASTRUCTURE ERROR: the judge route did not respond.")
         return 2
-    print("Judge route responded; groundedness can run.")
+    _say(out, "Judge route responded; groundedness can run.")
     return 0
 
 
@@ -821,11 +915,40 @@ def main(
     *,
     backend_factory: BackendFactory = _no_backend_configured,
     judge_factory: JudgeFactory = _no_judge_configured,
-    pages_loader: PagesLoader = vault.load_pages,
-    changed_paths_getter: ChangedPathsGetter = _default_changed_paths,
+    pages_loader: PagesLoader | None = None,
+    changed_paths_getter: ChangedPathsGetter | None = None,
+    repo_root: Path = REPO_ROOT,
+    wiki_dir: Path | None = None,
+    out: TextIO | None = None,
+    on_reports: ReportsSink | None = None,
 ) -> int:
-    """Return 0 grounded, 1 unsupported claims found, 2 infrastructure failure."""
+    """Return 0 grounded, 1 unsupported claims found, 2 infrastructure failure.
+
+    `repo_root` and `wiki_dir` name the checkout being judged. They default to
+    this script's own tree, which is right for `python scripts/...` run from
+    the checkout and wrong for anything else: `snpmemory verify-groundedness`
+    passes the tree it resolved from `--root` and `WIKI_DIR`, or it would load
+    pages and ask git about a vault the operator never named. A loader or
+    change getter passed explicitly wins over both.
+
+    Prose goes to `out` (default stdout, for the standalone script). The CLI
+    sends it to stderr and collects the reports through `on_reports`, because
+    its stdout carries the structured result and nothing else.
+    """
     _load_env_for_command_line()
+    judged_dir = vault.WIKI_DIR if wiki_dir is None else wiki_dir
+    if pages_loader is None:
+
+        def pages_loader() -> list[vault.Page]:
+            return vault.load_pages(judged_dir)
+
+    if changed_paths_getter is None:
+
+        def changed_paths_getter(base_refs: Sequence[str]) -> Sequence[str]:
+            return _default_changed_paths(
+                base_refs, repo_root=repo_root, wiki_dir=wiki_dir
+            )
+
     parser = argparse.ArgumentParser(
         description="Judge wiki pages against the sources they cite (M7)."
     )
@@ -859,7 +982,7 @@ def main(
     args = parser.parse_args(argv)
 
     if args.probe:
-        return _probe_exit(judge_factory)
+        return _probe_exit(judge_factory, out=out)
 
     try:
         pages = list(pages_loader())
@@ -870,51 +993,54 @@ def main(
             pages,
             changed=changed,
             explicit=args.pages or None,
+            root=repo_root,
         )
     except GroundednessError as exc:
-        print(f"INFRASTRUCTURE ERROR: {exc}")
+        _say(out, f"INFRASTRUCTURE ERROR: {exc}")
         return 2
     except Exception:  # noqa: BLE001 - paths/credentials may leak through text
-        print("INFRASTRUCTURE ERROR: page selection failed.")
+        _say(out, "INFRASTRUCTURE ERROR: page selection failed.")
         return 2
 
     if not selected:
         scope = "changed pages" if args.changed_only else "vault"
-        print(f"No pages to judge in the {scope}. Nothing to verify.")
+        _say(out, f"No pages to judge in the {scope}. Nothing to verify.")
         return 0
 
     try:
         backend = backend_factory()
     except Exception:  # noqa: BLE001 - configuration errors are redacted
-        print("INFRASTRUCTURE ERROR: RAG backend configuration failed.")
+        _say(out, "INFRASTRUCTURE ERROR: RAG backend configuration failed.")
         return 2
     if backend is None:
-        print("No RAG backend configured; refusing to fabricate groundedness.")
+        _say(out, "No RAG backend configured; refusing to fabricate groundedness.")
         return 2
 
     try:
         judge = judge_factory()
     except GroundednessError as exc:
-        print(f"INFRASTRUCTURE ERROR: {exc}")
+        _say(out, f"INFRASTRUCTURE ERROR: {exc}")
         asyncio.run(_close_backend(backend))
         return 2
     except Exception:  # noqa: BLE001 - configuration errors are redacted
-        print("INFRASTRUCTURE ERROR: judge configuration failed.")
+        _say(out, "INFRASTRUCTURE ERROR: judge configuration failed.")
         asyncio.run(_close_backend(backend))
         return 2
     if judge is None:
-        print("No judge configured; refusing to fabricate groundedness.")
+        _say(out, "No judge configured; refusing to fabricate groundedness.")
         asyncio.run(_close_backend(backend))
         return 2
 
-    print(f"Judging {len(selected)} of {len(pages)} vault page(s).")
+    _say(out, f"Judging {len(selected)} of {len(pages)} vault page(s).")
     try:
-        return asyncio.run(_execute(backend, selected, judge))
+        return asyncio.run(
+            _execute(backend, selected, judge, out=out, on_reports=on_reports)
+        )
     except GroundednessError as exc:
-        print(f"INFRASTRUCTURE ERROR: {exc}")
+        _say(out, f"INFRASTRUCTURE ERROR: {exc}")
         return 2
     except Exception:  # noqa: BLE001 - database/model details may contain secrets
-        print("INFRASTRUCTURE ERROR: groundedness verification could not complete.")
+        _say(out, "INFRASTRUCTURE ERROR: groundedness verification could not complete.")
         return 2
 
 

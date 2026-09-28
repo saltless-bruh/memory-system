@@ -394,19 +394,33 @@ def verify_groundedness(
         changed_only: Judge only pages this branch changed — one model call per
             changed page instead of one per vault page.
     """
+    import sys
+
     from scripts import verify_groundedness as impl
 
     cfg: Config = config
-    cfg.require_repo()
+    repo = cfg.require_repo().resolve()
+    # The same tree `verify-vault` and `verify-addresses` judge. Without it the
+    # implementation fell back to its own defaults -- the installed package's
+    # `wiki/` and git history -- so `WIKI_DIR` and `--root` were silently
+    # ignored and a verdict came back about a vault nobody named (#59's shape).
+    wiki_dir = _resolved_wiki_dir(cfg)
 
     argv = ["--changed-only"] if changed_only else []
+    reports: list[Any] = []
     # The judge is built from resolved config, not from `os.environ`: the
     # resolver exports nothing, so `from_env()` with no argument would find an
     # empty gateway URL and report an infrastructure failure that isn't real.
+    # Prose goes to stderr and the verdicts come back as data: stdout carries
+    # the rendered result only, so `-o json` stays parseable.
     code = impl.main(
         argv,
         backend_factory=lambda: _pgvector_backend(cfg),
         judge_factory=lambda: impl.LiteLLMJudge.from_env(cfg.values),
+        repo_root=repo,
+        wiki_dir=wiki_dir,
+        out=sys.stderr,
+        on_reports=reports.extend,
     )
     exit_code = ExitCode(code) if code in (0, 1) else ExitCode.INFRASTRUCTURE
     if exit_code is ExitCode.INFRASTRUCTURE:
@@ -414,11 +428,18 @@ def verify_groundedness(
             "groundedness verification could not complete",
             hint="check that the snp-llm route resolves and the database is reachable",
         )
+    pages = [impl.report_payload(report, root=repo) for report in reports]
+    counts = {verdict.value: 0 for verdict in impl.PageVerdict}
+    for entry in pages:
+        counts[entry["verdict"]] += 1
     return CommandResult(
         exit_code=exit_code,
         data={
             "scope": "changed" if changed_only else "vault",
             "status": "pass" if code == 0 else "fail",
+            "judged": len(pages),
+            "counts": counts,
+            "pages": pages,
         },
         summary="All judged pages are grounded."
         if code == 0

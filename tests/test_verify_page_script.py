@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -33,11 +34,28 @@ SCRIPT = REPO_ROOT / "packages/snp-agent/skills/snp-verify-page/scripts/verify_p
 
 @pytest.fixture(scope="module")
 def script() -> ModuleType:
+    # Importing a file writes its bytecode beside it, and this file lives in the
+    # package tree that ships mirrored into `.agent/` and `.claude/`. Suppress
+    # the write for this load only, so the test leaves the package as it found it.
     spec = importlib.util.spec_from_file_location("verify_page_script", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
+
+
+def test_loading_the_script_leaves_no_bytecode_in_the_package(
+    script: ModuleType,
+) -> None:
+    """The package tree is mirrored byte for byte into `.agent/` and `.claude/`,
+    and the docs-contract tests read every file in it as text. A `__pycache__`
+    left beside the shipped script breaks both, for every later run."""
+    assert not (SCRIPT.parent / "__pycache__").exists()
 
 
 AGENTS_PAGE = """---

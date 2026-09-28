@@ -71,9 +71,10 @@ read adds `updated`, `outline`, `sections`, `sources`, and `links`. Read-time
 normalization handles older pages; do not rewrite a page merely to make its
 stored shape resemble the envelope.
 
-Source extraction beyond an indexed wiki page is a deferred subsystem. When a
-page lacks the needed evidence, state that limit plainly. Do not invent a tool,
-source passage, quotation, or locator.
+`wiki_quote` reaches only sources already ingested under `raw/` and addressed
+by a page's `sources[]`; fetching an external URL is not implemented. When
+neither the page nor a quoted source holds the needed evidence, state that
+limit plainly. Do not invent a tool, source passage, quotation, or locator.
 
 ## 3. Security boundaries
 

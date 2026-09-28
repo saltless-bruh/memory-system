@@ -1,7 +1,8 @@
 # Connect an agent to SNP Memory System
 
 Scout is the authenticated agent retrieval service. Agents call `wiki_search`
-to discover pages, then `wiki_read` for canonical evidence. Read
+to discover pages, `wiki_read` for canonical evidence, and `wiki_quote` for the
+`raw/` passage behind a page's `sources[]` entry. Read
 [`AGENTS.md`](../AGENTS.md) for scope, citations, authoring, and PR governance.
 The [OpenCode rehearsal](DEMO_OPENCODE.md) adds fresh-profile setup and the
 live ingestion → human-reviewed update experiment.
@@ -29,9 +30,10 @@ Agent Skill that runs it. A config written before that date still holding a
 `snpmemory` server entry is corrected by re-running `snpmemory mcp-config`,
 which removes it rather than leaving it registered.
 
-There is no separate wiki-engine endpoint in the V3 agent connection. Source
-extraction beyond indexed wiki pages is deferred. Do not invent another
-retrieval tool or use filesystem/database access when Scout lacks evidence.
+There is no separate wiki-engine endpoint in the V3 agent connection.
+`wiki_quote` reads only ingested `raw/` sources a page already cites; external
+URL fetching is not implemented. Do not invent another retrieval tool or use
+filesystem/database access when Scout lacks evidence.
 
 JWT and static deployments require the complete Scout authorization value
 in the client environment. Load the token from a secret store or hidden

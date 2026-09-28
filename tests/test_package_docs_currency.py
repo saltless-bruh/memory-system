@@ -150,3 +150,51 @@ def test_a_single_command_skill_names_only_flags_that_command_accepts(
         f"{relative} documents `snpmemory {command}` with {unknown}, which it "
         f"does not accept; it accepts {sorted(accepted)}"
     )
+
+
+# ── wiki_quote is the third retrieval tool ──────────────────────────────────
+
+#: The texts that walk an agent through retrieval. Each must name the tool
+#: that returns a page's source passage, or the agent is left believing no
+#: such tool exists.
+RETRIEVAL_TEXTS = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "docs/CONNECT_AGENTS.md",
+    "packages/snp-agent/rules/snp-memory.md",
+    "packages/snp-agent/instructions/query_protocol.instructions.md",
+    "packages/snp-agent/instructions/agent_guide.instructions.md",
+    "packages/snp-agent/workflows/snp-query.md",
+    "packages/snp-agent/skills/snp-query-wiki/SKILL.md",
+)
+
+#: Wording that tells an agent source extraction does not exist. It was true
+#: until 2026-09-21, when `wiki_quote` shipped.
+_EXTRACTION_DEFERRED = re.compile(
+    r"source extraction (beyond (an )?indexed wiki pages? )?is (a )?deferred"
+    r"|external source extraction is a deferred"
+    r"|source-reading (tool|operation)",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize("relative", RETRIEVAL_TEXTS)
+def test_retrieval_texts_name_wiki_quote(relative: str) -> None:
+    text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+    assert "wiki_quote" in text, (
+        f"{relative} walks an agent through retrieval without naming wiki_quote"
+    )
+
+
+@pytest.mark.parametrize("relative", ACTIVE_TEXTS)
+def test_no_active_text_calls_source_extraction_deferred(relative: str) -> None:
+    offenders = [
+        f"{relative}:{start}: {match.group(0)}"
+        for start, para in _paragraphs(relative)
+        for match in _EXTRACTION_DEFERRED.finditer(para.replace("\n", " "))
+    ]
+    assert not offenders, (
+        "wiki_quote has served source passages since 2026-09-21:\n"
+        + "\n".join(offenders)
+    )

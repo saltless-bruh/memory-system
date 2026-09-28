@@ -4,8 +4,9 @@ SNP is a self-hosted memory system for coding agents and engineering teams.
 Git-backed Markdown pages provide a compact, compiled knowledge map; the same
 PostgreSQL 16 with pgvector index also stores source chunks used by the
 operator's compilation pipeline. Agents retrieve wiki pages through
-authenticated Scout: `wiki_search` finds candidates, then `wiki_read` returns
-a canonical page. Source extraction beyond indexed wiki pages is deferred.
+authenticated Scout: `wiki_search` finds candidates, `wiki_read` returns a
+canonical page, and `wiki_quote` returns the verbatim `raw/` passage behind one
+of that page's `sources[]` entries.
 
 > Before operating on the vault, read [`AGENTS.md`](AGENTS.md). It is the
 > authoritative query, page, citation, and PR-first contract. See
@@ -33,12 +34,14 @@ Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
   `allowed_depts`, **a file matching no rule is not indexed at all**, and an
   unreadable policy publishes nothing. There is deliberately no fallback to the
   public `all` ACL.
-- Scout exposes exactly two retrieval tools, `wiki_search(query, department, k,
-  seen)` and `wiki_read(path, department, mode)`, and never synthesizes an
-  answer from retrieved text. Read modes are `tldr`, `outline`, one `section`,
-  and `full`. `rag_fetch` is no longer an agent-facing MCP tool; the same
-  engine call still backs `scripts/verify_addresses.py` and the `scout rag`
-  CLI internally.
+- Scout exposes exactly three retrieval tools, `wiki_search(query, department,
+  k, seen)`, `wiki_read(path, department, mode)`, and `wiki_quote(path, hint,
+  department)`, and never synthesizes an answer from retrieved text. Read
+  modes are `tldr`, `outline`, one `section`, and `full`. `wiki_quote` resolves
+  a `sources[]` entry to passages post-filtered to that one file, or returns
+  `status: "no_source"`. `rag_fetch` is no longer an agent-facing MCP tool;
+  `wiki_quote` and `scripts/verify_addresses.py` call the same engine function
+  internally.
 - PostgreSQL RLS applies the authenticated caller's canonical departments:
   `redteam`, `blueteam`, `ai_eng`, and `infra`.
 - `rag_app_role` is the least-privilege query identity. `rag_ingest_role` is
@@ -155,6 +158,10 @@ human PR handoff, and the ten-edit latency experiment.
 3. Answer from the read page. A search snippet is never sufficient answer
    text.
 4. Cite the wiki page's `path` and the heading used.
+5. When the answer needs the passage under a claim, call
+   `wiki_quote(path, hint, department)` with a `path`/`hint` pair from the read
+   page's `sources[]`. Report `status: "no_source"` as it is; never write a
+   quotation the tool did not return.
 
 The operator handles ingestion and compilation in an authorized checkout;
 the fresh retrieval agent does not gain filesystem or database authority.

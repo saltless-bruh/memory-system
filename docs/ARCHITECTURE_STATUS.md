@@ -54,8 +54,8 @@ not an operations manual.
   Fusion weights capped near `0.033`, so no score floor is meaningful and none
   is applied.
 - `rag_fetch` is no longer an agent-facing tool — `scout/mcp_server.py` exposes
-  only `wiki_search` and `wiki_read` — but the same engine call still backs
-  `scripts/verify_addresses.py` and the `scout rag` CLI. It passes `path=` to
+  `wiki_search`, `wiki_read` and `wiki_quote` — but the same engine call backs
+  `wiki_quote`, `scripts/verify_addresses.py` and the `scout rag` CLI. It passes `path=` to
   the backend, so a mismatched `hint` returns the addressed file anyway: the
   hint governs ranking, never existence. A `loc` is a human locator that
   retrieval does not honor; it is validated at mint time (`scripts/mint.py` →

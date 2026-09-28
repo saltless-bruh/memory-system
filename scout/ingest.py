@@ -536,6 +536,7 @@ async def reconcile_deletions(
     dry_run: bool = False,
     acl: DocumentAclMap | None = None,
     corpus: str | None = None,
+    base_dir: Path | None = None,
 ) -> list[str]:
     """Finds and deletes database documents no longer part of the authorized corpus.
 
@@ -551,6 +552,11 @@ async def reconcile_deletions(
     **101 vault pages** for deletion because no file backed them *there*. The
     two corpora share one flat `source_uri` namespace, so directory name alone
     cannot say who owns a row; the corpus stamp can.
+
+    `base_dir` is what every `source_uri` is relative to -- the parent of the
+    corpus root -- and defaults to `dir_path`'s parent, which is right only when
+    `dir_path` *is* the corpus root. Sweeping `raw/papers` has to look for rows
+    named `raw/papers/...`, not `papers/...`.
     """
     close_conn = False
     if conn is None:
@@ -561,8 +567,10 @@ async def reconcile_deletions(
     try:
         rows = await conn.fetch(_CORPUS_TIER_SQL, corpus)
         dir_path_resolved = dir_path.resolve()  # noqa: ASYNC240
-        base_parent = dir_path_resolved.parent
-        dir_name = dir_path_resolved.name
+        base_parent = (
+            dir_path_resolved.parent if base_dir is None else base_dir.resolve()  # noqa: ASYNC240
+        )
+        dir_name = dir_path_resolved.relative_to(base_parent).as_posix()
 
         # Collect existing relative URIs in this directory tree
         existing_disk_uris = {
@@ -757,6 +765,7 @@ async def ingest_directory(
     acknowledge_capability_change: str | None = None,
     actor_hint: str | None = None,
     env: Mapping[str, str] | None = None,
+    base_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Recursively ingests a directory under one explicit document ACL source.
 
@@ -765,9 +774,17 @@ async def ingest_directory(
     the ones no rule matches. Naming neither is an error — there is no implicit
     department, so nothing can become publicly readable by omission.
 
+    `base_dir` is what each document's `source_uri` is relative to: the parent
+    of the corpus root, so `raw/papers/x.md` is named `raw/papers/x.md`. It
+    defaults to `dir_path`'s parent, which is correct only when `dir_path` is
+    the corpus root itself. A caller indexing a subtree must pass it, or the
+    subtree's documents are stored under a second identity (`papers/x.md`)
+    beside the one sync-job writes, and both are retrievable.
+
     Raises:
         AclPolicyError: Neither or both ACL sources were supplied.
     """
+    uri_root = dir_path.parent if base_dir is None else base_dir
     if (allowed_depts is None) == (acl is None):
         raise AclPolicyError(
             "ingest_directory needs exactly one document ACL source: "
@@ -834,7 +851,7 @@ async def ingest_directory(
                 # to reproduce are the untiered ones.
                 conn,
                 dir_path,
-                dir_path.parent,
+                uri_root,
                 corpus=None,
             )
             if mismatch and not allow_capability_change:
@@ -859,7 +876,7 @@ async def ingest_directory(
                     acknowledgement=acknowledge_capability_change or "",
                     actor_hint=actor_hint,
                     dir_path=dir_path,
-                    base_dir=dir_path.parent,
+                    base_dir=uri_root,
                 )
 
         async def ingest_batch() -> None:
@@ -872,7 +889,7 @@ async def ingest_directory(
                     # published at all. Recorded, never silently skipped.
                     results.append(
                         {
-                            "source_uri": _scanned_uri(file_path, dir_path.parent),
+                            "source_uri": _scanned_uri(file_path, uri_root),
                             "chunks_count": 0,
                             "status": "skipped_unmapped_acl",
                         }
@@ -885,7 +902,7 @@ async def ingest_directory(
                         conn=conn,
                         chunker=chunker,
                         embedder=embedder,
-                        base_dir=dir_path.parent,
+                        base_dir=uri_root,
                         dry_run=dry_run,
                         parse_cache=parse_cache,
                         # The vision route too. Deciding it from `os.environ`
@@ -908,7 +925,7 @@ async def ingest_directory(
                         raise
                     results.append(
                         skipped_file(
-                            _scanned_uri(file_path, dir_path.parent),
+                            _scanned_uri(file_path, uri_root),
                             error=type(exc).__name__,
                             reason=str(exc),
                         )
@@ -919,6 +936,7 @@ async def ingest_directory(
             if reconcile and conn is not None:
                 deleted = await reconcile_deletions(
                     dir_path=dir_path,
+                    base_dir=uri_root,
                     conn=conn,
                     dry_run=dry_run,
                     acl=acl,

@@ -126,6 +126,13 @@ def ingest(
     async def run() -> list[dict[str, Any]]:
         return await ingest_directory(
             dir_path=target if target.is_dir() else target.parent,
+            # A document's identity is relative to the corpus root's parent
+            # whatever subtree this run names -- `raw/papers/x.md`, the same
+            # `source_uri` sync-job writes. Leaving it to default to the
+            # target's own parent stored `papers/x.md` as a second, duplicate
+            # row, and made the `--path` filter below discard the file it had
+            # just indexed.
+            base_dir=raw_root.resolve().parent,
             acl=acl,
             dry_run=dry_run,
             reconcile=target.is_dir(),

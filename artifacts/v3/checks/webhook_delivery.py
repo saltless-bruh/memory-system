@@ -435,6 +435,12 @@ def _branch_paths(branch: str) -> set[str]:
     Read commit by commit rather than as one net diff: a file added in one
     commit and deleted in the next leaves no trace in `base..branch` but is
     still in the history a push publishes.
+
+    `--diff-merges=first-parent` because `git log` otherwise lists no files
+    for a merge commit at all: a path added while resolving a merge, in
+    neither parent and only in the merge itself, passed this scan although the
+    net diff it replaced would have caught it. Against its first parent a
+    merge lists everything it brought in, and that path with it.
     """
     base = _run(["git", "merge-base", branch, BASE_BRANCH]).strip()
     out = _run(
@@ -444,6 +450,7 @@ def _branch_paths(branch: str) -> set[str]:
             "core.quotePath=false",
             "log",
             "--name-only",
+            "--diff-merges=first-parent",
             "--format=",
             f"{base}..{branch}",
         ]

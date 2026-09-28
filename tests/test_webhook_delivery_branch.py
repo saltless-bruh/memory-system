@@ -88,6 +88,30 @@ def test_history_hygiene_sees_a_file_added_then_removed(repo: Path) -> None:
         wd.group_history_hygiene()
 
 
+def test_history_hygiene_sees_a_file_added_only_in_a_merge_commit(
+    repo: Path,
+) -> None:
+    """`git log --name-only` lists no files for a merge commit by default.
+
+    A path added while resolving a merge -- in neither parent, only in the
+    merge commit itself -- is in the history a push publishes, and the net
+    diff this scan replaced would have caught it.
+    """
+    _git(repo, "switch", "-q", "-c", "side")
+    _commit(repo, {"src/side.py": "SIDE = 1\n"}, "side work")
+    _git(repo, "switch", "-q", NEW_BRANCH)
+    _commit(repo, {"src/fix.py": "FIXED = True\n"}, "a small clean fix")
+    _git(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+    target = repo / ".secrets" / "scout_static_tokens.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", ".secrets/scout_static_tokens.json")
+    _git(repo, "commit", "-q", "-m", "merge side")
+
+    with pytest.raises(wd.GateFailure, match=r"\.secrets/scout_static_tokens"):
+        wd.group_history_hygiene()
+
+
 def test_history_hygiene_passes_a_clean_current_branch(repo: Path) -> None:
     _commit(repo, {"src/fix.py": "FIXED = True\n"}, "a small clean fix")
 

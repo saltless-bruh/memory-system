@@ -7,7 +7,10 @@ admits it, and an address PASSes only when the file it names both wins the
 ranking and is lexically backed by its own text — see the criterion note below
 `TOP_RANK`. Exit codes are total: ``0`` every address passed, ``1`` at least
 one semantic FAIL/DRIFT, ``2`` infrastructure or configuration (never a
-mutation trigger, and never a silent green). A page's own shape is always a
+mutation trigger, and never a silent green) -- including a run in which the
+backend answered any lookup from its sparse arm alone because the embedding
+route was down, since rank 1 on a sparse-only ranking is not the criterion
+this gate certifies. A page's own shape is always a
 ``0``/``1`` outcome: a page with no address is skipped and counted, and an
 addressed page under a non-canonical department is a FAIL, never a ``2``.
 """
@@ -21,7 +24,7 @@ import sys
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -237,6 +240,10 @@ class VerifyReport:
     matched_files: tuple[str, ...]
     matched_locs: tuple[str, ...] = ()
     detail: str = ""
+    #: A lookup behind this verdict came back from the sparse arm alone
+    #: (`meta["degraded"] == "true"`): the dense arm was down, so the ranking the
+    #: verdict read is not the hybrid ranking the gate is defined on.
+    degraded: bool = False
 
     @property
     def path(self) -> str:
@@ -263,7 +270,48 @@ def _on_source_locs(chunks: Sequence[RagChunk]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(chunk.loc for chunk in chunks if chunk.loc))
 
 
+def _chunk_is_degraded(chunk: RagChunk) -> bool:
+    """True when the backend answered this chunk without its dense arm."""
+    return str(chunk.meta.get("degraded", "")).casefold() == "true"
+
+
+class _DegradationWatch:
+    """Pass lookups through to a backend, noting any sparse-only answer."""
+
+    def __init__(self, backend: RagBackend) -> None:
+        self._backend = backend
+        self.degraded = False
+
+    async def retrieve(
+        self,
+        hint: str,
+        *,
+        path: str | None = None,
+        scope: Scope | None = None,
+        k: int = 10,
+    ) -> Sequence[RagChunk]:
+        chunks = await self._backend.retrieve(hint, path=path, scope=scope, k=k)
+        if any(_chunk_is_degraded(chunk) for chunk in chunks):
+            self.degraded = True
+        return chunks
+
+
 async def verify_address(
+    backend: RagBackend, scoped_address: ScopedAddress
+) -> VerifyReport:
+    """Classify one address, and say whether any lookup behind it degraded.
+
+    The verdict is `_classify_address`'s; `VerifyReport.degraded` records that
+    one of its lookups was answered from the sparse arm alone. The verdict is
+    still returned -- `mint` and a reader of the report may want it -- but the
+    gate refuses to certify a run that contains one (see `VerifyRun`).
+    """
+    watch = _DegradationWatch(backend)
+    report = await _classify_address(watch, scoped_address)
+    return replace(report, degraded=True) if watch.degraded else report
+
+
+async def _classify_address(
     backend: RagBackend, scoped_address: ScopedAddress
 ) -> VerifyReport:
     """Classify one address under its declaring page department.
@@ -361,6 +409,56 @@ async def verify_all(
             return await verify_address(backend, address)
 
     return list(await asyncio.gather(*(bounded(address) for address in addresses)))
+
+
+def _dense_degraded_total(backend: RagBackend) -> int:
+    """The backend's own count of sparse-only answers, or 0 if it keeps none.
+
+    `PgVectorRlsBackend.health.degraded_total` counts every retrieval its dense
+    arm could not serve. It is read in addition to the per-chunk flag because a
+    degraded lookup that returned no rows carries no chunk to flag -- and that
+    empty answer is exactly what `NO_EVIDENCE` and `FAIL` are decided on.
+    """
+    total = getattr(getattr(backend, "health", None), "degraded_total", 0)
+    return total if isinstance(total, int) else 0
+
+
+@dataclass(frozen=True, slots=True)
+class VerifyRun:
+    """Every report of one gate run, and whether the dense arm held throughout."""
+
+    reports: list[VerifyReport]
+    #: Reports with at least one degraded (sparse-only) chunk behind them.
+    degraded_addresses: int = 0
+    #: Degraded retrievals the backend itself counted during the run.
+    degraded_lookups: int = 0
+
+    @property
+    def degraded(self) -> bool:
+        return self.degraded_addresses > 0 or self.degraded_lookups > 0
+
+
+async def verify_run(
+    backend: RagBackend, addresses: Sequence[ScopedAddress]
+) -> VerifyRun:
+    """`verify_all`, plus the evidence that the run was, or was not, degraded."""
+    before = _dense_degraded_total(backend)
+    reports = await verify_all(backend, addresses)
+    return VerifyRun(
+        reports,
+        degraded_addresses=sum(1 for report in reports if report.degraded),
+        degraded_lookups=max(0, _dense_degraded_total(backend) - before),
+    )
+
+
+def degraded_run_message(run: VerifyRun) -> str:
+    """The one sentence both entry points print for a degraded run."""
+    return (
+        "the dense retrieval arm was degraded during this run "
+        f"({run.degraded_addresses} of {len(run.reports)} address(es) answered "
+        f"from the sparse arm alone; {run.degraded_lookups} degraded lookup(s) "
+        "counted by the backend) -- no verdict here certifies an address"
+    )
 
 
 BackendFactory = Callable[[], RagBackend | None]
@@ -521,8 +619,16 @@ async def _execute(backend: RagBackend, pages_loader: PagesLoader) -> int:
                 return 1
             print("No sources[] addresses found in the vault. Nothing to verify.")
             return 0
-        reports = await verify_all(backend, collection.addresses)
+        run = await verify_run(backend, collection.addresses)
+        reports = run.reports
         _print_report(reports)
+        if run.degraded:
+            # An embedding-route outage, like an unreachable database: exit 2,
+            # whatever the verdicts say. A PASS read off a sparse-only ranking
+            # would be a silent green, and a FAIL/DRIFT/NO_EVIDENCE read off one
+            # would send someone to re-mint a hint that may be fine.
+            print(f"INFRASTRUCTURE ERROR: {degraded_run_message(run)}.")
+            return 2
         failed = any(r.status is not VerifyStatus.PASS for r in reports)
         return 1 if failed or collection.invalid_departments else 0
     finally:

@@ -216,7 +216,7 @@ engine and canonical envelope.*
 | `snpmemory compile-status <handle>` | progress of a background batch | `1` stalled / not started / failed / cancelled · `3` handle names no readable plan |
 | `snpmemory compile-cancel <handle>` | ask a running batch to stop at its next article boundary | `3` unknown handle |
 | `snpmemory verify-vault` | frontmatter + index lint | `1` lint errors |
-| `snpmemory verify-addresses` | address merge gate | `1` drift/fail |
+| `snpmemory verify-addresses` | address merge gate | `1` drift/fail · `2` index unreachable, or any lookup answered by the sparse arm alone (dense arm degraded) |
 | `snpmemory verify-groundedness` | faithfulness gate | `1` unsupported claims |
 | `snpmemory verify-secrets` | secret scan | `1` findings |
 | `snpmemory verify-extraction` | names every indexed document that did not arrive whole | `1` incomplete, or nothing recorded · `2` index unreachable |

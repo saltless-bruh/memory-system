@@ -178,10 +178,12 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
 
     from scout import vault
     from scripts.verify_addresses import (
+        VerifyRun,
         VerifyStatus,
         _close_backend,
         _collect_addresses,
-        verify_all,
+        degraded_run_message,
+        verify_run,
     )
 
     cfg: Config = config
@@ -208,19 +210,32 @@ def verify_addresses(*, config: Injected = None) -> CommandResult:
     if collection.addresses:
         backend = _pgvector_backend(cfg)
 
-        async def run() -> list[Any]:
+        async def run() -> VerifyRun:
             try:
-                return await verify_all(backend, collection.addresses)
+                return await verify_run(backend, collection.addresses)
             finally:
                 await _close_backend(backend)
 
         try:
-            reports = asyncio.run(run())
+            outcome = asyncio.run(run())
         except Exception as exc:  # noqa: BLE001 - driver text may carry a DSN
             raise infrastructure_error(
                 f"address verification could not complete ({type(exc).__name__})",
                 hint="check that PostgreSQL and the LiteLLM gateway are reachable",
             ) from exc
+        if outcome.degraded:
+            # The embedding route is part of the retrieval this gate certifies,
+            # so its outage is the same exit 2 as an unreachable database -- not
+            # a PASS read off the sparse arm, and not a content finding either.
+            raise infrastructure_error(
+                degraded_run_message(outcome),
+                hint="check the LiteLLM embedding route (`snpmemory status`), "
+                "then re-run",
+                checked=len(outcome.reports),
+                degraded_addresses=outcome.degraded_addresses,
+                degraded_lookups=outcome.degraded_lookups,
+            )
+        reports = outcome.reports
     elif not invalid:
         return CommandResult(
             data={

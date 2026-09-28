@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -195,6 +196,47 @@ def process_is_alive(pid: int) -> bool:
     return True
 
 
+class BatchAlreadyRunning(RuntimeError):
+    """Raised when a second run would start on a batch another process holds.
+
+    The handle is the plan path precisely so that two runs against one plan
+    *collide detectably*. Before this, only the CLI's `--background` path
+    checked; a foreground run, or `python -m scripts.compile_plan` beside a
+    running batch, overwrote the marker and raced the first run on one staging
+    directory.
+    """
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace `path` in one step, so a concurrent reader never sees half of it.
+
+    A poller that read a truncated marker got `None` back, which reads as
+    `not_started` — the answer that invites starting the batch a second time.
+    The temporary file lives beside the target so `os.replace` stays a rename
+    within one filesystem.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _digest(payload: Any) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -262,12 +304,30 @@ def write_run_marker(
     fingerprint: str = "",
     article_fingerprints: dict[str, str] | None = None,
 ) -> Path:
-    """Record who is working on this batch, and on which version of the plan."""
+    """Record who is working on this batch, and on which version of the plan.
+
+    Raises:
+        BatchAlreadyRunning: another live process holds this batch and it reads
+            `running`. The same predicate `status_for` uses, so the refusal and
+            the status a caller polls can never disagree. A holder that is dead,
+            that recorded a terminal outcome, or whose heartbeat has expired
+            does not block: those are the batches a re-run exists to resume. A
+            marker carrying this process's own pid is a re-run in the same
+            process — the MCP server runs foreground batches in-process — and
+            is not a second writer.
+    """
+    existing = read_run_marker(plan_path)
+    if existing is not None and _holder_is_running(existing, own_pid=pid):
+        raise BatchAlreadyRunning(
+            f"process {existing.get('pid')} is already running this batch — "
+            "poll compile-status, or compile-cancel it, before starting another"
+        )
     staging = staging_dir(plan_path)
     staging.mkdir(parents=True, exist_ok=True)
     marker = staging / RUN_MARKER
     now = time.time()
-    marker.write_text(
+    _atomic_write_text(
+        marker,
         json.dumps(
             {
                 "pid": pid,
@@ -281,9 +341,26 @@ def write_run_marker(
                 "last_heartbeat": now,
             }
         ),
-        encoding="utf-8",
     )
     return marker
+
+
+def _holder_is_running(marker: dict[str, Any], *, own_pid: int) -> bool:
+    """True when `marker` describes a different, live, un-expired run."""
+    if marker.get("state") in {s.value for s in TERMINAL_STATES}:
+        return False
+    try:
+        holder = int(marker["pid"])
+        last = marker.get("last_heartbeat")
+        silent_for = time.time() - float(last) if last is not None else None
+        ttl = float(marker.get("ttl") or HEARTBEAT_TTL_SECONDS)
+    except (KeyError, TypeError, ValueError):
+        # A marker nobody can read names no holder to protect; `status_for`
+        # reports it as `unknown`, and overwriting it is how it gets repaired.
+        return False
+    if holder == own_pid or not process_is_alive(holder):
+        return False
+    return silent_for is None or silent_for <= ttl
 
 
 def _update_run_marker(plan_path: Path, changes: dict[str, Any]) -> bool:
@@ -293,7 +370,7 @@ def _update_run_marker(plan_path: Path, changes: dict[str, Any]) -> bool:
     if payload is None:
         return False
     payload.update(changes)
-    marker.write_text(json.dumps(payload), encoding="utf-8")
+    _atomic_write_text(marker, json.dumps(payload))
     return True
 
 
@@ -341,7 +418,7 @@ def request_cancel(plan_path: Path) -> Path:
     staging = staging_dir(plan_path)
     staging.mkdir(parents=True, exist_ok=True)
     marker = staging / CANCEL_MARKER
-    marker.write_text(json.dumps({"requested_at": time.time()}), encoding="utf-8")
+    _atomic_write_text(marker, json.dumps({"requested_at": time.time()}))
     return marker
 
 
@@ -366,10 +443,49 @@ def read_run_marker(plan_path: Path) -> dict[str, Any] | None:
 
 
 def _planned_slugs(plan_path: Path) -> tuple[list[str], str]:
+    """The plan's slugs and source, or `ValueError` for a plan of the wrong shape.
+
+    A plan is hand-editable, so its shape is checked rather than assumed: a JSON
+    list or string used to raise `AttributeError`, which escaped `status_for`
+    and surfaced as an infrastructure fault instead of an unreadable plan.
+    """
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"the plan is a JSON {type(payload).__name__}, not an object")
     articles = payload.get("articles", [])
+    if not isinstance(articles, list):
+        raise ValueError("the plan's `articles` is not a list")
     slugs = [str(a["slug"]) for a in articles if isinstance(a, dict) and "slug" in a]
     return slugs, str(payload.get("source", ""))
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkerFields:
+    pid: int | None
+    started_at: float | None
+    poll_interval: float
+    ttl: float
+    last_heartbeat: float | None
+    exit_code: int | None
+
+
+def _marker_fields(marker: dict[str, Any] | None) -> _MarkerFields:
+    """Parse the typed fields of a run marker, or raise `ValueError`/`TypeError`.
+
+    `.run.json` is a file on disk an operator can open and edit, so every field
+    is converted here, in one place, where a bad value can be caught and named.
+    """
+    m = marker or {}
+    last_heartbeat = m.get("last_heartbeat")
+    exit_code = m.get("exit_code")
+    return _MarkerFields(
+        pid=int(m["pid"]) if "pid" in m else None,
+        started_at=float(m["started_at"]) if "started_at" in m else None,
+        poll_interval=float(m.get("poll_interval") or POLL_INTERVAL_SECONDS),
+        ttl=float(m.get("ttl") or HEARTBEAT_TTL_SECONDS),
+        last_heartbeat=float(last_heartbeat) if last_heartbeat is not None else None,
+        exit_code=int(exit_code) if isinstance(exit_code, int) else None,
+    )
 
 
 def status_for(
@@ -404,7 +520,7 @@ def status_for(
 
     try:
         slugs, source = _planned_slugs(plan_path)
-    except (OSError, json.JSONDecodeError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         return TaskStatus(
             handle=handle,
             state=TaskState.UNKNOWN,
@@ -427,17 +543,36 @@ def status_for(
             if next(wiki_dir.rglob(f"{slug}.md"), None) is not None
         ]
 
+    # A marker that exists but cannot be read is reported, not ignored. Reading
+    # it as absent said `not_started` for a batch that plainly did something,
+    # and letting a hand-edited field raise turned an honest `unknown` into an
+    # infrastructure error.
+    marker_path = staging / RUN_MARKER
     marker = read_run_marker(plan_path)
-    pid = int(marker["pid"]) if marker and "pid" in marker else None
-    started_at = (
-        float(marker["started_at"]) if marker and "started_at" in marker else None
-    )
-    poll_interval = float((marker or {}).get("poll_interval") or POLL_INTERVAL_SECONDS)
-    ttl = float((marker or {}).get("ttl") or HEARTBEAT_TTL_SECONDS)
-    last_heartbeat = (marker or {}).get("last_heartbeat")
-    last_heartbeat = float(last_heartbeat) if last_heartbeat is not None else None
-    exit_code = (marker or {}).get("exit_code")
-    exit_code = int(exit_code) if isinstance(exit_code, int) else None
+    try:
+        if marker is None and marker_path.is_file():
+            raise ValueError("it is not a JSON object")
+        fields = _marker_fields(marker)
+    except (TypeError, ValueError) as exc:
+        return TaskStatus(
+            handle=handle,
+            state=TaskState.UNKNOWN,
+            total=len(slugs),
+            done=len(completed),
+            pending=tuple(pending),
+            completed=tuple(completed),
+            detail=(
+                f"the run marker {marker_path} could not be read: {exc} — inspect "
+                "it, or delete it to let a re-run resume from staging"
+            ),
+            extra={"source": source},
+        )
+    pid = fields.pid
+    started_at = fields.started_at
+    poll_interval = fields.poll_interval
+    ttl = fields.ttl
+    last_heartbeat = fields.last_heartbeat
+    exit_code = fields.exit_code
     recorded = (marker or {}).get("state")
     terminal = next(
         (s for s in (TaskState.FAILED, TaskState.CANCELLED) if s.value == recorded),

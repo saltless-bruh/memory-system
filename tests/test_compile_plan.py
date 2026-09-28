@@ -133,7 +133,9 @@ def test_failed_publish_compensates_and_leaves_no_pages(tmp_path: Path) -> None:
     import scripts.compile_plan as mod
 
     original = mod._regenerate_index
-    mod._regenerate_index = lambda: (_ for _ in ()).throw(RuntimeError("index blew up"))
+    mod._regenerate_index = lambda *_a: (_ for _ in ()).throw(
+        RuntimeError("index blew up")
+    )
     try:
         with pytest.raises(CompilePlanError, match="rolled back"):
             publish_batch(prepared)
@@ -280,12 +282,15 @@ def test_a_staging_directory_from_before_fingerprints_warns_rather_than_strands(
     plan = _write_plan(tmp_path, _plan_payload("alpha"))
     generated = _no_model(monkeypatch, tmp_path)
 
-    # An old marker: a pid and a start time, and no fingerprint at all.
+    # An old marker: a pid and a start time, and no fingerprint at all. The pid
+    # is one no process holds -- the old run is over. A live one would be a
+    # second writer, which `write_run_marker` now refuses.
     staging = staging_dir(plan)
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "alpha.md").write_text("---\nx: 1\n---\n\nold\n", encoding="utf-8")
     (staging / ".run.json").write_text(
-        json.dumps({"pid": 1, "started_at": 0.0, "plan": str(plan)}), encoding="utf-8"
+        json.dumps({"pid": 2**22, "started_at": 0.0, "plan": str(plan)}),
+        encoding="utf-8",
     )
 
     compile_plan(plan)

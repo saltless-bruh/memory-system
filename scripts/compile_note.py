@@ -452,11 +452,42 @@ def generate_page_body(
     return _validate_generated_body(generated)
 
 
-def _resolve_raw_source(path: str) -> tuple[Path, str]:
+class DraftOnlyRefusal(CompileNoteError):
+    """Publishing was refused because this vault's index is authored, not generated.
+
+    The compile lane is **draft-only** for now (owner ruling, 2026-09-26).
+    Publishing ends by regenerating `index.md`, and `gen_index` refuses to do
+    that on a vault whose catalogue is written by hand -- the reference vault
+    carries `summary:` on none of its pages -- because the render would replace
+    every authored description with a blank. That refusal is correct, so the
+    page is rolled back rather than published beside a stale index; what the
+    lane owes the caller is to say so plainly instead of "index regeneration
+    failed". A subclass, so every existing handler still treats it as the
+    semantic outcome it is.
+    """
+
+
+def _checkout(repo_root: Path | None) -> Path:
+    """The checkout a call works in: the one it was given, else this package's.
+
+    The default exists for the scripts' own command lines, which run inside
+    the checkout they ship in. A caller that pinned a checkout -- the CLI does,
+    through `cfg.require_repo()` -- must pass it: resolving `raw/`, the vault
+    and the protected-branch check against this file's location instead put a
+    plan in one tree and its pages in another.
+    """
+    return REPO_ROOT if repo_root is None else repo_root
+
+
+def _vault(repo_root: Path | None, wiki_dir: Path | None) -> Path:
+    return _checkout(repo_root) / "wiki" if wiki_dir is None else wiki_dir
+
+
+def _resolve_raw_source(path: str, repo_root: Path | None = None) -> tuple[Path, str]:
     supplied = Path(path)
     if supplied.is_absolute() or not supplied.parts or supplied.parts[0] != "raw":
         raise CompileNoteError("Source path must be relative beneath raw/")
-    repo = REPO_ROOT.resolve(strict=False)
+    repo = _checkout(repo_root).resolve(strict=False)
     raw_root = (repo / "raw").resolve(strict=False)
     resolved = (repo / supplied).resolve(strict=False)
     try:
@@ -475,11 +506,12 @@ def _safe_slug(title: str) -> str:
     return slug
 
 
-def _current_branch() -> str:
+def _current_branch(repo_root: Path | None = None) -> str:
+    """The branch checked out in the checkout the page will be written into."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=REPO_ROOT,
+            cwd=_checkout(repo_root),
             check=True,
             capture_output=True,
             text=True,
@@ -493,17 +525,20 @@ def _current_branch() -> str:
     return branch
 
 
-def _load_safe_wiki_pages() -> list[vault.Page]:
+def _load_safe_wiki_pages(wiki_dir: Path | None = None) -> list[vault.Page]:
     try:
-        return vault.load_pages(REPO_ROOT / "wiki")
+        return vault.load_pages(_vault(None, wiki_dir))
     except (OSError, ValueError) as exc:
         raise CompileNoteError("Existing wiki tree failed safety validation") from exc
 
 
 def _validate_wikilinks(
-    wikilinks: Sequence[str], note_slug: str, extra: Sequence[str] = ()
+    wikilinks: Sequence[str],
+    note_slug: str,
+    extra: Sequence[str] = (),
+    wiki_dir: Path | None = None,
 ) -> tuple[str, ...]:
-    known_slugs = {page.slug for page in _load_safe_wiki_pages()}
+    known_slugs = {page.slug for page in _load_safe_wiki_pages(wiki_dir)}
     known_slugs.add(note_slug)
     known_slugs.update(extra)
     validated: list[str] = []
@@ -621,17 +656,45 @@ def _restore(path: Path, snapshot: _FileSnapshot) -> None:
         _fsync_directory(path.parent)
 
 
-def _regenerate_index() -> None:
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "gen_index.py")],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if result.returncode != 0:
-        raise CompileNoteError("index regeneration failed")
+def _regenerate_index(wiki_dir: Path | None = None) -> None:
+    """Regenerate `index.md` for the vault the page was written into.
+
+    In-process, through `gen_index`'s tree-aware helpers, rather than by running
+    `scripts/gen_index.py`: that script only knows the vault beside its own file,
+    so a page written into a pinned checkout had the *package's* index
+    regenerated instead -- and its refusal came back as a bare exit code the
+    caller could only report as "index regeneration failed".
+
+    The same two gates the script applies, in the order that says the most
+    useful thing first: the authored-index guard (the reason this lane is
+    draft-only on the reference vault), then lint.
+    """
+    from scripts import gen_index
+
+    target = _vault(None, wiki_dir)
+    allowed, reason = gen_index.write_mode_allowed(target)
+    if not allowed:
+        raise DraftOnlyRefusal(
+            "Not published: the compile lane is draft-only on this vault. Its "
+            f"index.md is authored rather than generated ({reason}), and "
+            "publishing would have to regenerate it. The page was rolled back; "
+            "take the draft to a feature branch by hand and open a pull request."
+        )
+    try:
+        pages = vault.load_pages(target)
+    except ValueError as exc:
+        raise CompileNoteError(f"index regeneration failed: {exc}") from exc
+    lint = gen_index.collect_lint(pages, target)
+    if not lint.ok:
+        raise CompileNoteError(
+            "index regeneration failed: the vault has lint errors -- "
+            + "; ".join(lint.errors[:5])
+        )
+    rendered = gen_index.render_index(pages, target)
+    index_path = target / "index.md"
+    current = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    if current != rendered:
+        _atomic_write(index_path, rendered.encode("utf-8"))
 
 
 async def _close_backend(backend: RagBackend) -> None:
@@ -688,6 +751,8 @@ def prepare_page(
     wikilinks: Sequence[str] = (),
     skip_groundedness: bool = False,
     extra_known_slugs: Sequence[str] = (),
+    repo_root: Path | None = None,
+    wiki_dir: Path | None = None,
 ) -> PreparedPage:
     """Mint, retrieve, generate and judge one page. Writes nothing.
 
@@ -698,8 +763,12 @@ def prepare_page(
     `extra_known_slugs` lets a batch declare the slugs of pages that do not
     exist on disk yet, so article 1 may link to article 5 (the two-pass
     requirement) without `_validate_wikilinks` rejecting the target.
+
+    `repo_root` and `wiki_dir` name the checkout and vault the page is for; see
+    `_checkout` for why a caller with a pinned checkout must pass them.
     """
-    raw_path, canonical_path = _resolve_raw_source(path)
+    repo = _checkout(repo_root)
+    raw_path, canonical_path = _resolve_raw_source(path, repo)
     if category not in vault.VALID_TYPES:
         raise CompileNoteError(f"Invalid category: {category}")
     if department not in vault.VALID_DEPARTMENTS:
@@ -720,12 +789,12 @@ def prepare_page(
         or "\r" in title
     ):
         raise CompileNoteError("Title must be a nonempty string")
-    branch = _current_branch()
+    branch = _current_branch(repo)
     if branch in PROTECTED_BRANCHES:
         raise CompileNoteError(f"Refusing to compile on protected branch: {branch}")
 
     slug = _safe_slug(title)
-    wiki_path = REPO_ROOT / "wiki"
+    wiki_path = _vault(repo, wiki_dir)
     category_path = wiki_path / CATEGORY_PLURALS[category]
     if wiki_path.is_symlink() or category_path.is_symlink():
         raise CompileNoteError("Destination wiki category must not be a symlink")
@@ -744,17 +813,17 @@ def prepare_page(
         raise CompileNoteError("Destination page escapes its category") from exc
     if note_path.exists():
         raise CompileNoteError(f"Destination page already exists: {note_path}")
-    links = _validate_wikilinks(wikilinks, slug, extra_known_slugs)
+    links = _validate_wikilinks(wikilinks, slug, extra_known_slugs, wiki_path)
 
     try:
-        document = parse_file(raw_path, REPO_ROOT)
+        document = parse_file(raw_path, repo)
     except (OSError, ParserError) as exc:
         raise CompileNoteError(f"Could not parse raw source {canonical_path}") from exc
     if not document.full_text.strip():
         raise CompileNoteError("Parsed source contains no extractable text")
     metadata = generate_model_data(title.strip(), document)
 
-    known_slugs = {page.slug for page in _load_safe_wiki_pages()}
+    known_slugs = {page.slug for page in _load_safe_wiki_pages(wiki_path)}
     known_slugs.add(slug)
     known_slugs.update(extra_known_slugs)
 
@@ -783,9 +852,7 @@ def prepare_page(
             citations=citations,
         )
         candidate = vault.Page(note_path, frontmatter, content.split("---\n", 2)[-1])
-        lint = vault.lint_page(
-            candidate, raw_dir=REPO_ROOT / "raw", known_slugs=known_slugs
-        )
+        lint = vault.lint_page(candidate, raw_dir=repo / "raw", known_slugs=known_slugs)
         if not lint.ok:
             raise CompileNoteError(
                 "Candidate page failed vault lint: " + "; ".join(lint.errors)
@@ -894,15 +961,21 @@ def prepare_page(
     return PreparedPage(note_path, frontmatter, content)
 
 
-def publish_page(prepared: PreparedPage) -> Path:
-    """Write one prepared page and regenerate the index, rolling back on failure."""
+def publish_page(prepared: PreparedPage, *, wiki_dir: Path | None = None) -> Path:
+    """Write one prepared page and regenerate the index, rolling back on failure.
+
+    `wiki_dir` is the vault the page was prepared for, and its index is the one
+    regenerated. On a vault with an authored index this raises
+    `DraftOnlyRefusal` and leaves both files as they were.
+    """
     note_path, content = prepared.path, prepared.content
-    index_path = REPO_ROOT / "wiki" / "index.md"
+    target = _vault(None, wiki_dir)
+    index_path = target / "index.md"
     page_before = _snapshot(note_path)
     index_before = _snapshot(index_path)
     try:
         _atomic_write(note_path, content.encode("utf-8"))
-        _regenerate_index()
+        _regenerate_index(target)
     except BaseException as exc:
         try:
             _restore(note_path, page_before)
@@ -915,7 +988,9 @@ def publish_page(prepared: PreparedPage) -> Path:
             raise
         raise CompileNoteError("Compilation write transaction failed") from exc
 
-    print(f"Successfully compiled note to {note_path}")
+    # Prose goes to stderr. `snpmemory ... -o json` calls this in-process, and
+    # its stdout carries the JSON envelope and nothing else (scout/cli/render.py).
+    print(f"Successfully compiled note to {note_path}", file=sys.stderr)
     return note_path
 
 
@@ -928,8 +1003,11 @@ def compile_note(
     loc: str,
     wikilinks: Sequence[str] = (),
     skip_groundedness: bool = False,
+    repo_root: Path | None = None,
+    wiki_dir: Path | None = None,
 ) -> Path:
     """Compile and publish one page: prepare it, then write it."""
+    target = _vault(repo_root, wiki_dir)
     return publish_page(
         prepare_page(
             path,
@@ -939,7 +1017,10 @@ def compile_note(
             loc=loc,
             wikilinks=wikilinks,
             skip_groundedness=skip_groundedness,
-        )
+            repo_root=repo_root,
+            wiki_dir=target,
+        ),
+        wiki_dir=target,
     )
 
 

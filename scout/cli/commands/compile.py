@@ -5,7 +5,16 @@ database, and no running stack: it is a pure function of the source bytes, and
 that is what makes its output stable enough to commit and edit by hand.
 
 `compile-plan` is the WRITE half. It refuses to write anything until every
-article in the plan has minted, been generated, and been judged.
+article in the plan has minted, been generated, and been judged. It is
+**draft-only** on a vault whose `index.md` is authored (owner ruling,
+2026-09-26): the batch stages every page, then refuses to publish and says
+where the drafts are.
+
+Every command here resolves the checkout **and the vault** from the pinned
+configuration and hands both down. The scripts default to the tree they ship
+in, which is a different tree whenever the package is installed anywhere but
+the vault checkout -- and then the plan was bounded to one tree while its pages
+went to another.
 
 Every heavy import happens inside a function, so importing this module reads no
 environment and resolves no credential.
@@ -24,6 +33,17 @@ from scout.cli.result import CommandResult, ExitCode
 
 #: Injected by the dispatcher; never a user-facing flag.
 Injected = Annotated[Any, Parameter(parse=False)]
+
+
+def _vault_dir(cfg: Config) -> Path:
+    """The served vault under the pinned checkout, honouring `WIKI_DIR`.
+
+    The same resolution `wiki` and `verify-*` use, so every command agrees on
+    which pages "the vault" means.
+    """
+    from scout.cli.commands.wiki import _wiki_dir
+
+    return _wiki_dir(cfg)
 
 
 def plan_articles(
@@ -117,7 +137,7 @@ def compile_plan(
     from scripts.compile_plan import compile_plan as _compile_plan
 
     cfg: Config = config
-    repo = cfg.require_repo()
+    repo = cfg.require_repo().resolve()
     # Resolved before anything is spent or written. The staging directory is
     # derived from this path, so a plan path outside the checkout would take the
     # staging directory — and everything the batch writes — out with it.
@@ -131,11 +151,25 @@ def compile_plan(
             f"compile-plan writes pages to the vault from {plan}", flag="--confirm"
         )
 
+    wiki_dir = _vault_dir(cfg)
+
     if background:
         # A batch runs for minutes. A caller that blocks — an MCP client
         # especially — times out and retries, re-spending the quota the
         # staging checkpoint exists to protect. Hand back a handle instead.
-        return _start_background(plan_path, skip_groundedness, allow_uncertain)
+        #
+        # Every flag that changes what the run does travels with it. The
+        # confirmation guard above waives `--confirm` for a dry run, so a child
+        # that was not told it is one would publish with neither.
+        return _start_background(
+            plan_path,
+            repo=repo,
+            wiki_dir=wiki_dir,
+            dry_run=dry_run,
+            no_resume=no_resume,
+            skip_groundedness=skip_groundedness,
+            allow_uncertain=allow_uncertain,
+        )
 
     try:
         pages = _compile_plan(
@@ -144,6 +178,8 @@ def compile_plan(
             dry_run=dry_run,
             resume=not no_resume,
             allow_uncertain=allow_uncertain,
+            repo_root=repo,
+            wiki_dir=wiki_dir,
         )
     except (CompilePlanError, CompileNoteError) as exc:
         # The batch declined to write. That is a finding about the plan or the
@@ -165,25 +201,43 @@ def compile_plan(
 
 
 def _start_background(
-    plan_path: Path, skip_groundedness: bool, allow_uncertain: bool
+    plan_path: Path,
+    *,
+    repo: Path,
+    wiki_dir: Path,
+    dry_run: bool,
+    no_resume: bool,
+    skip_groundedness: bool,
+    allow_uncertain: bool,
 ) -> CommandResult:
     """Launch the batch detached and return immediately with its handle.
 
     `plan_path` arrives already resolved: the child process inherits no working
     directory guarantee, so a relative path here would give it a different
-    staging directory from the one this process reports on.
+    staging directory from the one this process reports on. The checkout and
+    vault are passed explicitly for the same reason.
     """
     import subprocess
     import sys
 
     from scout.cli.tasks import TaskState, status_for
 
-    existing = status_for(plan_path)
+    # Read with the vault, as `compile-status` reads it. Without it a batch that
+    # already published -- its staging removed -- reads `not_started`, and was
+    # relaunched only to spend its pre-flight and then fail on "Destination
+    # page already exists".
+    existing = status_for(plan_path, wiki_dir=wiki_dir, root=repo)
     if existing.state is TaskState.RUNNING:
         return CommandResult(
             exit_code=ExitCode.SEMANTIC_FAILURE,
             data={"handle": existing.handle, **existing.to_dict()},
             summary=f"already running (pid {existing.pid}) — nothing started",
+        )
+    if existing.state is TaskState.COMPLETE:
+        return CommandResult(
+            exit_code=ExitCode.SUCCESS,
+            data={"handle": existing.handle, **existing.to_dict()},
+            summary="already complete — every planned page exists; nothing started",
         )
 
     argv = [
@@ -192,11 +246,19 @@ def _start_background(
         "scripts.compile_plan",
         "--plan",
         str(plan_path),
+        "--repo-root",
+        str(repo),
+        "--wiki-dir",
+        str(wiki_dir),
     ]
-    if skip_groundedness:
-        argv.append("--skip-groundedness")
-    if allow_uncertain:
-        argv.append("--allow-uncertain")
+    for flag, wanted in (
+        ("--dry-run", dry_run),
+        ("--no-resume", no_resume),
+        ("--skip-groundedness", skip_groundedness),
+        ("--allow-uncertain", allow_uncertain),
+    ):
+        if wanted:
+            argv.append(flag)
 
     log_path = plan_path.with_suffix(".log")
     with log_path.open("ab") as log:
@@ -206,9 +268,10 @@ def _start_background(
             stderr=log,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            cwd=repo,
         )
 
-    status = status_for(plan_path)
+    status = status_for(plan_path, wiki_dir=wiki_dir, root=repo)
     return CommandResult(
         exit_code=ExitCode.SUCCESS,
         data={
@@ -217,6 +280,7 @@ def _start_background(
             "log": log_path.as_posix(),
             "total": status.total,
             "state": "starting",
+            "dry_run": dry_run,
         },
         summary=(
             f"started {status.total} article(s) in the background — "
@@ -231,7 +295,6 @@ def compile_status(
     config: Injected = None,
 ) -> CommandResult:
     """Report a batch's progress, computed from the plan and its staging."""
-    from scout import vault
     from scout.cli.errors import input_error
     from scout.cli.tasks import TaskState, status_for
 
@@ -241,7 +304,7 @@ def compile_status(
     # The same anchoring `compile_plan` used, so the handle it returned resolves
     # to the same batch here — including when the two calls happen in different
     # directories, which for an MCP client is the normal case.
-    status = status_for(Path(handle), wiki_dir=vault.WIKI_DIR, root=repo)
+    status = status_for(Path(handle), wiki_dir=_vault_dir(cfg), root=repo)
 
     # A handle that resolves to no readable plan is a bad argument, not a batch
     # in a bad state, and it is the one answer this command used to get wrong:
@@ -286,9 +349,14 @@ def compile_cancel(
     config: Injected = None,
 ) -> CommandResult:
     """Ask a running batch to stop at its next article boundary."""
-    from scout import vault
     from scout.cli.errors import input_error
-    from scout.cli.tasks import TaskState, request_cancel, resolve_plan_path, status_for
+    from scout.cli.tasks import (
+        TaskState,
+        process_is_alive,
+        request_cancel,
+        resolve_plan_path,
+        status_for,
+    )
 
     cfg: Config = config
     repo = cfg.require_repo()
@@ -300,7 +368,7 @@ def compile_cancel(
             handle=plan_path.as_posix(),
         )
 
-    status = status_for(plan_path, wiki_dir=vault.WIKI_DIR, root=repo)
+    status = status_for(plan_path, wiki_dir=_vault_dir(cfg), root=repo)
 
     # Cancelling something that already stopped is a no-op that says so. Making
     # it an error would push a caller into treating a finished batch as a fault.
@@ -313,6 +381,34 @@ def compile_cancel(
                 "state": status.state.value,
             },
             summary=f"already {status.state.value} — nothing to cancel",
+        )
+    # A live process with an expired heartbeat is `stalled`, and it is the batch
+    # an operator most needs to stop: if it wakes it goes on toward publish.
+    # Refusing here with "no process is working on this batch" contradicted
+    # the status detail and wrote nothing for the process to find. The request
+    # is written; what it can and cannot do is said plainly.
+    hung = (
+        status.state is TaskState.STALLED
+        and status.pid is not None
+        and process_is_alive(status.pid)
+    )
+    if hung:
+        request_cancel(plan_path)
+        return CommandResult(
+            exit_code=ExitCode.SUCCESS,
+            data={
+                "handle": status.handle,
+                "status": "cancelling",
+                "state": status.state.value,
+                "pid": status.pid,
+            },
+            summary=(
+                f"cancellation requested — process {status.pid} is alive but "
+                "has finished no article within its heartbeat ttl, so it may be "
+                "hung. It will stop at its next article boundary if it resumes; "
+                f"if it never does, stop it yourself (kill {status.pid}) and "
+                "re-run to resume from staging"
+            ),
         )
     if status.state is not TaskState.RUNNING:
         return CommandResult(

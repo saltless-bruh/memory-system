@@ -292,6 +292,9 @@ def test_compile_plan_refuses_to_write_without_confirmation(
         def require_repo(self) -> Path:
             return tmp_path
 
+        def get(self, _key: str) -> str | None:
+            return None
+
     monkeypatch.chdir(tmp_path)
     with pytest.raises(CliError) as caught:
         compile_plan("some-plan.json", config=_Cfg())
@@ -338,6 +341,9 @@ def test_compile_status_reports_a_terminal_failure_as_a_finding(
         def require_repo(self) -> Path:
             return tmp_path
 
+        def get(self, _key: str) -> str | None:
+            return None
+
     monkeypatch.chdir(tmp_path)
     result = compile_status("plan.json", config=_Cfg())
 
@@ -362,6 +368,9 @@ def test_compile_status_refuses_a_handle_that_names_no_batch(
     class _Cfg:
         def require_repo(self) -> Path:
             return tmp_path
+
+        def get(self, _key: str) -> str | None:
+            return None
 
     monkeypatch.chdir(tmp_path)
     with pytest.raises(CliError) as caught:
@@ -413,6 +422,9 @@ def test_compile_status_separates_an_absent_batch_from_an_unstarted_one(
         def require_repo(self) -> Path:
             return tmp_path
 
+        def get(self, _key: str) -> str | None:
+            return None
+
     monkeypatch.chdir(tmp_path)
     result = compile_status("plan.json", config=_Cfg())
 
@@ -458,6 +470,9 @@ class _RepoCfg:
 
     def require_repo(self) -> Path:
         return self._root
+
+    def get(self, _key: str) -> str | None:
+        return None
 
 
 def test_cancelling_a_running_batch_records_the_request_without_claiming_it_stopped(

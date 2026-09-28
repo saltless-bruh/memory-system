@@ -153,7 +153,7 @@ it is reached over the network and launches nothing locally. (The name once
 belonged to a local stdio server, deleted in leaf-4.3; the remote server took
 it in leaf-4.4, and an older config naming that server `scout` has the old
 entry removed rather than kept alongside.)
-Installation copies seven skills to `.opencode/skills/` and governing files
+Installation copies every package skill (ten today) to `.opencode/skills/` and governing files
 to `.opencode/snp/`; config `instructions` loads rules and instructions.
 Workflow files do not automatically register slash commands or a plugin.
 The default portable installation and other client exporters retain their

@@ -146,7 +146,7 @@ MCP, with no local `snpmemory` server:
 }
 ```
 
-Installation copies seven package skills into `.opencode/skills/` and SNP
+Installation copies every package skill (ten today) into `.opencode/skills/` and SNP
 rules, instructions, and reference workflows into `.opencode/snp/`.
 `opencode.json` loads the rule/instruction files through `instructions`.
 Copying a portable manifest or workflows does not automatically register an

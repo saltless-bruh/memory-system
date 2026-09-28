@@ -81,11 +81,13 @@ runtime:
 OpenCode uses `mcp` rather than the Claude-style `mcpServers` key and needs no
 `mcp-remote` bridge.
 
-The installer copies seven package skills into `.opencode/skills/`. SNP
-rules, instructions, and reference workflows go to `.opencode/snp/`; config
-`instructions` loads the rule/instruction files. The skills are
-`snp-bootstrap-system`, `snp-compile-wiki`, `snp-export-mcp`,
-`snp-ingest-raw-data`, `snp-query-wiki`, `snp-read-wiki-page`, and
+The installer copies every package skill into `.opencode/skills/` — it globs
+`packages/snp-agent/skills/snp-*`, so the set follows the package. SNP rules,
+instructions, and reference workflows go to `.opencode/snp/`; config
+`instructions` loads the rule/instruction files. The ten skills today are
+`snp-bootstrap-system`, `snp-compile-batch`, `snp-compile-wiki`,
+`snp-export-mcp`, `snp-ingest-raw-data`, `snp-plan-articles`,
+`snp-query-wiki`, `snp-read-wiki-page`, `snp-verify-page`, and
 `snp-verify-vault`.
 
 These files do not automatically register an OpenCode plugin schema or

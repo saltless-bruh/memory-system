@@ -80,9 +80,10 @@ uv run python scripts/verify_addresses.py
 
 Verifier exit `0` means all addresses pass, `1` means semantic `FAIL`/`DRIFT`,
 and `2` means infrastructure/configuration failure. Exit `2` is not drift and
-must never trigger healing. CI uses
-`uv run python scripts/ci_address_gate.py --mode pr` for its one-pass,
-post-verified, rollback-capable remediation flow.
+must never trigger healing. Nothing heals automatically any more: the CI
+remediation flow (`scripts/ci_address_gate.py`) was removed on 2026-09-06
+(29f1f50), and no workflow runs `verify-addresses`. Run it at a terminal and
+repair by hand.
 
 ## Troubleshooting
 

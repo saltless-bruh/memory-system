@@ -112,6 +112,19 @@ HISTORICAL_MARKERS = (
 )
 
 
+#: Markers that excuse ONLY the sentence they sit in. "was removed on
+#: 2026-09-06", "since-removed" and "The removed closed-loop gate" are how the
+#: docs record the auto-heal subsystem's removal, and such a sentence is not
+#: presenting the surface as live. Unlike HISTORICAL_MARKERS they never turn a
+#: whole block into history: "The gate was removed. CI still runs it nightly."
+#: must still flag its second sentence.
+SENTENCE_ONLY_MARKERS = (
+    "removed",
+    # A decision heading closed with a date ("closed 2026-09-06 as moot").
+    "as moot",
+)
+
+
 def _mentions(name: str, text: str) -> bool:
     """`name` appears as a whole token, not as the stem of a longer one.
 
@@ -165,7 +178,7 @@ def _stale_mentions(text: str) -> list[tuple[int, list[str]]]:
             marked = any(marker in sentence for marker in HISTORICAL_MARKERS)
             if marked and index == 0:
                 break
-            if marked:
+            if marked or any(marker in sentence for marker in SENTENCE_ONLY_MARKERS):
                 continue
             named = sorted(n for n in RETIRED_SURFACES if _mentions(n, sentence))
             if named:
@@ -260,3 +273,14 @@ def test_no_shipped_doc_shows_wiki_search_returning_a_bare_list(
         'returns {"results": [...], "returned": N, "suppressed_as_seen": N, '
         f'"has_more": bool}}:\n' + "\n".join(offenders)
     )
+
+
+def test_a_removal_sentence_excuses_only_itself() -> None:
+    """Recording a removal is history; the sentence after it is not."""
+    assert not _stale_mentions(
+        "The closed-loop gate (`scripts/ci_address_gate.py`) was removed on 2026-09-06."
+    )
+    assert _stale_mentions(
+        "The gate was removed. CI still runs `scripts/ci_address_gate.py` nightly."
+    )
+    assert _stale_mentions("CI uses `scripts/ci_address_gate.py --mode pr` to heal.")

@@ -266,17 +266,16 @@ no chunks at all. A declared `loc` that no longer matches is reported as an
 advisory `note:` and does not fail the gate.
 
 Its exit codes are total: `0` means all addresses pass, `1` means semantic
-`FAIL`/`DRIFT`, and `2` means infrastructure or configuration failure. The
-closed-loop CI entry point is:
+`FAIL`/`DRIFT`, and `2` means infrastructure or configuration failure. Exit `2`
+is never a content finding and never a reason to edit a page.
 
-```bash
-uv run python scripts/ci_address_gate.py --mode pr
-```
-
-Exit `2` never triggers mutation. Exit `1` permits one scoped heal pass on an
-eligible branch, followed by address and vault re-verification. Failed healing
-rolls the wiki back. Scheduled mode starts from a protected base, creates a
-`heal/*` branch, and still requires human PR review.
+Nothing runs this check automatically, and nothing repairs a drifted address.
+The closed-loop gate (`scripts/ci_address_gate.py`), its heal step and the
+`auto-healer.yaml` workflow were removed on 2026-09-06 (29f1f50). CI in
+`.gitea/workflows/` is `checks.yaml` (the offline suite, lint, format and type
+check) and `security.yaml` (the secret scans); neither runs a vault, address
+or groundedness verification. On exit `1`, re-mint the address or revise the
+page on a feature branch and hand it to human PR review.
 
 ## Documentation
 

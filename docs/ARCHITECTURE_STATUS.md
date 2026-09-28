@@ -94,9 +94,12 @@ not an operations manual.
 - Offline tests run with sockets disabled. Live PostgreSQL and authenticated
   HTTP tests carry the `integration` marker.
 - Address verification returns `0` for PASS, `1` for semantic drift/failure,
-  and `2` for infrastructure/configuration failure. The CI gate never heals on
-  `2`, performs at most one scoped heal pass on `1`, re-verifies, and rolls back
-  an unsuccessful heal.
+  and `2` for infrastructure/configuration failure. It is an operator command:
+  no CI workflow runs it, or `verify-vault`, `verify-groundedness` or `check`.
+  The closed-loop gate that healed on `1` (`scripts/ci_address_gate.py`,
+  `auto-healer.yaml`) was removed on 2026-09-06 (29f1f50), so vault health is
+  checked nowhere automatically. `.gitea/workflows/` holds `checks.yaml` and
+  `security.yaml` only.
 
 ## Historical and reference documents
 
@@ -160,11 +163,22 @@ current index, which is not English-restricted by a local model.
 today, so there is nothing left to decide. The multilingual-adoption question
 would resurface only if a future change reintroduced one.
 
-### OD-2 — the auto-healer's push credential (opened 2026-08-26, owner decision)
+### OD-2 — the auto-healer's push credential (opened 2026-08-26, closed 2026-09-06 as moot)
+
+**Resolution.** Moot. `auto-healer.yaml`, the only workflow that used
+`secrets.BOT_TOKEN`, was removed with the retired auto-heal subsystem on 2026-09-06
+(29f1f50). Neither remaining workflow reads that secret, so nothing in the
+repository needs a push credential. What is left is housekeeping outside the
+repository: if a `BOT_TOKEN` was ever issued in Gitea, revoke it rather than
+narrow it, since no consumer remains.
+
+**Historical record, prior to the removal.** The analysis below describes the
+deleted workflow's source and is kept for the audit trail; the line numbers
+refer to that file as it stood on 2026-08-26.
 
 **The mitigation first proposed here would not have mitigated anything.** The
 plan called for job-level `permissions:`, which governs the **ambient Actions
-token**. Every privileged operation in `auto-healer.yaml` uses
+token**. Every privileged operation in the since-removed `auto-healer.yaml` used
 `secrets.BOT_TOKEN` instead:
 
 | Line | Job | Use |
@@ -213,9 +227,9 @@ and no local image exists. The exposure is **latent** — assembled and waiting 
 `docker compose --profile runner up` — not active.
 
 *What was done:* the chain that made the socket reachable by unattended remote
-code was removed. `auto-healer.yaml` no longer pipes an unpinned installer into a
-shell, every action is pinned to a commit, and every image and build input is
-pinned. Remote code no longer changes underneath the runner between Sundays.
+code was removed. The since-removed `auto-healer.yaml` stopped piping an
+unpinned installer into a shell before it was deleted, every action is pinned to
+a commit, and every image and build input is pinned.
 
 *What was not done:* the socket stays. `act_runner` requires it to launch job
 containers. The alternatives are all **runner-host** changes rather than
@@ -224,9 +238,11 @@ repository ones — rootless Podman exposing a user socket
 path, and Kaniko is not: Google archived it in June 2025.
 
 *Revisit when:* the runner is actually brought up, or the runner ever executes a
-workflow from an untrusted branch. Today `pr-heal` treats the PR checkout as
-data and never executes anything from it; that property is what makes the
-current arrangement defensible, and losing it changes this decision.
+workflow from an untrusted branch. The remaining workflows run on
+`ubuntu-latest`, and `security.yaml` runs its scanner from the trusted base
+branch and treats the PR checkout as data; that property is what makes the
+current arrangement defensible, and losing it changes this decision. (The
+removed `pr-heal` job relied on the same property.)
 
 ### OD-4 — production-readiness release gate (opened 2026-08-26, owner decision)
 
@@ -249,7 +265,7 @@ from later product-scope work:
 | content/judge budget | deferred product decision — see T4.1 |
 | derived-asset location and retention | deferred product decision — see T4.3 |
 | source-health thresholds and quarantine policy | deferred product decision — see Tier 5 |
-| `BOT_TOKEN` scopes and runner-host posture | deferred runner decision — see OD-2 and OD-3; runner remains disabled |
+| `BOT_TOKEN` scopes and runner-host posture | `BOT_TOKEN` moot since its only consumer was removed (OD-2); runner-host posture deferred (OD-3); runner remains disabled |
 
 **Status: EXECUTION IN PROGRESS.** The owner approved the clean commit/tag,
 isolated staging, backup/restore drill, candidate build, controlled restart,
@@ -267,7 +283,9 @@ Active instructions must not describe:
 - DOCX or an unimplemented central ingest REST endpoint as supported;
 - caller scope as `roles`, `team`, or a magic `all` authority;
 - verifier exit `2` as semantic drift or as permission to mutate;
-- direct healer use as the closed-loop CI gate;
+- a healer, a closed-loop address gate, or any CI job that runs vault,
+  address or groundedness verification — all of that was removed on
+  2026-09-06, and no workflow runs those checks today;
 - a similarity/relevance score threshold for address verification — no such
   threshold exists in code, and `RagChunk.score` is an RRF weight capped near
   `0.033`, so none can be stated as a similarity;

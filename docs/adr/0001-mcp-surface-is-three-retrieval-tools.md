@@ -1,6 +1,13 @@
 # ADR-0001 — The MCP surface is three retrieval tools
 
-- **Status:** Accepted · 2026-09-15
+- **Status:** Accepted · 2026-09-15 · **premise corrected 2026-09-28:** the
+  "CI only" row below assumed CI checks whole-vault health. None does, and none
+  did when this was decided: the auto-healer workflow that ran the address gate
+  was removed on 2026-09-06 (29f1f50), and `.gitea/workflows/` holds only
+  `checks.yaml` (offline suite) and `security.yaml` (secret scans, the same
+  scanner `verify-secrets` wraps). `verify-vault`, `verify-addresses`,
+  `verify-groundedness` and `check` are operator commands that nothing runs
+  automatically. The surface decision stands; the row's rationale does not.
 - **Deciders:** repository owner
 - **Supersedes:** `REMEDIATION C2a` (7 tools), `CLI_MCP_VOCABULARY §4` (10 tools)
 

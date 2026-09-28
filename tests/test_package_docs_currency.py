@@ -48,28 +48,35 @@ def _package_texts() -> list[str]:
 ACTIVE_TEXTS = (*ACTIVE_DOCS, *_package_texts())
 
 
-def _paragraphs(relative: str) -> list[tuple[int, str]]:
-    """Blank-line-separated paragraphs with the line each starts on.
+#: A line that starts a unit of its own even without a blank line before it:
+#: a list item, or a table row.
+_BLOCK_START = re.compile(r"^(?:[-*] |\d+\. |\|)")
 
-    Paragraphs rather than lines, because the honest sentence and its marker
-    are routinely split across a wrap: "The local server that did / both was
+
+def _paragraphs(relative: str) -> list[tuple[int, str]]:
+    """Paragraphs, list items and table rows, with the line each starts on.
+
+    Units rather than lines, because the honest sentence and its marker are
+    routinely split across a wrap: "The local server that did / both was
     deleted on 2026-09-24" names the server on one line and its deletion on
-    the next.
+    the next. Units rather than blank-line paragraphs, because a bullet list
+    is one blank-line paragraph, and a "deleted" in one bullet would excuse
+    a stale claim three bullets further down.
     """
     text = (REPO_ROOT / relative).read_text(encoding="utf-8")
-    paragraphs: list[tuple[int, str]] = []
+    units: list[tuple[int, str]] = []
     start, buffer = 1, []
     for number, line in enumerate(text.splitlines(), start=1):
+        if buffer and (not line.strip() or _BLOCK_START.match(line)):
+            units.append((start, "\n".join(buffer)))
+            buffer = []
         if line.strip():
             if not buffer:
                 start = number
             buffer.append(line)
-        elif buffer:
-            paragraphs.append((start, "\n".join(buffer)))
-            buffer = []
     if buffer:
-        paragraphs.append((start, "\n".join(buffer)))
-    return paragraphs
+        units.append((start, "\n".join(buffer)))
+    return units
 
 
 # ── the deleted local stdio server ──────────────────────────────────────────
@@ -197,4 +204,48 @@ def test_no_active_text_calls_source_extraction_deferred(relative: str) -> None:
     assert not offenders, (
         "wiki_quote has served source passages since 2026-09-21:\n"
         + "\n".join(offenders)
+    )
+
+
+# ── the removed healer and its CI gate ──────────────────────────────────────
+
+_REFERENCED_FILE = re.compile(
+    r"(?<![\w./-])((?:scripts|\.gitea/workflows)/[\w.-]+\.(?:py|ya?ml|sh))"
+)
+
+
+@pytest.mark.parametrize("relative", ACTIVE_TEXTS)
+def test_every_script_or_workflow_an_active_text_names_exists(relative: str) -> None:
+    """`scripts/ci_address_gate.py` and `auto-healer.yaml` were deleted on
+    2026-09-06 (29f1f50) and README, the runbook's CI table and ARCHITECTURE_
+    STATUS kept presenting them as the CI entry point. A paragraph may still
+    name a removed file when it says so."""
+    # A skill's `scripts/` is its own directory, not the repository's.
+    bases = (REPO_ROOT, (REPO_ROOT / relative).parent)
+    offenders = []
+    for start, para in _paragraphs(relative):
+        if re.search(r"\b(removed|deleted)\b", para, re.IGNORECASE):
+            continue
+        for match in _REFERENCED_FILE.finditer(para):
+            if not any((base / match.group(1)).exists() for base in bases):
+                offenders.append(f"{relative}:{start}: {match.group(1)}")
+    assert not offenders, "active text names files that do not exist:\n" + (
+        "\n".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("relative", ACTIVE_TEXTS)
+def test_no_active_text_presents_the_healer_as_current(relative: str) -> None:
+    pattern = re.compile(
+        r"auto-healer\.yaml|heal pass|healer pass|heal/\*|run a healer",
+        re.IGNORECASE,
+    )
+    offenders = [
+        f"{relative}:{start}: {para.splitlines()[0].strip()[:80]}"
+        for start, para in _paragraphs(relative)
+        if pattern.search(para)
+        and not re.search(r"\b(removed|deleted)\b", para, re.IGNORECASE)
+    ]
+    assert not offenders, "the auto-heal subsystem was removed 2026-09-06:\n" + (
+        "\n".join(offenders)
     )

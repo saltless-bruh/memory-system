@@ -67,8 +67,10 @@ def test_no_shipped_doc_names_a_retired_surface(relative: str) -> None:
     """Flag only lines that present a retired surface as current.
 
     Matches are anchored on word boundaries so a retired name never fires as
-    a false positive inside an unrelated, currently-live token — e.g.
-    `auto-heal` must not match `auto-healer.yaml`, a live CI config file.
+    a false positive inside a longer token — e.g. `auto-heal` does not match
+    `auto-healer.yaml`. That workflow was removed on 2026-09-06 along with the
+    rest of the auto-heal subsystem; `test_package_docs_currency.py` checks
+    that no active doc presents it, or any other named script, as present.
     """
     offenders: list[str] = []
     for number, line in enumerate(

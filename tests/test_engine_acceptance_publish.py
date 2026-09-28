@@ -176,3 +176,46 @@ def test_latency_summary_uses_nearest_rank_percentiles() -> None:
 
     assert summary["method"] == "nearest-rank"
     assert metric == {"n": 10, "min": 1.0, "p50": 5.0, "p95": 10.0, "max": 10.0}
+
+
+def test_probe_commits_carry_a_bot_identity_not_a_person(
+    origin_and_clone: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's commits are authored by the gate, never by a personal mailbox."""
+    origin, clone = origin_and_clone
+    monkeypatch.setattr(ea, "VAULT_BRANCH", "main")
+    monkeypatch.setattr(ea, "VAULT_SUBDIR", "wiki")
+    monkeypatch.delenv("SNP_GATE_GIT_NAME", raising=False)
+    monkeypatch.delenv("SNP_GATE_GIT_EMAIL", raising=False)
+
+    ea._publish(clone, "probe.md", "# probe\n", "test(w2): probe")
+
+    author = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>", "main"],
+        cwd=origin,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert author == "snp-acceptance-gate <snp-gate@localhost>"
+
+
+def test_probe_commit_identity_can_be_set_from_the_environment(
+    origin_and_clone: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin, clone = origin_and_clone
+    monkeypatch.setattr(ea, "VAULT_BRANCH", "main")
+    monkeypatch.setattr(ea, "VAULT_SUBDIR", "wiki")
+    monkeypatch.setenv("SNP_GATE_GIT_NAME", "ci-gate")
+    monkeypatch.setenv("SNP_GATE_GIT_EMAIL", "ci-gate@example.invalid")
+
+    ea._publish(clone, "probe.md", "# probe\n", "test(w2): probe")
+
+    author = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>", "main"],
+        cwd=origin,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert author == "ci-gate <ci-gate@example.invalid>"

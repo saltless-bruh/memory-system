@@ -98,8 +98,12 @@ uv run ruff check . && uv run ruff format --check .   # line-length 88
 uv run mypy scout scripts                             # strict
 ```
 
-The agent package is mirrored into `.agent/` and `.claude/`. Edit
-`packages/snp-agent/` and sync — never hand-edit a mirror:
+`packages/snp-agent/` is the source of truth for everything it ships; `.agent/`
+and `.claude/` are mirrors the sync generates from it. Edit the package and
+sync — never hand-edit a mirror. The one exception is the repo-local layer the
+package does not ship (`superpowers-*` and the `repoLocal` instructions in
+`plugin.json`). It is edited in `.agent/`; the sync then copies its
+instructions, never the `superpowers-*` files, into `.claude/`:
 
 ```bash
 python3 scripts/export_agent_bundle.py --sync

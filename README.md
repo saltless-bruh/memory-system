@@ -290,10 +290,15 @@ page on a feature branch and hand it to human PR review.
   its findings are factual, its design is not implemented
 - [`packages/snp-agent/`](packages/snp-agent): the portable distribution — an
   **Agent Plugins 1.0.0** plugin (`plugin.json` + `mcp.json` + `skills/`).
-  `.agent/` is authoritative; `.claude/` and `packages/snp-agent/` are **tracked
-  byte-for-byte mirrors** of the files they share with it, enforced by
-  `tests/test_agent_package_sync.py` and `tests/test_docs_contract.py`. Edit
-  `.agent/`, then mirror — a one-tree edit fails the suite.
+  **It is the source of truth for every file it ships.** `.agent/` and
+  `.claude/` are **tracked byte-for-byte mirrors** generated from it, enforced
+  by `tests/test_agent_package_sync.py` and `tests/test_docs_contract.py`. Edit
+  the package, then run `python3 scripts/export_agent_bundle.py --sync`, which
+  copies it into `.agent/` and the four contract subtrees into `.claude/`; an
+  edit made only in a mirror is overwritten by the next sync, and a one-tree
+  edit fails the suite. (`--direction agent-to-packages` copies the declared
+  files the other way; it is a recovery path for an edit already made in
+  `.agent/`, not the workflow.)
 
   The trees are not identical, and the difference is a decision rather than an
   accident: the `superpowers-*` layer is **repo-local**. It is this repository's
@@ -305,8 +310,17 @@ page on a feature branch and hand it to human PR review.
   `unlazy` gate discipline instead, and loading both put two conflicting
   completion protocols into one session. It remains in `.agent/`, which is what
   every other agent client reads, and the mirror test enforces the absence in
-  both directions so it cannot widen into real drift. `plugin.json` / `mcp.json` live only in the package — `.agent/` is
-  a working contract, not a plugin — while `package.json` is shared.
+  both directions so it cannot widen into real drift. That repo-local layer,
+  and the development instructions `plugin.json` lists under `repoLocal`, are
+  the only files edited in `.agent/` directly, because the package does not
+  ship them. `plugin.json`, `mcp.json` and `package.json` are synced into
+  `.agent/` byte-for-byte but not into `.claude/`, since they describe the
+  distribution rather than a client's contract.
+
+  Claude Code loads `CLAUDE.md`, `.claude/rules/` and `.claude/skills/` on its
+  own. The mirrored `.claude/instructions/` and `.claude/workflows/` are kept
+  for byte parity with every other client; Claude Code does not load them by
+  itself, so a rule that matters to a Claude session belongs in `rules/`.
 
 Documents explicitly marked historical or superseded preserve design context;
 they are not deployment instructions.

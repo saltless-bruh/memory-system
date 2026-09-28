@@ -249,3 +249,36 @@ def test_no_active_text_presents_the_healer_as_current(relative: str) -> None:
     assert not offenders, "the auto-heal subsystem was removed 2026-09-06:\n" + (
         "\n".join(offenders)
     )
+
+
+# ── the agent package's source of truth ─────────────────────────────────────
+
+_AGENT_DIR_AUTHORITATIVE = re.compile(
+    r"`\.agent/` is (the )?authoritative"
+    r"|edit `\.agent/`, then mirror"
+    r"|live only in the package",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "README.md",
+        "CLAUDE.md",
+        "docs/ARCHITECTURE_STATUS.md",
+        "tests/test_agent_package_sync.py",
+    ),
+)
+def test_package_source_of_truth_is_named_consistently(relative: str) -> None:
+    """`export_agent_bundle.py --sync` copies packages/snp-agent -> .agent/ ->
+    .claude/. A text naming `.agent/` as the place to edit sends the editor
+    to the tree the sync overwrites."""
+    text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+    offenders = [m.group(0) for m in _AGENT_DIR_AUTHORITATIVE.finditer(text)]
+    assert not offenders, f"{relative}: {offenders}"
+
+
+def test_readme_names_the_package_as_the_edit_point() -> None:
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "export_agent_bundle.py --sync" in text

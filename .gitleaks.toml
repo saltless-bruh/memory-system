@@ -8,6 +8,15 @@ id = "snp-openai-compatible-token"
 description = "OpenAI-compatible token with a 20-character or longer suffix"
 regex = '''\bsk-[A-Za-z0-9_-]{20,}\b'''
 
+# The default ruleset covers AWS keys, JWTs and private-key blocks, but not the
+# Gitea access token this stack itself uses. Kept in step with the "Gitea access
+# token" pattern in scripts/scan_secrets.py (a test compares them): 40 hex is
+# also every commit SHA, so it counts only in credential context.
+[[rules]]
+id = "snp-gitea-access-token"
+description = "Gitea access token assigned to a token key, in a token header, or as a URL password"
+regex = '''(?i:\b[a-z0-9_]*token[a-z0-9_]*["']?\s*[:=]\s*["']?)[0-9a-f]{40}\b|(?i:\bauthorization:\s*token\s+)[0-9a-f]{40}\b|://[^\s/:@]+:[0-9a-f]{40}@'''
+
 # Placeholder exceptions require both an approved example path and a visibly fake
 # value. There are no fixture, password-name, or repository-wide exemptions.
 [allowlist]

@@ -93,3 +93,9 @@ wiki/.obsidian/
 # Throwaway runtime probe scripts from rehearsal diagnostics. Kept out of the
 # tree and out of the linter's scope: they are scratch evidence, not source.
 .runtime-feature-audit/
+
+# Private by decision (owner, 2026-09-29). raw/rehearsal/ holds verbatim
+# captures of private vault pages taken during the OpenCode rehearsal; the
+# capture is indexed for `infra` only (raw/.acl.yaml) and must never reach the
+# public `origin`. A checkout therefore does not reproduce it, by design.
+raw/rehearsal/

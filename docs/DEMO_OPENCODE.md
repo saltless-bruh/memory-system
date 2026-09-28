@@ -196,11 +196,15 @@ config.update({
         # still on the old key is not silently denied. An entry that matches
         # nothing is harmless -- one that is missing falls through to
         # `"*": "deny"` and the agent loses retrieval with no error naming why.
+        # All three retrieval tools are listed, `wiki_quote` included: without
+        # it the agent can find and read a page but is denied its sources.
         "*": "deny",
         "snpmemory_wiki_search": "allow",
         "snpmemory_wiki_read": "allow",
+        "snpmemory_wiki_quote": "allow",
         "scout_wiki_search": "allow",
         "scout_wiki_read": "allow",
+        "scout_wiki_quote": "allow",
         "skill": {
             "*": "deny",
             "snp-query-wiki": "allow",

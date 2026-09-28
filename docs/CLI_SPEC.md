@@ -161,7 +161,7 @@ are generated from the same declarations the CLI already publishes.
 and reachable only on request. Resolution order, applied by every command that
 could ask a question:
 
-1. **An explicit argument wins.** `--client cursor`, `--config-path …`, `--yes`
+1. **An explicit argument wins.** `--client cursor`, `--out …`, `--yes`
    — if the answer was supplied, nothing is asked, in any environment.
 2. **A sensible default is used** where one genuinely exists.
 3. **`--interactive` prompts** — and only then. Without the flag the command
@@ -176,10 +176,15 @@ could ask a question:
 * Destructive actions require `--yes`; without it, exit `5` and name the flag in
   the `hint`. Do not proceed silently — an agent should hit a wall, not a trigger.
 
-**Worked example — `snpmemory mcp-config`.** It never prompts unless
-`--interactive` is explicit, and its non-interactive path requires `--client`
-or `--all`. The command delegates to `scripts/export_mcp_config.py`, so config
-generation and safe merge behavior have one implementation.
+**Worked example — `snpmemory mcp-config`.** It has no prompt at all, so it
+needs no `--interactive`: every answer is a flag. `--client` is required, one
+of `cursor`, `vscode`, `claude`, `gemini`, `opencode`; without it the command
+exits `3` naming the argument. By default it prints the configuration for the
+one `snpmemory` server and writes nothing. `--out <path>` merges it into that
+file instead, keeping every other server already there; when the file exists,
+the merge also needs `--confirm`, or the command exits `5` and changes nothing.
+The command delegates to `scripts/export_mcp_config.py`, so config generation
+and safe merge behavior have one implementation.
 
 ---
 

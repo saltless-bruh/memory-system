@@ -280,12 +280,15 @@ def test_compile_status_emits_its_declared_shape(
     )
     write_run_marker(plan, pid=2**22)
 
-    class _Cfg:
-        def require_repo(self) -> Path:
-            return tmp_path
+    from scout.cli.config import Config
+    from scout.cli.registry import Prerequisite
 
+    # A real Config, not a duck-typed stand-in: compile_status resolves the
+    # vault through the same `_wiki_dir(cfg)` the other commands use, and a
+    # fake that answered only `require_repo` broke the day it started asking.
+    cfg = Config(prerequisite=Prerequisite.LOCAL, repo_root=tmp_path)
     monkeypatch.chdir(tmp_path)
-    result = compile_status("plan.json", config=_Cfg())
+    result = compile_status("plan.json", config=cfg)
     assert result.data["started_at"] is not None
     _conforms(result.data, _declared("compile-status"), "compile-status")
 
@@ -320,7 +323,15 @@ def test_a_background_call_on_a_running_batch_emits_its_declared_shape(
     )
     write_run_marker(plan, pid=os.getpid())  # a live process: this one
 
-    result = _start_background(plan, False, False)
+    result = _start_background(
+        plan,
+        repo=tmp_path,
+        wiki_dir=tmp_path / "wiki",
+        dry_run=False,
+        no_resume=False,
+        skip_groundedness=False,
+        allow_uncertain=False,
+    )
     assert result.exit_code == ExitCode.SEMANTIC_FAILURE
     assert result.data["state"] == "running"
     _conforms(result.data, _declared("compile-plan"), "compile-plan")

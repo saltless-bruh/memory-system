@@ -40,10 +40,26 @@ jobs:
         if: always()
         env:
           GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.24.3@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055
+        # act_runner runs this step inside a job container that talks to the
+        # HOST's Docker daemon. A `--volume "$GITHUB_WORKSPACE/..."` bind mount
+        # names a job-container path the daemon resolves on the host, where it
+        # does not exist: Docker creates an empty directory and gitleaks
+        # "passes" over nothing. `docker cp` streams from this side of the API,
+        # so the scanner receives the real checkout and the trusted config
+        # whichever filesystem the daemon sees.
         run: |
+          set -eu
+          if ! git -C "$GITHUB_WORKSPACE/target" rev-parse --verify --quiet HEAD >/dev/null; then
+            echo "target checkout has no commit history; refusing to report a scan of nothing" >&2
+            exit 1
+          fi
           docker pull "$GITLEAKS_IMAGE"
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE/target:/repo:ro" \
-            --volume "$GITHUB_WORKSPACE/trusted-security/.gitleaks.toml:/trusted/gitleaks.toml:ro" \
-            --workdir /repo \
-            "$GITLEAKS_IMAGE" git "--log-opts=--all --root" --redact --no-banner . --config=/trusted/gitleaks.toml
+          trusted_dir="$(mktemp -d)"
+          cp "$GITHUB_WORKSPACE/trusted-security/.gitleaks.toml" "$trusted_dir/gitleaks.toml"
+          cid="$(docker create --workdir /repo \
+            "$GITLEAKS_IMAGE" git "--log-opts=--all --root" --redact --no-banner . --config=/trusted/gitleaks.toml)"
+          trap 'docker rm --force "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$GITHUB_WORKSPACE/target/." "$cid:/repo"
+          docker cp "$trusted_dir" "$cid:/trusted"
+          # gitleaks' exit status is the step's status; the trap only cleans up.
+          docker start --attach "$cid"

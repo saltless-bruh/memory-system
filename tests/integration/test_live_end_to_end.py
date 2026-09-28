@@ -177,7 +177,11 @@ async def _call_tool(
 
 @pytest.mark.asyncio
 async def test_live_mcp_jsonrpc_result_body_decides_success() -> None:
-    """A live `rag_fetch` succeeds in its body; a bad call fails in its body at HTTP 200."""
+    """A live `wiki_search` succeeds in its body; a bad call fails in its body.
+
+    This called `rag_fetch` until 2026-09-26, which the served surface stopped
+    exposing with V3, so the "good" call could only ever fail.
+    """
     _require_env("SCOUT_INTEGRATION_URL")
     url = os.environ["SCOUT_INTEGRATION_URL"]
     token = _integration_token()
@@ -187,10 +191,9 @@ async def test_live_mcp_jsonrpc_result_body_decides_success() -> None:
             client,
             url,
             headers,
-            "rag_fetch",
+            "wiki_search",
             {
-                "path": "raw/does-not-exist.md",
-                "hint": "live transport contract for the rag_fetch tool",
+                "query": "live transport contract for the wiki_search tool",
                 "department": "infra",
             },
         )
@@ -200,9 +203,11 @@ async def test_live_mcp_jsonrpc_result_body_decides_success() -> None:
         assert isinstance(result, dict)
         structured = result.get("structuredContent")
         assert isinstance(structured, dict), f"no structured tool output: {result!r}"
-        assert structured.get("status") in {"ok", "no_source"}
-        assert isinstance(structured.get("context"), list)
-        assert isinstance(structured.get("citations"), list)
+        # An envelope, never a bare list (CLAUDE.md, "Architecture").
+        assert isinstance(structured.get("results"), list)
+        assert structured.get("returned") == len(structured["results"])
+        assert isinstance(structured.get("suppressed_as_seen"), int)
+        assert isinstance(structured.get("has_more"), bool)
 
         bad = await _call_tool(client, url, headers, "no_such_tool", {})
         failure = _tool_call_failure(bad)

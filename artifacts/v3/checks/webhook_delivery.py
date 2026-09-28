@@ -2,7 +2,7 @@
 """Oracles for W-2 webhook delivery and for committing the branch (W1-W3, C1-C4).
 
 Usage:
-    .venv/bin/python artifacts/v3/checks/webhook_delivery.py --group <name>
+    .venv/bin/python artifacts/v3/checks/webhook_delivery.py --group <name> [--branch <name>]
 """
 
 from __future__ import annotations
@@ -22,7 +22,14 @@ GIT_CONTAINER = "snp-memory-git-1"
 SYNC_CONTAINER = "snp-memory-host-sync-1"
 SYNC_READY = "http://127.0.0.1:9000/ready"
 GITEA_REMOTE = "http://127.0.0.1:3000/snp-admin/snp-memory.git"
-FEATURE_BRANCH = "feat/v3-retrieval-inversion"
+#: The branch every piece of work is cut from and measured against.
+BASE_BRANCH = "main"
+
+#: Set from `--branch`. Left unset, the checked-out branch is the one measured.
+#: This used to be the literal `feat/v3-retrieval-inversion`, which kept both
+#: hygiene gates scanning a branch last committed on 2026-09-09 while every
+#: later commit -- the ones about to be pushed -- went unexamined.
+_branch_argument: str | None = None
 
 #: Paths deliberately left out of the branch. Every entry must be editor state,
 #: throwaway scratch, or an unreferenced binary -- never source, test, ledger or
@@ -396,18 +403,56 @@ def group_tree_clean() -> str:
     return "TREE CLEAN VERIFIED"
 
 
-def _branch_paths() -> set[str]:
-    """Every path touched by commits on this branch but not on its base."""
-    base = _run(["git", "merge-base", FEATURE_BRANCH, "main"]).strip()
+def _target_branch() -> str:
+    """The branch the hygiene gates measure: `--branch`, else the checkout.
+
+    Detached HEAD and the base branch itself are refused rather than guessed
+    at: neither has "work on this branch but not on its base", so any verdict
+    over them would describe nothing.
+    """
+    if _branch_argument:
+        branch = _branch_argument
+    else:
+        branch = _run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], check=False
+        ).strip()
+        require(
+            bool(branch),
+            "HEAD is detached, so there is no branch to measure; check one out "
+            "or pass --branch",
+        )
+    require(
+        branch != BASE_BRANCH,
+        f"the measured branch is {BASE_BRANCH!r} itself; these gates measure "
+        "a feature branch against its base, so check one out or pass --branch",
+    )
+    return branch
+
+
+def _branch_paths(branch: str) -> set[str]:
+    """Every path any commit on `branch` but not on its base touched.
+
+    Read commit by commit rather than as one net diff: a file added in one
+    commit and deleted in the next leaves no trace in `base..branch` but is
+    still in the history a push publishes.
+
+    `--diff-merges=first-parent` because `git log` otherwise lists no files
+    for a merge commit at all: a path added while resolving a merge, in
+    neither parent and only in the merge itself, passed this scan although the
+    net diff it replaced would have caught it. Against its first parent a
+    merge lists everything it brought in, and that path with it.
+    """
+    base = _run(["git", "merge-base", branch, BASE_BRANCH]).strip()
     out = _run(
         [
             "git",
             "-c",
             "core.quotePath=false",
-            "diff",
+            "log",
             "--name-only",
-            base,
-            FEATURE_BRANCH,
+            "--diff-merges=first-parent",
+            "--format=",
+            f"{base}..{branch}",
         ]
     )
     return {line for line in out.splitlines() if line}
@@ -420,11 +465,16 @@ def group_history_hygiene() -> str:
     output as an all-clear over a real one, and only one of those means
     anything.
     """
-    paths = _branch_paths()
+    branch = _target_branch()
+    paths = _branch_paths(branch)
+    # A fixed floor here once demanded "the week's work" (>50 paths), which only
+    # made sense for one long-lived branch. What makes a clean result
+    # meaningless is an empty set; the planted control below is what proves
+    # the detector itself works.
     require(
-        len(paths) > 50,
-        f"only {len(paths)} paths differ from the base branch; this is not the "
-        "week's work and a clean result would be meaningless",
+        bool(paths),
+        f"no commit on {branch} touches any path beyond {BASE_BRANCH}; a clean "
+        "result over nothing would be meaningless",
     )
 
     offenders = sorted(
@@ -432,7 +482,7 @@ def group_history_hygiene() -> str:
     )
     require(
         not offenders,
-        f"forbidden paths entered the branch history: {offenders[:10]}",
+        f"forbidden paths entered the history of {branch}: {offenders[:10]}",
     )
 
     planted = set(paths) | {".secrets/scout_static_tokens.json"}
@@ -501,20 +551,23 @@ def _suite_env() -> dict[str, str]:
 
 
 def group_no_push() -> str:
-    """The feature branch never left this machine."""
-    remotes = _run(["git", "remote"]).split()
-    for remote in remotes:
+    """The branch being worked on never left this machine."""
+    branch = _target_branch()
+    local = _run(["git", "rev-parse", "--verify", "--quiet", branch], check=False)
+    require(bool(local.strip()), f"the branch {branch} does not exist locally")
+
+    for remote in _run(["git", "remote"]).split():
+        # The full ref, not a substring of the listing: `fix/a` must not be
+        # reported as pushed because `fix/a-2` is.
         listing = _run(
-            ["git", "ls-remote", "--heads", remote, FEATURE_BRANCH], check=False
+            ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+            check=False,
         )
         require(
-            FEATURE_BRANCH not in listing,
-            f"{FEATURE_BRANCH} exists on remote {remote!r}; R-6.4 requires the "
+            not listing.strip(),
+            f"{branch} exists on remote {remote!r}; R-6.4 requires the "
             "branch reach a remote only through a human-reviewed pull request",
         )
-
-    local = _run(["git", "rev-parse", FEATURE_BRANCH]).strip()
-    require(bool(local), "the feature branch does not exist locally")
     return "NO PUSH VERIFIED"
 
 
@@ -532,7 +585,14 @@ GROUPS: dict[str, Callable[[], str]] = {
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--group", required=True, choices=sorted(GROUPS))
+    parser.add_argument(
+        "--branch",
+        help="branch that history-hygiene and no-push measure "
+        "(default: the checked-out branch)",
+    )
     args = parser.parse_args()
+    global _branch_argument
+    _branch_argument = args.branch
 
     try:
         token = GROUPS[args.group]()

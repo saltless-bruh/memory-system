@@ -348,7 +348,9 @@ def test_security_workflow_runs_immutable_scanners_and_always_runs_gitleaks() ->
         "scripts/scan_secrets.py --all-current --history --repo "
         '"$GITHUB_WORKSPACE/target"'
     ) in content
-    assert "trusted-security/.gitleaks.toml:/trusted/gitleaks.toml:ro" in content
+    # The trusted config reaches gitleaks by `docker cp`, not a bind mount; see
+    # tests/test_security_workflow_gitleaks.py for why a mount scans nothing.
+    assert '"$GITHUB_WORKSPACE/trusted-security/.gitleaks.toml"' in content
     assert "--config=/trusted/gitleaks.toml" in content
 
     gitleaks_step = content.index("Independent Gitleaks all-history scan")

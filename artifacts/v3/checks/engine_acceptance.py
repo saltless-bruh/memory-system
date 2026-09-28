@@ -8,8 +8,10 @@ measure the two things the owner actually asks of the system.
   * **W-1** the agent queries the index and gets back an address and a file.
   * **W-2** a change in the vault reaches the index.
 
-They run against the live stack through the shipped surfaces -- the production
-`PgVectorRlsBackend`, the real corpus, the real gateway -- because the failures
+They run against the live stack through the shipped surfaces -- W-1 and W-2
+through the scout MCP server exactly as an agent calls it, others on the
+production `PgVectorRlsBackend`, the real corpus, the real gateway -- because
+the failures
 worth catching here are the ones a double cannot reproduce. The prior
 integration oracle modelled PostgreSQL in Python and could not have seen any of
 them.
@@ -39,7 +41,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scout.chunker import LiteLLMBatchEmbedder  # noqa: E402
-from scout.diy_engine import ScoutDiyEngine  # noqa: E402
 from scout.policy import CANONICAL_DEPARTMENTS  # noqa: E402
 from scout.types import Scope  # noqa: E402
 
@@ -72,10 +73,6 @@ LATENCY_POLL_SECONDS = 0.25
 #: How long the deployment gate waits for a restarted container's health to
 #: settle. Measured cold start is about 90 seconds; this is that with room.
 HEALTH_SETTLE_SECONDS = 180.0
-VAULT = Path(
-    os.environ.get("SNP_REFERENCE_VAULT")
-    or Path.home() / "Documents" / "memo-project" / "Obsidian Vault"
-)
 
 #: Read from constants, never from the measured result. A floor derived from
 #: what was observed is not a floor.
@@ -141,20 +138,29 @@ def load_questions() -> tuple[list[Question], list[Question]]:
     return measurable, controls
 
 
-def _build_engine() -> ScoutDiyEngine:
-    """The shipped engine, on the production backend. No doubles."""
-    embedder = LiteLLMBatchEmbedder(
-        base_url=os.environ.get("LITELLM_BASE_URL"),
-        api_key=os.environ.get("LITELLM_MASTER_KEY"),
-    )
-    return ScoutDiyEngine.from_vault(embedder, wiki_dir=VAULT)
+class _Surface(Protocol):
+    """What find-read-cite needs: the two tools an agent calls, as it calls them."""
+
+    async def search(self, query: str, k: int = 5) -> list[dict[str, object]]: ...
+
+    async def read(
+        self, path: str, *, section: str | None = None
+    ) -> dict[str, object]: ...
 
 
-def _headings(page: object) -> list[str]:
-    """The headings a citation could name, from the page's own outline."""
-    outline = getattr(page, "outline", ()) or ()
+def _hit_paths(hits: Sequence[object]) -> list[str]:
+    return [
+        str(hit["path"])
+        for hit in hits
+        if isinstance(hit, dict) and isinstance(hit.get("path"), str)
+    ]
+
+
+def _headings(page: dict[str, object]) -> list[str]:
+    """The headings a citation could name, from the served page's own outline."""
+    outline = page.get("outline") or []
     found: list[str] = []
-    for entry in outline:
+    for entry in outline if isinstance(outline, list) else []:
         if isinstance(entry, dict):
             heading = entry.get("heading") or entry.get("title") or entry.get("loc")
             if isinstance(heading, str) and heading.strip():
@@ -162,68 +168,99 @@ def _headings(page: object) -> list[str]:
     return found
 
 
-async def _find_read_cite() -> str:
-    engine = _build_engine()
-    scope = Scope(departments=frozenset(CANONICAL_DEPARTMENTS))
+def _names_section(sections: dict[str, object], heading: str) -> bool:
+    """A full read already carries `heading` as a section key or a key's leaf.
+
+    Keys are the heading, or its `A > B` path when the heading repeats, which is
+    exactly what `wiki_read(section=...)` resolves against.
+    """
+    wanted = heading.casefold()
+    return any(
+        key.casefold() == wanted or key.rsplit(" > ", 1)[-1].casefold() == wanted
+        for key in sections
+    )
+
+
+async def _find_read_cite(surface: _Surface) -> str:
+    """Find, read and cite through the served MCP surface and nothing else.
+
+    This used to build `ScoutDiyEngine.from_vault` in process over the host's
+    Obsidian folder: search went to the live index, but every read came from
+    this machine's copy of the vault, never from `/vault-replica/current` in
+    the scout container and never through MCP. It could pass while the replica
+    was stale or missing a page, and fail when only the host copy lagged -- so
+    the coherence an agent depends on, the index finding what the served vault
+    answers, was the one thing it did not measure. Speaking only MCP also means
+    a pass cannot have come from a local read.
+    """
     measurable, controls = load_questions()
 
     ranks: list[int | None] = []
     returned_paths: set[str] = set()
-    try:
-        for question in measurable:
-            hits = await engine.wiki_search(question.query, k=SEARCH_K, scope=scope)
-            paths = [hit.path for hit in hits]
-            returned_paths.update(paths)
-            ranks.append(
-                paths.index(question.expect) + 1 if question.expect in paths else None
-            )
-
-        # The control decides whether any of the above means anything. An
-        # oracle that scores a page nobody has as "found" is measuring its own
-        # optimism.
-        for control in controls:
-            hits = await engine.wiki_search(control.query, k=SEARCH_K, scope=scope)
-            found = [hit.path for hit in hits]
-            require(
-                control.expect not in found,
-                f"the absent-page control was scored as found ({control.expect}); "
-                "this gate cannot tell present from absent",
-            )
-
-        require(
-            bool(returned_paths),
-            "no search returned any page at all; the gate cannot observe its subject",
+    for question in measurable:
+        paths = _hit_paths(await surface.search(question.query, k=SEARCH_K))
+        returned_paths.update(paths)
+        ranks.append(
+            paths.index(question.expect) + 1 if question.expect in paths else None
         )
 
-        # Every page search offered must actually be readable. This is the
-        # check that would have caught the 431-versus-7 vault fork, where
-        # search returned five correct identities and read raised KeyError on
-        # every one of them: find and read disagreed about what the vault held.
-        unreadable: list[str] = []
-        uncitable: list[str] = []
-        for path in sorted(returned_paths):
+    # The control decides whether any of the above means anything. An oracle
+    # that scores a page nobody has as "found" is measuring its own optimism.
+    for control in controls:
+        found = _hit_paths(await surface.search(control.query, k=SEARCH_K))
+        require(
+            control.expect not in found,
+            f"the absent-page control was scored as found ({control.expect}); "
+            "this gate cannot tell present from absent",
+        )
+
+    require(
+        bool(returned_paths),
+        "no search returned any page at all; the gate cannot observe its subject",
+    )
+
+    # Every page search offered must actually be readable from the served
+    # vault. This is the check that would have caught the 431-versus-7 vault
+    # fork, where search returned five correct identities and read raised
+    # KeyError on every one of them: find and read disagreed about what the
+    # vault held. Read through MCP, it also catches the replica lagging the
+    # index, which a read of the host folder never could.
+    unreadable: list[str] = []
+    uncitable: list[str] = []
+    for path in sorted(returned_paths):
+        try:
+            page = await surface.read(path)
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            unreadable.append(f"{path}: {type(exc).__name__}: {exc}")
+            continue
+        sections = page.get("sections")
+        if not isinstance(sections, dict) or not any(
+            isinstance(text, str) and text.strip() for text in sections.values()
+        ):
+            unreadable.append(f"{path}: the served read carried no section text")
+            continue
+        headings = _headings(page)
+        if not headings:
+            uncitable.append(path)
+            continue
+        # An answer cites a heading, and an agent checks it by reading that one
+        # section. A heading the full read does not already name is asked for
+        # exactly that way before it is called uncitable.
+        missing: list[str] = []
+        for heading in headings:
+            if _names_section(sections, heading):
+                continue
             try:
-                page = await engine.wiki_read(path, mode="full", scope=scope)
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                unreadable.append(f"{path}: {type(exc).__name__}: {exc}")
+                one = await surface.read(path, section=heading)
+            except Exception:  # noqa: BLE001 - an unresolvable citation
+                missing.append(heading)
                 continue
-            if not (getattr(page, "body", "") or "").strip():
-                unreadable.append(f"{path}: read returned an empty body")
-                continue
-            headings = _headings(page)
-            if not headings:
-                uncitable.append(path)
-                continue
-            # An answer cites a heading; that heading has to exist in the page
-            # it claims to come from, or the citation is unverifiable.
-            body = page.body
-            missing = [h for h in headings if h not in body]
-            if missing:
-                uncitable.append(
-                    f"{path}: outline names {missing[:2]} absent from body"
-                )
-    finally:
-        await engine.aclose()
+            if not one.get("sections"):
+                missing.append(heading)
+        if missing:
+            uncitable.append(
+                f"{path}: outline names {missing[:2]} that no section read resolves"
+            )
 
     require(
         not unreadable,
@@ -266,8 +303,8 @@ async def _find_read_cite() -> str:
 
 
 def group_find_read_cite() -> str:
-    """Search finds the page, read returns its body, and the citation resolves."""
-    return asyncio.run(_find_read_cite())
+    """Search finds the page, the served read returns it, the citation resolves."""
+    return asyncio.run(_find_read_cite(_Scout()))
 
 
 # --------------------------------------------------------------------------
@@ -309,8 +346,11 @@ class _Scout:
         hits = payload.get("results") if isinstance(payload, dict) else payload
         return list(hits) if isinstance(hits, list) else []
 
-    async def read(self, path: str) -> dict[str, object]:
-        page = await self._call("wiki_read", {"path": path, "mode": "full"})
+    async def read(self, path: str, *, section: str | None = None) -> dict[str, object]:
+        arguments: dict[str, object] = {"path": path, "mode": "full"}
+        if section is not None:
+            arguments["section"] = section
+        page = await self._call("wiki_read", arguments)
         return page if isinstance(page, dict) else {}
 
 

@@ -313,3 +313,25 @@ def test_docs_do_not_promise_wiki_department_scoping_the_code_lacks() -> None:
             "department-scoped while wiki_ingest grants every department"
         )
         assert "bypass scope enforcement" not in text, relative
+
+
+# ── figure and table extraction ─────────────────────────────────────────────
+
+
+def test_architecture_status_does_not_forbid_a_true_extraction_claim() -> None:
+    lock = (REPO_ROOT / "scout" / "requirements.lock").read_text(encoding="utf-8")
+    shipped = {
+        name for name in ("pdfplumber", "pillow") if re.search(rf"(?m)^{name}==", lock)
+    }
+    if shipped != {"pdfplumber", "pillow"}:
+        pytest.skip("the image no longer ships both extractors")
+    text = " ".join(
+        (REPO_ROOT / "docs" / "ARCHITECTURE_STATUS.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    for stale in ("installs `pypdf` only", "are both absent"):
+        assert stale not in text, (
+            f"ARCHITECTURE_STATUS still says {stale!r} while "
+            "scout/requirements.lock pins pdfplumber and pillow"
+        )

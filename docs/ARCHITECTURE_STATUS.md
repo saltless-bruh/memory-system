@@ -297,20 +297,20 @@ Active instructions must not describe:
   unauthenticated by design, never network-reachable or safe over HTTP;
 - any MCP tool other than `wiki_search`/`wiki_read`/`wiki_quote` as a door into
   the wiki or RAG index;
-- figure or table extraction as working in the deployed ingester — the
-  `snp-scout` image installs `pypdf` only (`scout/requirements.txt`), so
-  `pdfplumber` (tables) and Pillow (`pypdf[image]`, figures) are both absent,
-  and no figure in an ingested PDF is described no matter how `snp-vlm` is
-  configured;
-- `metadata.figures_status == "ok"` as evidence that a document's figures were
-  examined. **The swallow is fixed** (T5.1): `extract_figures` now re-raises the
-  `ImportError` as a `PdfStructureError`, so a Pillow-less installation reports
-  `figures_status: "unavailable"` and **no figure count at all**. What remains
-  prohibited is the inverse reading — `"no_evidence"` means the parser ran and
-  this document captions nothing; it is not a statement that figures were
-  described. Nothing in the deployed image describes a figure: `pdfplumber` and
-  Pillow are both absent (confirmed in the running `scout` and `sync-job`
-  containers), and that is a **decision** recorded in T5.1, not an oversight.
+- figure or table extraction as absent from the deployed ingester. It was
+  absent until 2026-09-06; `d287896` added `pdfplumber` (tables) and Pillow
+  (figures) to `scout/requirements.txt`, and `scout/requirements.lock` pins
+  them at 0.11.10 and 12.3.0, the versions the host corpus was built with.
+  The live index recorded 7 of 7 figures described for the audited paper on
+  2026-09-21 (`docs/AUDIT_2026-09-15.md`, "CORRECTION 2026-09-21"). A figure
+  is described only through the `snp-vlm` route: with no route the document
+  reports `figures_status: "unconfigured"` and carries no figure text;
+- a `figures_status` other than `"ok"` or `"partial"` as evidence that a
+  document's figures were described. `"ok"` means every detected figure was
+  described and `"partial"` that some were; `"failed"` (none described),
+  `"unconfigured"` (no vision route) and `"unavailable"` (extractor missing —
+  `extract_figures` re-raises the `ImportError`, T5.1) carry no figure text,
+  and `"no_evidence"` means the parser ran and the document captions nothing.
 
 When architecture changes, update implementation and active documents together,
 then re-run the stale-claim search described in the review plan. Preserve old

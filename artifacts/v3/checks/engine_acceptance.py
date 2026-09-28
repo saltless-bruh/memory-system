@@ -58,6 +58,11 @@ VAULT_REMOTE = os.environ.get(
 VAULT_BRANCH = os.environ.get("GIT_BRANCH", "main")
 #: Where the vault lives inside the repository that holds it.
 VAULT_SUBDIR = "wiki"
+#: Who the gate's probe commits are authored by. They land on the private
+#: vault's history, so they name the gate that made them rather than any
+#: person's mailbox; an operator who wants them attributed sets the env.
+GATE_GIT_NAME_DEFAULT = "snp-acceptance-gate"
+GATE_GIT_EMAIL_DEFAULT = "snp-gate@localhost"
 #: How long a change may take to travel push -> webhook -> replica -> index.
 PROPAGATION_TIMEOUT_SECONDS = 180.0
 PROPAGATION_POLL_SECONDS = 5.0
@@ -367,11 +372,13 @@ def _publish(
     else:
         target.write_text(body, encoding="utf-8")
     _git("add", "-A", f"{VAULT_SUBDIR}/{relative}", cwd=clone)
+    name = os.environ.get("SNP_GATE_GIT_NAME") or GATE_GIT_NAME_DEFAULT
+    email = os.environ.get("SNP_GATE_GIT_EMAIL") or GATE_GIT_EMAIL_DEFAULT
     _git(
         "-c",
-        "user.name=snp-engine-acceptance",
+        f"user.name={name}",
         "-c",
-        "user.email=xanx404@gmail.com",
+        f"user.email={email}",
         "commit",
         "-m",
         message,
@@ -465,6 +472,45 @@ async def _await_sentinel_absent(
         await asyncio.sleep(min(poll_seconds, remaining))
 
 
+def _remove_live_probes(clone: Path, live: dict[str, str], label: str) -> list[str]:
+    """Push a deletion for every probe still on the vault branch.
+
+    Each removal is attempted independently, so one failed push cannot keep the
+    others on `main`. Failures are returned rather than raised: the caller is a
+    `finally`, and raising there would replace whatever failed the gate.
+    """
+    failures: list[str] = []
+    for sentinel, relative in list(live.items()):
+        try:
+            _publish(
+                clone, relative, None, f"test(w2): remove failed {label} {sentinel}"
+            )
+            live.pop(sentinel)
+        except Exception as exc:  # noqa: BLE001 - report every cleanup fault
+            failures.append(
+                f"{sentinel}: still on {VAULT_BRANCH}, deletion push failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    return failures
+
+
+def _report_cleanup(failures: list[str], primary: BaseException | None) -> None:
+    """Surface cleanup faults without hiding the failure that caused them.
+
+    With no earlier failure a leftover probe is itself the verdict, since it
+    contaminates the corpus agents query. With one, that failure stays the
+    exception that propagates and the leftovers ride along as a note -- and on
+    stderr, because `main` prints only the message of a `GateFailure`.
+    """
+    if not failures:
+        return
+    message = "probe cleanup incomplete: " + "; ".join(failures)
+    if primary is None:
+        raise GateFailure(message)
+    print(f"CLEANUP {message}", file=sys.stderr)
+    primary.add_note(message)
+
+
 def _compose(*args: str) -> None:
     completed = subprocess.run(
         ["docker", "compose", *args], cwd=REPO_ROOT, capture_output=True, text=True
@@ -479,6 +525,11 @@ async def _vault_change_propagates() -> str:
     scout = _Scout()
     clone = Path(tempfile.mkdtemp(prefix="v3-vault-probe-"))
     watcher_stopped = False
+    # Every probe whose push returned, until its deletion push returns. The
+    # finalizer removes whatever is left, so a timeout or error in either leg
+    # cannot leave a page on the private vault's `main` and in the index.
+    live: dict[str, str] = {}
+    primary: BaseException | None = None
     try:
         _git(
             "clone",
@@ -500,6 +551,7 @@ async def _vault_change_propagates() -> str:
             "would prove nothing",
         )
         _publish(clone, relative, body, f"test(w2): propagation probe {sentinel}")
+        live[sentinel] = relative
         started = time.monotonic()
         found = await _await_sentinel(scout, sentinel, PROPAGATION_TIMEOUT_SECONDS)
         elapsed = time.monotonic() - started
@@ -518,6 +570,7 @@ async def _vault_change_propagates() -> str:
         _publish(
             clone, relative, None, f"test(w2): remove propagation probe {sentinel}"
         )
+        live.pop(sentinel)
 
         # ---- negative: with the watcher stopped, the same push must NOT arrive ----
         # Without this the gate cannot tell "the loop works" from "the loop
@@ -533,6 +586,7 @@ async def _vault_change_propagates() -> str:
             blocked_body,
             f"test(w2): negative control probe {blocked}",
         )
+        live[blocked] = blocked_rel
         leaked = await _await_sentinel(scout, blocked, PROPAGATION_TIMEOUT_SECONDS)
         _publish(
             clone,
@@ -540,16 +594,29 @@ async def _vault_change_propagates() -> str:
             None,
             f"test(w2): remove negative control probe {blocked}",
         )
+        live.pop(blocked)
         require(
             leaked is None,
             f"{blocked} became findable at {leaked} while the vault watcher was "
             "stopped; something other than sync-job is indexing, so the positive "
             "leg proves nothing about this loop",
         )
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
+        # Deletions go first: pushed while the watcher is still stopped, they
+        # are what it indexes when it restarts, so the probe never resurfaces.
+        cleanup_failures = _remove_live_probes(clone, live, "propagation probe")
         if watcher_stopped:
-            _compose("start", "sync-job")
+            try:
+                _compose("start", "sync-job")
+            except Exception as exc:  # noqa: BLE001 - report every cleanup fault
+                cleanup_failures.append(
+                    f"sync-job was left stopped: {type(exc).__name__}: {exc}"
+                )
         shutil.rmtree(clone, ignore_errors=True)
+        _report_cleanup(cleanup_failures, primary)
 
     print(
         f"  probe reached the served surface {elapsed:.0f}s after the push, and "

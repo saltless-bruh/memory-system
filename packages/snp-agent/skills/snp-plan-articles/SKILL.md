@@ -26,6 +26,14 @@ A receipt: `{schemaVersion, ok, command, input, checks[], checkCount}` with the
 plan under `output`. Review the proposed split before compiling it, then hand
 the plan to `snp-compile-batch`.
 
+## Finding the checkout
+
+The script runs `snpmemory` inside the system checkout, found by walking up
+from the script and from the working directory. Installed into another project
+(`.opencode/skills/`, `.agent/skills/`), it finds none and fails with
+`checkout-found: false` and exit 2. Set `SNP_REPO_ROOT` to the checkout's path
+— the directory holding `pyproject.toml` — and run it again.
+
 ## Boundary
 
 This writes a plan file and nothing else. No vault page is created, no index is

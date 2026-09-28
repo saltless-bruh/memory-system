@@ -29,11 +29,15 @@ from typing import Any
 
 
 def find_checkout(start: pathlib.Path | None = None) -> pathlib.Path | None:
-    """The repository this skill is installed into.
+    """The system checkout this skill's commands run in.
 
-    `.agent/` and `.claude/` are tracked in the vault repo, so a skill always
-    runs beside a checkout; it is found by walking up rather than configured,
-    because an agent's working directory is not something the skill controls.
+    Found by walking up rather than configured, because an agent's working
+    directory is not something the skill controls. That works for the mirrors
+    tracked in the repository (`.agent/`, `.claude/`), which always sit inside a
+    checkout. It does not work for a copy an installer placed in another
+    project, which has no checkout above it: there `SNP_REPO_ROOT` names one,
+    and the skill's `SKILL.md` says so, because the failure receipt is the only
+    other place the variable appears.
     """
     override = os.environ.get("SNP_REPO_ROOT")
     if override:

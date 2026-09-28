@@ -156,6 +156,15 @@ form): decide whether the deployed ingester should gain `pdfplumber` and
 `pypdf[image]`, and stop reporting `"ok"` for a capability that is absent. A
 count of zero from a parser that could not look is not a count of zero.
 
+**Status 2026-09-28:** the capability half is done. `d287896` (2026-09-06)
+added `pdfplumber` and Pillow to `scout/requirements.txt` and pinned them in
+`scout/requirements.lock` (0.11.10, 12.3.0), so the image extracts tables and
+figures. Figures are described through the `snp-vlm` route: the live index
+recorded `figures_status: ok`, 7 of 7 figures described, for
+`raw/papers/computers-12-00091.pdf` on 2026-09-21 (`docs/AUDIT_2026-09-15.md`,
+"CORRECTION 2026-09-21"). The reporting half is T5.1's fix. The text above is
+kept as the record of what was true when it was written.
+
 ## Tier 1 — RESOLVED except one blocked command
 
 `docs/CLI_SPEC.md` specifies 28 commands. **Twenty-seven are implemented**, all
@@ -662,6 +671,14 @@ than by regex, which is what T4.2 parses by hand today.
 image rebuilt — the running one is built from `2d2b9dd`. The precondition is
 verified there; the fix is verified on the host against the exact `ImportError`
 pypdf raises.
+
+**Status 2026-09-28:** Decision 1 was reversed on 2026-09-06. `d287896` ships
+both extractors in the image (`scout` and `sync-job` run the same image), and
+figures are described through the `snp-vlm` route — 7 of 7 for the audited
+paper on 2026-09-21 (`docs/AUDIT_2026-09-15.md`, "CORRECTION 2026-09-21"). The
+`unavailable` status and its re-raise remain, and now describe an installation
+without Pillow rather than the deployed one. Code comments and docstrings that
+still called the deployed image figure-blind were corrected the same day.
 
 ---
 

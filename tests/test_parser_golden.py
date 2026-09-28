@@ -98,7 +98,11 @@ def test_the_golden_key_ignores_the_python_version() -> None:
 
 
 def test_the_golden_key_separates_capability_environments() -> None:
-    """The host has pdfplumber and pillow; the deployed image does not."""
+    """An environment without pdfplumber and pillow keys to its own golden.
+
+    The deployed image lacked both until 2026-09-06 (T5.1, fixed by d287896);
+    any environment missing them still parses differently.
+    """
     host = capability_fingerprint()
     container_like = {
         **host,

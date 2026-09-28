@@ -1,6 +1,11 @@
-"""Multi-modal ingestion engine for SNP Memory System V2.
+"""Multi-modal ingestion engine for SNP Memory System V3.
 
-Core ingestion logic for PostgreSQL 16 + pgvector with Anthropic Contextual Chunking.
+Core ingestion logic for PostgreSQL 16 + pgvector. Each chunk is embedded with a
+deterministic header built by `ContextualChunker` -- the document title, source
+path and locator -- not with LLM-generated per-chunk context of the kind
+Anthropic's "Contextual Retrieval" describes. No model is called to situate a
+chunk; the only model calls on this path are the embedding and, for vision input,
+the `snp-vlm` description route (PDF figures and image files).
 """
 
 from __future__ import annotations

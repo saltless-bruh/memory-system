@@ -2,10 +2,13 @@
 --
 -- Two runs of the same parser over the same bytes can produce different
 -- corpora, because "the same parser" is not the same thing in two environments.
--- The host carries `pdfplumber` and Pillow; the deployed image deliberately
--- carries neither (T5.1). A host ingest therefore emits table sections
--- `sync-job` cannot produce and drops unannounced on its next pass — measured
--- 2026-08-26, chunks 127 -> 140 with three host-only table sections.
+-- When this was written the host carried `pdfplumber` and Pillow and the
+-- deployed image deliberately carried neither (T5.1), so a host ingest emitted
+-- table sections `sync-job` could not produce and dropped unannounced on its
+-- next pass — measured 2026-08-26, chunks 127 -> 140 with three host-only table
+-- sections. Since 2026-09-06 (d287896) the image carries both, extracts tables,
+-- and has figures described through the `snp-vlm` route; the column remains
+-- the record that catches the environments diverging again.
 --
 -- Additive and nullable on purpose: every document indexed before this exists
 -- has no fingerprint, and an absent one must warn rather than refuse. Bricking a

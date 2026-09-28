@@ -279,13 +279,47 @@ def parse_page(path: Path) -> Page:
     return Page(path=path, frontmatter=fm, body=body)
 
 
-def load_pages(wiki_dir: Path = WIKI_DIR) -> list[Page]:
-    """Load every non-generated `.md` page in deterministic order."""
+@dataclass(frozen=True, slots=True)
+class SkippedFile:
+    """A vault entry `load_pages` left out, and the class of fault that did it.
+
+    `error` is the exception's class name and `reason` its message; a caller
+    that logs these to an operational stream should log `path` and `error`
+    only, since a parser's message can quote the file.
+    """
+
+    path: Path
+    error: str
+    reason: str
+
+
+def load_pages(
+    wiki_dir: Path = WIKI_DIR, *, skipped: list[SkippedFile] | None = None
+) -> list[Page]:
+    """Load every non-generated `.md` page in deterministic order.
+
+    By default one bad entry -- a symlinked page or directory, a page that
+    escapes the root, a page that is not UTF-8 -- raises, which is what a
+    linter or a one-shot command wants: the whole vault is being judged.
+
+    A caller that passes `skipped` is asking for the opposite contract: every
+    page that *can* be read, plus a record of each one that could not. The
+    sync watcher needs that, because raising there stopped indexing of the
+    whole vault for good over a single file, and a restart re-hit it. The root
+    itself is never tolerated either way: a root that is a symlink is not a
+    bad page, it is a misconfigured vault.
+    """
     if wiki_dir.is_symlink():
         raise ValueError(f"wiki root must not be a symlink: {wiki_dir}")
     if not wiki_dir.exists():
         return []
     root = wiki_dir.resolve(strict=True)
+
+    def refuse(path: Path, exc: ValueError) -> None:
+        if skipped is None:
+            raise exc
+        skipped.append(SkippedFile(path, type(exc).__name__, str(exc)))
+
     pages: list[Page] = []
     paths: list[Path] = []
     for directory, directory_names, file_names in os.walk(root, followlinks=False):
@@ -293,24 +327,38 @@ def load_pages(wiki_dir: Path = WIKI_DIR) -> list[Page]:
         for name in directory_names:
             child = current / name
             if child.is_symlink():
-                raise ValueError(f"wiki directory must not be a symlink: {child}")
+                # `followlinks=False` already keeps the walk out of it, so a
+                # tolerant caller loses only what is behind the link.
+                refuse(
+                    child, ValueError(f"wiki directory must not be a symlink: {child}")
+                )
         for name in file_names:
             if not name.endswith(".md"):
                 continue
             child = current / name
             if child.is_symlink():
-                raise ValueError(f"wiki page must not be a symlink: {child}")
+                refuse(child, ValueError(f"wiki page must not be a symlink: {child}"))
+                continue
             try:
                 child.resolve(strict=True).relative_to(root)
             except (OSError, ValueError) as exc:
-                raise ValueError(f"wiki page escapes its root: {child}") from exc
+                escape = ValueError(f"wiki page escapes its root: {child}")
+                escape.__cause__ = exc
+                refuse(child, escape)
+                continue
             paths.append(child)
 
     generated_index = root / "index.md"
     for page_path in sorted(paths):
         if page_path == generated_index:
             continue
-        pages.append(parse_page(page_path))
+        try:
+            pages.append(parse_page(page_path))
+        except UnicodeDecodeError as exc:
+            # Only the decode is a property of the file. A page that vanished
+            # between the walk and this read (`FileNotFoundError`) is a publish
+            # race, and it still propagates so the caller can tell the two apart.
+            refuse(page_path, exc)
     return pages
 
 

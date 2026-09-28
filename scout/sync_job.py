@@ -26,16 +26,20 @@ import json
 import os
 import sys
 import time
-import urllib.error
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-import asyncpg
 import httpx
 
-from scout.wiki_ingest import ingest_wiki, reconcile_wiki_deletions
+from scout.faults import is_transient, skipped_summary
+from scout.wiki_ingest import (
+    ReconcileRefusedError,
+    VaultRootError,
+    ingest_wiki,
+    reconcile_wiki_deletions,
+)
 
 if TYPE_CHECKING:
     from scout.chunker import LiteLLMBatchEmbedder
@@ -93,11 +97,16 @@ class IndexOutcome:
         ok: True when the indexer reported a successful update.
         status: The implementation's bounded status string, carried through
             for logging and diagnostics.
+        skipped: One content-free ``"<source_uri>: <ErrorClass>"`` line per
+            file the cycle left out because of the file's own content. A
+            successful cycle can carry these; they are what keeps a skipped
+            file visible once it no longer stops the watcher.
     """
 
     ok: bool
     status: str
     retryable: bool = False
+    skipped: tuple[str, ...] = ()
 
 
 class SyncFailure(RuntimeError):
@@ -233,7 +242,11 @@ class PgVectorDirectIndexer:
             # The cycle finished. Holding a corpus-worth of parsed text past
             # here would save work nobody is going to repeat.
             self.parse_cache.clear()
-            return IndexOutcome(ok=True, status=f"ingested_{count}_files")
+            skipped = skipped_summary(results)
+            _report_skipped(self.raw_dir, skipped)
+            return IndexOutcome(
+                ok=True, status=f"ingested_{count}_files", skipped=skipped
+            )
         except CapabilityMismatchError as exc:
             # Permanent, and never retried: retrying changes nothing because the
             # difference is this process's own environment. Nothing was written
@@ -311,6 +324,25 @@ class WikiIndexer:
                 stage_observer=observe,
             )
             deleted = await reconcile_wiki_deletions(self.wiki_dir)
+        except VaultRootError as exc:
+            # The vault is not there -- `current` dangles, or the configured
+            # path was never published. It used to read as an empty vault, and
+            # the sweep that followed deleted every wiki row. Named explicitly
+            # rather than left to the `_vault_root_is_usable` probe below,
+            # which re-reads the filesystem and could race a publication into
+            # calling this retryable.
+            return IndexOutcome(
+                ok=False, status=f"vault unreadable: {exc}", retryable=False
+            )
+        except ReconcileRefusedError as exc:
+            # The tree exists and holds no page while the index holds many.
+            # Retryable, unlike a missing root: the likeliest cause is a broken
+            # publication, and the next one repairs it without an operator.
+            # The watcher stays up with readiness cleared, so the service reads
+            # unhealthy for as long as the refusal stands.
+            return IndexOutcome(
+                ok=False, status=f"vault reconcile refused: {exc}", retryable=True
+            )
         except (FileNotFoundError, NotADirectoryError, PermissionError) as exc:
             # A vault whose ROOT is absent or unreadable is a configuration
             # fault: waiting cannot fix it, so it must not be retried forever.
@@ -347,6 +379,8 @@ class WikiIndexer:
         # different amounts, and the log line is where an operator sees which
         # one happened.
         unchanged = sum(1 for r in results if r.get("status") == "unchanged")
+        skipped = skipped_summary(results)
+        _report_skipped(self.wiki_dir, skipped)
         _emit_wiki_sync_stage(
             correlation_id,
             "cycle_complete",
@@ -354,44 +388,33 @@ class WikiIndexer:
             details={
                 "deleted_count": len(deleted),
                 "indexed_count": indexed,
+                "skipped_count": len(skipped),
                 "unchanged_count": unchanged,
             },
         )
-        return IndexOutcome(
-            ok=True,
-            status=(
-                f"{indexed} indexed, {unchanged} unchanged, {len(deleted)} deleted"
-            ),
+        status = f"{indexed} indexed, {unchanged} unchanged, {len(deleted)} deleted"
+        if skipped:
+            status += f", {len(skipped)} skipped"
+        return IndexOutcome(ok=True, status=status, skipped=skipped)
+
+
+def _report_skipped(source_dir: Path, skipped: Sequence[str]) -> None:
+    """Name each skipped file on stderr, by path and error class only.
+
+    The message is deliberately left out: a parser's message can quote the
+    file, and this stream is operational, not a place for vault content.
+    """
+    for line in skipped:
+        print(
+            f"[sync-job] {source_dir}: skipped {line} (the rest of the cycle ran)",
+            file=sys.stderr,
         )
 
 
-def _is_transient(exc: BaseException) -> bool:
-    """Classify only transport/database connectivity failures for retry."""
-    current: BaseException | None = exc
-    while current is not None:
-        if isinstance(current, urllib.error.HTTPError):
-            return 500 <= current.code < 600 or current.code in {408, 429}
-        # The async embed path (`aembed_texts`) raises httpx errors, not urllib
-        # ones. Without this branch a 500 from that path is called permanent
-        # while the identical 500 from the sync path is called transient.
-        if isinstance(current, httpx.HTTPStatusError):
-            status = current.response.status_code
-            return 500 <= status < 600 or status in {408, 429}
-        if isinstance(current, urllib.error.URLError):
-            return True
-        if isinstance(
-            current,
-            (
-                asyncpg.PostgresConnectionError,
-                httpx.NetworkError,
-                httpx.TimeoutException,
-                TimeoutError,
-                ConnectionError,
-            ),
-        ):
-            return True
-        current = current.__cause__
-    return False
+#: The cycle-level half of `scout.faults`. It lives there now because the
+#: per-file loops in both ingestion tiers need the same answer: a file fault
+#: that was *caused by* an outage must still fail the cycle.
+_is_transient = is_transient
 
 
 async def sync_once(
@@ -437,6 +460,7 @@ async def watch(
     stop: object | None = None,
     initial_sync: bool = False,
     recursive: bool = True,
+    on_outcome: Callable[[IndexOutcome], None] | None = None,
 ) -> int:
     """Reindex once per change batch until the stream ends (R-6.1).
 
@@ -452,6 +476,9 @@ async def watch(
         recursive: Whether the filesystem watch descends into subdirectories.
             False is for a directory that holds a *publication pointer* rather
             than the corpus itself -- see `_supervise`.
+        on_outcome: Called with every successful cycle's outcome, so the
+            caller's readiness marker describes the latest cycle -- including
+            the files it skipped -- rather than the cold start.
 
     Returns:
         The number of change batches handled (useful for tests; a live watch
@@ -480,6 +507,8 @@ async def watch(
             raise SyncFailure(
                 "watched synchronization failed", retryable=outcome.retryable
             )
+        if on_outcome is not None:
+            on_outcome(outcome)
         handled += 1
     return handled
 
@@ -493,15 +522,41 @@ def _awatch_raw(  # pragma: no cover - thin watchfiles adapter
     return awatch(raw_dir, stop_event=stop, recursive=recursive)
 
 
-def _set_readiness(path: Path, ready: bool) -> None:
-    """Atomically publish or clear the sync-job readiness marker."""
+#: Prefix of a marker line naming a file the last cycle skipped.
+_SKIPPED_LINE = "skipped "
+
+
+def _set_readiness(path: Path, ready: bool, skipped: Sequence[str] = ()) -> None:
+    """Atomically publish or clear the sync-job readiness marker.
+
+    The health check only tests that the marker exists, so its body is free to
+    say more. A ready marker lists every file the last cycle skipped, one
+    ``skipped <source_uri>: <ErrorClass>`` line each: a watcher that survives a
+    bad file must not also hide it, and stderr alone is where it hid before.
+    """
     if not ready:
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text("ready\n", encoding="utf-8")
+    lines = ["ready", *(f"{_SKIPPED_LINE}{line}" for line in skipped)]
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _marker_skips(path: Path) -> list[str]:
+    """The skipped-file lines a watcher's marker carries, without the prefix."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Cleared between the existence check and this read; the next tick
+        # reports it not ready.
+        return []
+    return [
+        line.removeprefix(_SKIPPED_LINE)
+        for line in text.splitlines()
+        if line.startswith(_SKIPPED_LINE)
+    ]
 
 
 #: First wait after a transient failure, in seconds.
@@ -662,13 +717,18 @@ async def _supervise(
             await back_off(f"cold-start sync failed: {outcome.status}")
             continue
 
-        _set_readiness(readiness_path, True)
+        _set_readiness(readiness_path, True, outcome.skipped)
+
+        def publish(latest: IndexOutcome) -> None:
+            _set_readiness(readiness_path, True, latest.skipped)
+
         try:
             await watch(
                 indexer,
                 raw_dir=source_dir,
                 initial_sync=False,
                 recursive=recursive,
+                on_outcome=publish,
             )
         except SyncFailure as exc:
             _set_readiness(readiness_path, False)
@@ -700,8 +760,20 @@ async def _aggregate_readiness(
     supervisor ever returns, because `watch()` runs until the process stops.
     """
     while True:
-        _set_readiness(marker, all(child.exists() for child in children))
+        _aggregate_once(marker, children)
         await sleep(interval)
+
+
+def _aggregate_once(marker: Path, children: Sequence[Path]) -> None:
+    """Set the service marker from its watchers, carrying their skipped files.
+
+    The service marker is the one path an operator is pointed at, so the
+    per-watcher skip lines are repeated there rather than left for someone to
+    know that `ready.raw` and `ready.wiki` exist.
+    """
+    ready = all(child.exists() for child in children)
+    skipped = [line for child in children for line in _marker_skips(child)]
+    _set_readiness(marker, ready, skipped)
 
 
 async def _async_main(
@@ -845,7 +917,7 @@ async def _async_main(
         # The aggregator polls, so its last observation may predate the
         # watchers' final state. Recompute once here so the marker a health
         # check reads is never left describing a moment that has passed.
-        _set_readiness(marker, all(child.exists() for child in markers))
+        _aggregate_once(marker, markers)
 
 
 def main() -> int:  # pragma: no cover - process entry point

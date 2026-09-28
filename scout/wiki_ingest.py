@@ -27,6 +27,7 @@ from scout.capabilities import (
     describe_fingerprint_difference,
 )
 from scout.chunker import ContextualChunker, Embedder, LiteLLMBatchEmbedder
+from scout.faults import is_file_fault, skipped_file
 from scout.ingest import (
     IngestStageObserver,
     embedder_model_stamp,
@@ -98,6 +99,45 @@ _TYPE_BY_DIRECTORY = {
 
 class WikiIngestError(ValueError):
     """A wiki page cannot produce honest body-backed retrieval chunks."""
+
+
+class VaultRootError(RuntimeError):
+    """The configured vault is not there: absent, dangling, or not a directory.
+
+    Distinct from an empty vault and from a bad page. `host-sync` publishes
+    through `current -> snapshots/<commit>`, and a lenient `Path.resolve()`
+    turns a dangling `current` into a path that simply does not exist, which
+    `load_pages` answers with `[]`. Read that way, a missing vault became an
+    empty one: the cycle reported success, reconciliation found no file for any
+    row, and every wiki-tier document was deleted -- recoverable only by
+    re-embedding the whole vault. Waiting does not produce a vault, so the
+    watcher treats this as permanent.
+    """
+
+
+class ReconcileRefusedError(RuntimeError):
+    """A deletion sweep that would empty the vault tier was not performed.
+
+    Kept separate from `VaultRootError` on purpose: this guard sits at the
+    deletion site and does not trust that the root check ran, or that a root
+    which exists holds what it should. A publication with no page in it while
+    the index holds pages is far likelier to be a broken publication than an
+    intended deletion of the entire vault, and the cost of being wrong is not
+    symmetric -- a refused sweep leaves stale rows a human can purge, a
+    performed one throws away every embedding.
+    """
+
+
+def _vault_root(wiki_dir: Path) -> Path:
+    """Resolve `wiki_dir` strictly to the directory that must hold the vault."""
+    try:
+        root = wiki_dir.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        # RuntimeError is how `resolve` reported a symlink loop before 3.13.
+        raise VaultRootError(f"vault root cannot be resolved: {wiki_dir}") from exc
+    if not root.is_dir():
+        raise VaultRootError(f"vault root is not a directory: {wiki_dir}")
+    return root
 
 
 def _as_date(value: object) -> dt.date | None:
@@ -579,8 +619,12 @@ async def ingest_wiki(
     # unresolved base is never a prefix of them and `parse_file` falls back to
     # storing each page's absolute snapshot path as its `source_uri` -- an
     # identity that changes on every push.
-    root = wiki_dir.resolve()  # noqa: ASYNC240
-    pages = vault.load_pages(root)
+    #
+    # Strictly, though: a lenient resolve of a dangling `current` is a path
+    # that does not exist, and that must never read as an empty vault.
+    root = _vault_root(wiki_dir)
+    unreadable: list[vault.SkippedFile] = []
+    pages = vault.load_pages(root, skipped=unreadable)
     # Exclude control documents from chunk ingestion (index.md is already excluded
     # by vault.load_pages, but log.md is authored and must stay readable for wiki_read).
     # Match against the root-level control document only, not any file with that name.
@@ -604,7 +648,16 @@ async def ingest_wiki(
     if owns_connection:
         active_connection = await get_pg_connection(env)
 
-    results: list[dict[str, object]] = []
+    # A file the walk could not turn into a page is reported in the same list
+    # as every page it could, so the caller reads one account of the vault.
+    results: list[dict[str, object]] = [
+        skipped_file(
+            item.path.relative_to(root).as_posix(),
+            error=item.error,
+            reason=item.reason,
+        )
+        for item in unreadable
+    ]
     try:
         # What the index already holds. A dry run has no connection to ask, so
         # it reports what a real run would consider rather than what it would
@@ -675,6 +728,24 @@ async def ingest_wiki(
                     }
                 )
                 continue
+            except Exception as exc:
+                # The same rule for every other fault the page itself causes:
+                # it costs this page, whose previous rows stay served because
+                # the file is still on disk and reconciliation keeps them. A
+                # fault that is not the page's -- a gateway or database that is
+                # down -- is re-raised, because every later page would fail the
+                # same way and the cycle has to say so.
+                if not is_file_fault(exc):
+                    raise
+                results.append(
+                    skipped_file(
+                        source_uri,
+                        error=type(exc).__name__,
+                        reason=str(exc),
+                        title=page.title,
+                    )
+                )
+                continue
             results.append(result)
     finally:
         if owns_connection and active_connection is not None:
@@ -708,7 +779,10 @@ async def reconcile_wiki_deletions(
     """
     from scout.ingest import _CORPUS_TIER_SQL
 
-    root = wiki_dir.resolve()  # noqa: ASYNC240
+    # Strict for the same reason as `ingest_wiki`, and here it matters most:
+    # this is the sweep that read a missing vault as an empty one and deleted
+    # every row.
+    root = _vault_root(wiki_dir)
     active = conn
     owns_connection = conn is None
     if active is None:
@@ -721,6 +795,19 @@ async def reconcile_wiki_deletions(
             if path.is_file()
         }
         rows = await active.fetch(_CORPUS_TIER_SQL, WIKI_CORPUS)
+        indexed_pages = [
+            str(row["source_uri"])
+            for row in rows
+            if str(row["source_uri"]) not in WIKI_CONTROL_DOCUMENTS
+        ]
+        if indexed_pages and not on_disk - set(WIKI_CONTROL_DOCUMENTS):
+            # Control documents are left out on both sides: purging them is
+            # this sweep's ordinary job, and a tree holding only them is still
+            # a tree holding no page.
+            raise ReconcileRefusedError(
+                f"vault at {wiki_dir} holds no page while the index holds "
+                f"{len(indexed_pages)}; refusing to purge every one of them"
+            )
         for row in rows:
             uri = str(row["source_uri"])
             present = uri in on_disk or (root / uri).exists()

@@ -318,6 +318,57 @@ def test_load_pages_rejects_symlinked_category(tmp_path: Path) -> None:
         vault.load_pages(wiki)
 
 
+def test_load_pages_skips_one_bad_file_when_the_caller_collects_them(
+    tmp_path: Path,
+) -> None:
+    """One malformed file must cost that file, not the vault.
+
+    The sync watcher called `load_pages` strictly, so a single non-UTF-8 byte or
+    a symlink anywhere in the vault raised out of the walk, was classified as a
+    permanent fault, and stopped the watcher for good -- and a restart re-hit
+    the same file. A caller that passes `skipped` gets every readable page plus
+    a record of what was left out and why.
+    """
+    wiki = tmp_path / "wiki"
+    (wiki / "concepts").mkdir(parents=True)
+    (wiki / "concepts" / "good.md").write_text("# good\n", encoding="utf-8")
+    (wiki / "concepts" / "latin1.md").write_bytes(b"# caf\xe9\n")
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    (wiki / "concepts" / "linked.md").symlink_to(outside)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "page.md").write_text("outside", encoding="utf-8")
+    (wiki / "linked-dir").symlink_to(elsewhere, target_is_directory=True)
+
+    skipped: list[vault.SkippedFile] = []
+    pages = vault.load_pages(wiki, skipped=skipped)
+
+    root = wiki.resolve()
+    assert [page.path.relative_to(root).as_posix() for page in pages] == [
+        "concepts/good.md"
+    ]
+    assert {
+        (item.path.relative_to(root).as_posix(), item.error) for item in skipped
+    } == {
+        ("concepts/latin1.md", "UnicodeDecodeError"),
+        ("concepts/linked.md", "ValueError"),
+        ("linked-dir", "ValueError"),
+    }
+
+
+def test_load_pages_still_refuses_a_symlinked_root_when_collecting(
+    tmp_path: Path,
+) -> None:
+    """Tolerance is per file. A root that is a symlink is not a bad page."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "wiki").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="wiki root must not be a symlink"):
+        vault.load_pages(tmp_path / "wiki", skipped=[])
+
+
 # ── T4.2: the optional Works Cited section ────────────────────────────────
 
 

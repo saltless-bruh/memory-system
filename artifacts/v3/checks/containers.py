@@ -275,8 +275,9 @@ def group_live_tool_surface() -> str:
 def group_corpus_survived() -> str:
     """Verify ingested corpus survived rebuild against baseline.
 
-    Compares live document and chunk counts against the recorded baseline,
-    and asserts zero chunks have null embeddings.
+    Requires live document and chunk counts to be at least the recorded
+    baseline (loss is red, growth is not), and zero chunks with a null
+    embedding.
     """
     import docker  # noqa: PLC0415, type: ignore[import-untyped]
 
@@ -334,18 +335,29 @@ def group_corpus_survived() -> str:
             f"chunks={chunk_count_str!r}, nulls={null_count_str!r}"
         ) from exc
 
-    # Compare against baseline
-    require(
-        doc_count == baseline_docs,
-        f"document count mismatch: {doc_count} != baseline {baseline_docs}",
-    )
-    require(
-        chunk_count == baseline_chunks,
-        f"chunk count mismatch: {chunk_count} != baseline {baseline_chunks}",
-    )
+    # A floor, not an equality. This gate exists to make a rebuild that
+    # destroyed rows visible; it compared with `==`, so an owner adding a page
+    # or a probe landing turned it red exactly as a lost table would, and it
+    # stayed red until someone hand-edited the JSON. Growth is the normal life
+    # of a vault. A legitimate shrink -- a page deleted, a re-parse that cuts
+    # chunks -- still fails here, on purpose: it is a re-baseline event, and
+    # baseline.json records why each refresh was made.
+    #
+    # The null-embedding check runs first because it holds whatever the counts
+    # are: rows that exist but can never be retrieved are loss too.
     require(
         null_count == 0,
         f"found {null_count} chunks with null embedding; expected 0",
+    )
+    require(
+        doc_count >= baseline_docs,
+        f"document count fell below the baseline: {doc_count} < {baseline_docs}; "
+        "rows were lost, or the baseline predates a deliberate removal",
+    )
+    require(
+        chunk_count >= baseline_chunks,
+        f"chunk count fell below the baseline: {chunk_count} < {baseline_chunks}; "
+        "rows were lost, or the baseline predates a deliberate re-parse",
     )
 
     return "CORPUS SURVIVED VERIFIED"

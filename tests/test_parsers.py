@@ -184,7 +184,9 @@ def test_parse_file_image_vlm_failure_degrades_without_raising(
         f.write(b"\x89PNG\r\n\x1a\n")
         img_path = Path(f.name)
 
-    def failing_route(path: Path, uri: str) -> str:
+    # Mirrors `extract_image_via_vlm`, which the configured route calls with its
+    # resolved base URL, key and model.
+    def failing_route(path: Path, uri: str, **_route: object) -> str:
         raise ParserError(f"Multimodal vision extraction failed for {uri}: HTTP 404")
 
     try:

@@ -175,9 +175,10 @@ Cursor and VS Code use `${env:SCOUT_AUTH_HEADER}` in the bridge environment;
 Gemini uses `$SCOUT_AUTH_HEADER`. Claude Code inherits the variable from its
 process environment without a self-referential `env` entry.
 
-No generated entry launches a local process, so nothing has to be on the
-client process's PATH and no entry pins a checkout. The local server that did
-both was deleted on 2026-09-24.
+No generated entry runs SNP code locally or pins a checkout. The `npx
+mcp-remote` bridge is a generic HTTP proxy that the client starts; it needs
+Node on the client's PATH and nothing from this repository. The local server
+that did run SNP code from a pinned checkout was deleted on 2026-09-24.
 
 Without an explicit client target, installation keeps portable `.agent/`
 behavior:
@@ -189,12 +190,12 @@ snpmemory install-agent /path/to/project
 
 `packages/snp-agent/` includes a portable manifest, MCP declarations, and
 skills. A client must support that format or receive a client-specific
-installation; the manifest establishes no automatic discovery. Its local
-server declaration leaves `SNP_MEMORY_ROOT` empty because an installed
-package cannot know the persistent system checkout. Configure that path or
-use `--root` before launching the local server. The exporter pins it from
-the checkout. For a remote shell install, record the printed source revision;
-`SNP_AGENT_REF` otherwise follows the installer's default moving ref.
+installation; the manifest establishes no automatic discovery. Its `mcp.json`
+declares one server, the remote `snpmemory` endpoint, with only an
+environment reference for `SCOUT_AUTH_HEADER`; nothing in it launches a
+process or needs a checkout path. For a remote shell install, record the
+printed source revision; `SNP_AGENT_REF` otherwise follows the installer's
+default moving ref.
 
 ## Verify retrieval through Scout
 

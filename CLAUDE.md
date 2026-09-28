@@ -156,8 +156,10 @@ for the plain dict. Three separate gate consumers broke on that coercion during
 the 2026-09-08 session; if you change the response shape, sweep for MCP-client
 callers, not just callers of the tool function.
 
-Two MCP servers: `scout` (authenticated, Streamable HTTP) and `snpmemory`
-(local, stdio). Embeddings go through LiteLLM at 1024 dimensions. The retired
+One MCP server: `snpmemory` (authenticated, Streamable HTTP, served by the
+`scout` container). It answered to `scout` until 2026-09-24, when the local
+stdio server that held the name was deleted (016ed43); its operations remain
+CLI commands and skills. Embeddings go through LiteLLM at 1024 dimensions. The retired
 retrieval container and the healer are absent; the retired source directory
 survives on disk, unbuilt, with its `requirements.lock` still a release-manifest
 input.

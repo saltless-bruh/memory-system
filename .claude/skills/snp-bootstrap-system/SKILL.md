@@ -15,10 +15,11 @@ services against a pending schema.
 5. Confirm `postgres-migrate` completed before Scout and sync-job, then inspect
    `docker compose ps` and the documented readiness endpoints.
 
-Scout is the sole remote retrieval server and exposes `wiki_search` followed by
-`wiki_read`. The local `snpmemory` stdio server exposes the same retrieval pair
-plus authoring and verification tools. Development authentication is
-loopback-only; remote clients use a bearer token.
+Scout is the sole MCP server. Clients list it as `snpmemory` and reach it over
+authenticated Streamable HTTP; it serves `wiki_search`, `wiki_read`, and
+`wiki_quote`. Authoring and verification are `snpmemory` CLI commands run from
+a checkout, not MCP tools. Development authentication is loopback-only; remote
+clients use a bearer token.
 
 Do not infer health from a running container alone. Report a failed migration,
 credential error, or unavailable embedding provider as infrastructure failure.

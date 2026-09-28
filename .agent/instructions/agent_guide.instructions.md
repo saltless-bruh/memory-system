@@ -4,9 +4,11 @@
 
 Agents retrieve knowledge only through Scout. `wiki_search` finds distinct
 pages in the shared PostgreSQL hybrid index; `wiki_read` returns a canonical
-Markdown-page envelope. The local `snpmemory` server exposes the same retrieval
-contract alongside authoring and verification tools. Never query PostgreSQL or
-read the vault through shell commands.
+Markdown-page envelope. Scout serves these tools to MCP clients under the
+server name `snpmemory`; it is the only MCP server this system configures.
+Authoring and verification are CLI commands run from a checkout, shipped as
+skills, never MCP tools. Never query PostgreSQL or read the vault through shell
+commands.
 
 ## Bootstrap
 

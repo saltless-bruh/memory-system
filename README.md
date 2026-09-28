@@ -74,9 +74,16 @@ the enabled OpenAI, Anthropic, or Gemini routes.
 ./scripts/bootstrap.sh
 # Review .env and the generated .secrets/* files; configure provider keys and auth.
 source .venv/bin/activate
-docker compose up -d --build
+SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build
 docker compose ps
 ```
+
+`bootstrap.sh` creates `.venv` (with `uv sync`, or `python3 -m venv` and pip
+when uv is absent), so the `source` line has something to activate.
+`SNP_GIT_REVISION` stamps the built images with the commit they came from;
+without it they are labelled `unknown`, and `snpmemory status` and the
+preflight report the stack as unverifiable. Rebuild the same way after every
+commit you deploy.
 
 The Compose dependency graph runs `postgres-migrate` before Scout and
 `sync-job`. Do not bypass this ordering or use a runtime role to apply schema

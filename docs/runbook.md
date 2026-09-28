@@ -486,7 +486,7 @@ redirects and unrelated credential helpers are disabled for those operations.
 Rebuild and recreate host-sync after configuring the identity:
 
 ```bash
-docker compose build host-sync
+SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build host-sync
 docker compose up -d --no-deps host-sync
 curl -fsS http://127.0.0.1:9000/ready
 ```

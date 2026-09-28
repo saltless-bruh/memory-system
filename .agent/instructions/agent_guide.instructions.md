@@ -15,8 +15,8 @@ commands.
 1. Run `./scripts/bootstrap.sh`.
 2. Configure cloud-provider and Scout credentials in `.env`.
 3. Keep migration, query, and ingestion database identities separate.
-4. Run `docker compose up -d --build` and wait for `postgres-migrate` before
-   runtime services.
+4. Run `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build`
+   and wait for `postgres-migrate` before runtime services.
 5. Confirm readiness with `docker compose ps` and documented health checks.
 
 Scout uses JWT by default. Static tokens are an explicit alternative and

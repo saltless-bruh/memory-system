@@ -11,7 +11,9 @@ services against a pending schema.
 1. Run `./scripts/bootstrap.sh`.
 2. Populate `.env` with cloud-provider credentials and Scout authentication.
 3. Keep migration, query, and ingestion database identities separate.
-4. Run `docker compose up -d --build`.
+4. Run `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build`.
+   Without the revision the images are labelled `unknown` and readiness
+   checks report them as unverifiable.
 5. Confirm `postgres-migrate` completed before Scout and sync-job, then inspect
    `docker compose ps` and the documented readiness endpoints.
 

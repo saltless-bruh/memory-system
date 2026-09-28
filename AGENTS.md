@@ -10,8 +10,9 @@ governs setup, retrieval, safety, and wiki authoring.
 3. Keep the migration administrator separate from `rag_app_role` (queries) and
    `rag_ingest_role` (ingestion). Scout defaults to JWT authentication; static
    tokens are explicit, and unauthenticated development mode is loopback-only.
-4. Run `docker compose up -d --build`. The one-shot `postgres-migrate` service
-   must finish successfully before Scout or ingestion starts.
+4. Run `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build`,
+   which stamps the images with their commit. The one-shot `postgres-migrate`
+   service must finish successfully before Scout or ingestion starts.
 5. Use `docker compose ps` and the documented health checks to confirm the
    stack, rather than assuming startup means readiness.
 

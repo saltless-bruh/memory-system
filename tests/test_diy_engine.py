@@ -591,3 +591,30 @@ async def test_non_list_sources_default_to_empty(tmp_path: Path, scope: Scope) -
     )
     page = await _vault_engine(tmp_path).wiki_read("page", scope=scope)
     assert page.sources == ()
+
+
+def test_a_parent_heading_the_outline_lists_can_be_read_as_a_section() -> None:
+    """`outline` lists a parent heading whose only content is its subsections.
+
+    `_sections` used to drop any heading with no text of its own, so
+    `wiki_read(section="Landscape")` failed for a heading the same tool had just
+    advertised in `outline` -- an agent told to cite it could not read it. The
+    served find-read-cite gate found 19 such pages in the live vault. A parent
+    now resolves to its whole subtree: everything up to the next heading at its
+    own level or above.
+    """
+    from scout.diy_engine import _sections
+
+    body = (
+        "## TL;DR\nshort\n\n"
+        "## Why it stands out\n\n### 1. Zig\nfast\n\n### 2. AI\nbuilt\n\n"
+        "## Trade-offs\nsome\n"
+    )
+    sections = _sections(body)
+    assert "Why it stands out" in sections
+    parent = sections["Why it stands out"]
+    assert "1. Zig" in parent and "fast" in parent and "built" in parent
+    assert "Trade-offs" not in parent and "some" not in parent
+    # A heading that has its own text keeps exactly that text, as before.
+    assert sections["TL;DR"] == "short"
+    assert sections["1. Zig"] == "fast"

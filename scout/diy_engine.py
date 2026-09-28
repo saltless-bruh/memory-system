@@ -232,6 +232,23 @@ def _sections(body: str) -> dict[str, str]:
         stack[level - 1 :] = [heading]
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         text = body[match.end() : end].strip()
+        if not text and level > 1:
+            # A parent whose only content is its subsections. `outline` lists
+            # it, so a section read must resolve it: it spans its whole subtree,
+            # up to the next heading at its own level or above. Dropping it made
+            # `wiki_read(section=...)` refuse a heading the same tool advertised.
+            # Level 1 is excluded to match `wiki_ingest._outline`, which never
+            # lists the H1: that is the page title, and its "subtree" is the
+            # whole page -- keeping it would duplicate every page in full mode.
+            subtree_end = next(
+                (
+                    later.start()
+                    for later in matches[index + 1 :]
+                    if len(later.group(1)) <= level
+                ),
+                len(body),
+            )
+            text = body[match.end() : subtree_end].strip()
         if text:
             records.append((heading, " > ".join(stack), text))
 

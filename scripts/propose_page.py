@@ -94,24 +94,48 @@ def slugify(title: str) -> str:
     return "-".join(filter(None, keep.split("-")))[:40] or "page"
 
 
-def run_lint() -> bool:
+def _say(*parts: object) -> None:
+    """Write one line of prose for the human, on stderr.
+
+    This script has no data to emit -- its answer is its exit code -- so all of
+    its prose is diagnostics. `snpmemory propose` calls `main` in-process, and
+    a line on stdout there lands ahead of the rendered payload, which is how
+    `propose -o json` stopped parsing. See `scout/cli/render.py`: stdout
+    carries data, stderr carries everything else.
+    """
+    print(*parts, file=sys.stderr)
+
+
+def _run_check(argv: list[str], *, timeout: int) -> bool:
+    """Run one check script, relaying its report to stderr.
+
+    A child inherits file descriptor 1 unless told otherwise, so an uncaptured
+    report reaches the caller's stdout whatever `sys.stdout` points at. The
+    report is still the reason a proposal was refused, so it is relayed, not
+    discarded.
+    """
     result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "gen_index.py"), "--check"],
+        [sys.executable, *argv],
         cwd=REPO_ROOT,
         check=False,
-        timeout=60,
+        timeout=timeout,
+        capture_output=True,
+        text=True,
     )
+    for stream in (result.stdout, result.stderr):
+        if stream:
+            sys.stderr.write(stream if stream.endswith("\n") else stream + "\n")
     return result.returncode == 0
+
+
+def run_lint() -> bool:
+    return _run_check(
+        [str(REPO_ROOT / "scripts" / "gen_index.py"), "--check"], timeout=60
+    )
 
 
 def run_verify() -> bool:
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "verify_addresses.py")],
-        cwd=REPO_ROOT,
-        check=False,
-        timeout=300,
-    )
-    return result.returncode == 0
+    return _run_check([str(REPO_ROOT / "scripts" / "verify_addresses.py")], timeout=300)
 
 
 def _url(raw: str) -> str:
@@ -289,18 +313,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         page = _normalize_page(args.page)
     except ValueError as exc:
-        print(f"ERROR: {exc}")
+        _say(f"ERROR: {exc}")
         return 1
 
     allowed = (page, *GENERATED_COMPANIONS)
     changes = wiki_changes(allowed)
     if page not in changes:
-        print(f"Named page has no working-tree change: {page}")
+        _say(f"Named page has no working-tree change: {page}")
         return 1
     selected = tuple(path for path in allowed if path in changes)
     staged = _staged_paths()
     if staged:
-        print(
+        _say(
             "Refusing to propose while staged paths exist: " + ", ".join(sorted(staged))
         )
         return 1
@@ -310,7 +334,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.push:
         refusal = public_push_refusal(args.remote, args.base)
         if refusal:
-            print(f"PUSH REFUSED — {refusal} Nothing was branched or pushed.")
+            _say(f"PUSH REFUSED — {refusal} Nothing was branched or pushed.")
             return 1
 
     base_now = current_branch()
@@ -318,23 +342,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"wiki/{slugify(args.title or Path(page).stem)}-"
         f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     )
-    print(f"Base branch:  {args.base}")
-    print(f"New branch:   {branch}")
-    print("Proposal paths:")
+    _say(f"Base branch:  {args.base}")
+    _say(f"New branch:   {branch}")
+    _say("Proposal paths:")
     for changed in selected:
-        print(f"  - {changed}")
+        _say(f"  - {changed}")
 
     if args.dry_run:
-        print(
+        _say(
             "[dry-run] Would lint, verify, create a branch, and commit only these paths."
         )
         return 0
 
     if not run_lint():
-        print("LINT FAILED — working tree and branch are unchanged.")
+        _say("LINT FAILED — working tree and branch are unchanged.")
         return 1
     if not run_verify():
-        print("ADDRESS VERIFICATION FAILED — working tree and branch are unchanged.")
+        _say("ADDRESS VERIFICATION FAILED — working tree and branch are unchanged.")
         return 1
 
     branch_created = False
@@ -362,24 +386,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selected=selected,
             )
             if restored:
-                print(
+                _say(
                     "PROPOSAL FAILED — restored the original branch and unstaged changes."
                 )
             else:
-                print(
+                _say(
                     "PROPOSAL FAILED — automatic recovery was incomplete; "
                     f"inspect local branch {branch}."
                 )
         else:
-            print("PROPOSAL FAILED — branch creation did not complete.")
+            _say("PROPOSAL FAILED — branch creation did not complete.")
         return 1
-    print(f"Committed exact proposal scope to {branch}")
+    _say(f"Committed exact proposal scope to {branch}")
 
     # The commit itself changed wiki/, so the branch is judged again as it now
     # stands. A refusal keeps the verified commit for a push to the right place.
     refusal = public_push_refusal(args.remote, branch)
     if args.push and refusal:
-        print(
+        _say(
             f"PUSH REFUSED — {refusal} Nothing was pushed; the verified local "
             f"commit is kept on {branch}."
         )
@@ -388,20 +412,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             git("push", "-u", args.remote, branch)
         except (OSError, subprocess.SubprocessError):
-            print(
+            _say(
                 "PUSH FAILED OR WAS AMBIGUOUS — preserved the verified local "
                 f"commit on {branch}; inspect the remote, then retry explicitly."
             )
             return 1
-        print("Open a PR for human review; do not auto-merge:")
-        print(f"  gh pr create --base {args.base} --head {branch} --fill")
+        _say("Open a PR for human review; do not auto-merge:")
+        _say(f"  gh pr create --base {args.base} --head {branch} --fill")
     elif refusal:
-        print(f"Do not push this branch to {args.remote}: {refusal}")
-        print(f"Push with: git push -u {PRIVATE_REMOTE} {branch}")
-        print(f"Then open a PR against {args.base}; a human reviews and merges.")
+        _say(f"Do not push this branch to {args.remote}: {refusal}")
+        _say(f"Push with: git push -u {PRIVATE_REMOTE} {branch}")
+        _say(f"Then open a PR against {args.base}; a human reviews and merges.")
     else:
-        print(f"Push with: git push -u {args.remote} {branch}")
-        print(f"Then open a PR against {args.base}; a human reviews and merges.")
+        _say(f"Push with: git push -u {args.remote} {branch}")
+        _say(f"Then open a PR against {args.base}; a human reviews and merges.")
     return 0
 
 

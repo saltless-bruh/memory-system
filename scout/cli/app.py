@@ -13,6 +13,7 @@ a pipe.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import sys
@@ -76,7 +77,17 @@ def _wrap(spec: CommandSpec) -> Callable[..., CommandResult]:
 
     @functools.wraps(function)
     def runner(*args: Any, **kwargs: Any) -> CommandResult:
-        return invoke(spec, *args, **kwargs)
+        # stdout belongs to `render` (render.py, rule 1). Several commands call
+        # a script's `main` in-process -- propose, verify-groundedness, publish
+        # -- and a script prints; each such line reached stdout ahead of the
+        # payload, so `-o json` could not be parsed. While a command runs, a
+        # print is diagnostics and goes to stderr, whatever the implementation
+        # does. Only the command's run is covered: cyclopts' own `--help`
+        # output is data a reader pipes into a pager, and stays on stdout.
+        # Child processes inherit the file descriptor, not `sys.stdout`, so
+        # they are each captured where they are started.
+        with contextlib.redirect_stdout(sys.stderr):
+            return invoke(spec, *args, **kwargs)
 
     runner.__name__ = spec.name.replace("-", "_")
     runner.__doc__ = spec.summary

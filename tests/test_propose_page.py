@@ -353,7 +353,7 @@ def test_explicit_push_of_the_vault_to_the_public_remote_is_refused(
 
     assert _remote_branches(two_remotes, "origin") == {"main"}
     assert result != 0
-    assert "origin" in capsys.readouterr().out
+    assert "origin" in capsys.readouterr().err
     # Refused before a branch was cut: the caller is left where they stood.
     assert _run(two_remotes / "work", "branch", "--show-current") == "vault"
 
@@ -499,7 +499,7 @@ def test_a_public_remote_named_by_its_url_is_still_the_public_remote(
 
     assert _remote_branches(two_remotes, "origin") == {"main"}
     assert result != 0
-    assert "origin/main" in capsys.readouterr().out
+    assert "origin/main" in capsys.readouterr().err
 
 
 def test_a_private_remote_named_by_its_url_still_pushes(two_remotes: Path) -> None:
@@ -556,3 +556,71 @@ def test_a_scrubbed_base_is_not_pushed_to_the_public_url(two_remotes: Path) -> N
     assert _remote_branches(two_remotes, "origin") == {"main"}
     # Refused on --base, before anything was branched.
     assert _run(work, "branch", "--show-current") == "main"
+
+
+# ── stdout carries data only ─────────────────────────────────────────────────
+#
+# `snpmemory propose` calls `main` in-process, so every `print` here lands on
+# the CLI's stdout ahead of the rendered payload and `propose -o json` stops
+# parsing. The script has no data to emit -- its answer is the exit code -- so
+# its prose is diagnostics, and diagnostics go to stderr (scout/cli/render.py).
+
+
+def _git_by_command(args: tuple[str, ...], **_kwargs: object) -> object:
+    if args[0] == "status":
+        return _completed(" M wiki/concepts/target.md\n")
+    return _completed("")
+
+
+def test_the_script_writes_its_prose_to_stderr(
+    proposal_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(propose_page, "git", lambda *a, **k: _git_by_command(a, **k))
+
+    assert propose_page.main(["--page", "wiki/concepts/target.md", "--dry-run"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "New branch" in captured.err
+
+
+def test_a_refusal_is_written_to_stderr(
+    proposal_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(propose_page, "git", lambda *a, **k: _completed(""))
+
+    assert propose_page.main(["--page", "wiki/concepts/target.md"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no working-tree change" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("script", "check"),
+    [("gen_index.py", "run_lint"), ("verify_addresses.py", "run_verify")],
+)
+def test_a_check_subprocess_never_writes_to_stdout(
+    proposal_repo: Path,
+    capfd: pytest.CaptureFixture[str],
+    script: str,
+    check: str,
+) -> None:
+    """A child inherits file descriptor 1 unless told otherwise, so its report
+    lands on the caller's stdout whatever `sys.stdout` points at. Captured and
+    relayed to stderr, it is still read by a human and never by a parser."""
+    scripts = proposal_repo / "scripts"
+    scripts.mkdir()
+    (scripts / script).write_text(
+        "import sys\nprint('CHILD REPORT')\nsys.exit(1)\n", encoding="utf-8"
+    )
+
+    assert getattr(propose_page, check)() is False
+
+    captured = capfd.readouterr()
+    assert "CHILD REPORT" not in captured.out
+    assert "CHILD REPORT" in captured.err

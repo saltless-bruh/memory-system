@@ -41,18 +41,40 @@ _STATEFUL = ("postgres", "git")
 
 
 def _compose(args: list[str], *, cwd: Any, capture: bool = True) -> Any:
-    """Run one `docker compose` invocation, or report why it could not run."""
+    """Run one `docker compose` invocation, or report why it could not run.
+
+    `capture=False` lets compose talk to the operator as it works, which for a
+    minutes-long `up --build` is the point. Only its *stderr* is left attached,
+    though -- that is where compose writes progress. A child inherits file
+    descriptor 1 unless told otherwise, and anything compose put there would
+    land on stdout ahead of the rendered payload and break `up -o json`. So its
+    stdout is taken and relayed to stderr: still read by a human, never by a
+    parser.
+    """
     import subprocess
+    import sys
 
     try:
-        return subprocess.run(  # noqa: S603 - fixed argv head, no shell
+        if capture:
+            return subprocess.run(  # noqa: S603 - fixed argv head, no shell
+                ["docker", "compose", *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+        completed = subprocess.run(  # noqa: S603 - fixed argv head, no shell
             ["docker", "compose", *args],
             cwd=cwd,
-            capture_output=capture,
+            stdout=subprocess.PIPE,
             text=True,
             timeout=600,
             check=False,
         )
+        if completed.stdout:
+            sys.stderr.write(completed.stdout)
+        return completed
     except FileNotFoundError as exc:
         raise infrastructure_error(
             "docker is not available on PATH",

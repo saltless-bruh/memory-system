@@ -174,21 +174,32 @@ def ingest(
         wanted = target.relative_to(raw_root.parent).as_posix()
         results = [row for row in results if row.get("source_uri") == wanted]
 
-    indexed = [row for row in results if row.get("chunks_count")]
+    # A document whose stored rows already match what a rebuild would write is
+    # skipped by the pipeline and reported `unchanged`. It still carries its
+    # chunk count, so it is split out here rather than counted as indexed: this
+    # run spent nothing on it.
+    unchanged = [row for row in results if row.get("status") == "unchanged"]
+    indexed = [
+        row
+        for row in results
+        if row.get("chunks_count") and row.get("status") != "unchanged"
+    ]
     empty = [row for row in results if not row.get("chunks_count")]
     return CommandResult(
         exit_code=ExitCode.SEMANTIC_FAILURE
-        if empty and not indexed
+        if empty and not indexed and not unchanged
         else ExitCode.SUCCESS,
         data={
             "status": "dry_run" if dry_run else "indexed",
             "documents": results,
             "indexed": len(indexed),
+            "unchanged": len(unchanged),
             "no_evidence": [row.get("source_uri") for row in empty],
         },
         summary=(
             f"{'[dry-run] would index' if dry_run else 'indexed'} "
             f"{len(indexed)} document(s)"
+            + (f"; {len(unchanged)} unchanged" if unchanged else "")
             + (f"; {len(empty)} yielded no text" if empty else "")
         ),
     )

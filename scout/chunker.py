@@ -6,6 +6,7 @@ plus strict LiteLLM embedding calls with dimension and numeric finiteness valida
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -17,6 +18,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
+from scout import gateway_retry
+from scout.gateway_retry import urlopen_with_retry
 from scout.parsers import ParsedDocument, ParsedSection
 
 
@@ -449,17 +452,58 @@ class LiteLLMBatchEmbedder:
         return embeddings
 
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed at most `MAX_EMBED_BATCH` texts in a single request."""
+        """Embed at most `MAX_EMBED_BATCH` texts in a single request.
+
+        Retried on a transient gateway failure, under the same bounded policy
+        as the vision call (`scout.gateway_retry`). Without it one 429 or 503
+        raised out of an ingest batch, rolled the whole batch back, and spent a
+        `sync_once` attempt re-doing every document to reach the same call.
+        """
         url, payload, headers = self._request_parts(texts)
         try:
             req = urllib.request.Request(
                 url, data=payload, headers=headers, method="POST"
             )
-            with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT_SECONDS) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            body = urlopen_with_retry(req, timeout=EMBED_TIMEOUT_SECONDS)
+            data = json.loads(body.decode("utf-8"))
         except Exception as exc:
             raise EmbeddingError("LiteLLM embedding call failed") from exc
         return self._validate_response(data, texts)
+
+    async def _aembed_one_batch(
+        self, client: httpx.AsyncClient, texts: list[str]
+    ) -> list[list[float]]:
+        """The async twin of `_embed_one_batch`, under the same retry policy.
+
+        Only a status the gateway may answer differently next time is retried
+        (`RETRYABLE_STATUS`), plus a transport failure; a 400 or 401 is raised
+        at once, because repeating it only spends quota. `Retry-After` wins
+        over the backoff curve when the gateway sends one.
+        """
+        url, payload, headers = self._request_parts(texts)
+        attempts = gateway_retry.MAX_ATTEMPTS
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await client.post(url, content=payload, headers=headers)
+                response.raise_for_status()
+                return self._validate_response(response.json(), texts)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status not in gateway_retry.RETRYABLE_STATUS or attempt == attempts:
+                    raise
+                retry_after = gateway_retry.parse_retry_after(
+                    exc.response.headers.get("Retry-After")
+                )
+                await asyncio.sleep(
+                    retry_after
+                    if retry_after is not None
+                    else gateway_retry.backoff_delay(attempt)
+                )
+            except httpx.TransportError:
+                if attempt == attempts:
+                    raise
+                await asyncio.sleep(gateway_retry.backoff_delay(attempt))
+        raise EmbeddingError("LiteLLM embedding retry loop exhausted")
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed any number of texts, splitting to respect the provider batch cap.
@@ -489,10 +533,7 @@ class LiteLLMBatchEmbedder:
             async with httpx.AsyncClient(timeout=EMBED_TIMEOUT_SECONDS) as client:
                 for start in range(0, len(texts), MAX_EMBED_BATCH):
                     batch = texts[start : start + MAX_EMBED_BATCH]
-                    url, payload, headers = self._request_parts(batch)
-                    response = await client.post(url, content=payload, headers=headers)
-                    response.raise_for_status()
-                    embeddings.extend(self._validate_response(response.json(), batch))
+                    embeddings.extend(await self._aembed_one_batch(client, batch))
         except EmbeddingError:
             raise
         except Exception as exc:

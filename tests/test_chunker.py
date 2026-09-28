@@ -175,17 +175,27 @@ def test_litellm_batch_embedder_empty_input() -> None:
 def test_litellm_batch_embedder_fails_fast_on_network_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When LiteLLM is unreachable, EmbeddingError must be raised."""
+    """When LiteLLM is unreachable, EmbeddingError must be raised.
+
+    A transport failure is retried under the bounded gateway policy first, so
+    the backoff is zeroed here; what must hold is that the retries end.
+    """
+    from scout.gateway_retry import MAX_ATTEMPTS
+
+    attempts: list[int] = []
 
     def fail_request(*_args: Any, **_kwargs: Any) -> None:
+        attempts.append(1)
         raise urllib.error.URLError("synthetic offline transport failure")
 
     monkeypatch.setattr(urllib.request, "urlopen", fail_request)
+    monkeypatch.setattr("scout.gateway_retry.backoff_delay", lambda *_a, **_k: 0.0)
     embedder = LiteLLMBatchEmbedder(
         base_url="http://invalid-host-unreachable:9999", api_key="test-key"
     )
     with pytest.raises(EmbeddingError, match="LiteLLM embedding call failed"):
         embedder.embed_texts(["test string"])
+    assert len(attempts) == MAX_ATTEMPTS
 
 
 def test_litellm_batch_embedder_rejects_dimension_mismatch(

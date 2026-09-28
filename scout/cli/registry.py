@@ -304,6 +304,11 @@ class Registry:
             # output of these commands today.
             "output": {"tty": "text", "piped": "text"},
             "global_args": [arg.to_schema() for arg in GLOBAL_ARGS],
+            # Only the kinds some command declares. Listing every `ErrorKind`
+            # published `auth` and `tty_required`, which nothing raises, and
+            # told an agent to prepare for failures that cannot happen. The
+            # codes stay reserved in `exit_codes` below; a kind returns here
+            # the moment a command declares it.
             "errors": [
                 {
                     "kind": kind.value,
@@ -311,6 +316,7 @@ class Registry:
                     "retryable": kind is ErrorKind.INFRASTRUCTURE,
                 }
                 for kind in ErrorKind
+                if any(kind in spec.errors for spec in self)
             ],
             "outcomes": [
                 {

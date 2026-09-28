@@ -13,7 +13,9 @@ a pipe.
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import os
 import sys
 from collections.abc import Callable, Sequence
 from typing import Annotated, Any
@@ -39,6 +41,12 @@ def _build_app() -> App:
     app = App(
         name="snpmemory",
         help="SNP Memory System — dual-layer knowledge vault operations.",
+        # cyclopts invents a negation for every boolean (`--no-dry-run`) and
+        # every list (`--empty-seen`). None of them is declared, so `schema`
+        # never mentioned them and an agent could not know they existed; and
+        # every flag here defaults to off, so a negation only restates the
+        # default. The parser accepts what `schema` publishes, nothing more.
+        default_parameter=Parameter(negative=()),
     )
     for spec in DECLARED:
         app.command(_wrap(spec), name=spec.name)
@@ -69,7 +77,17 @@ def _wrap(spec: CommandSpec) -> Callable[..., CommandResult]:
 
     @functools.wraps(function)
     def runner(*args: Any, **kwargs: Any) -> CommandResult:
-        return invoke(spec, *args, **kwargs)
+        # stdout belongs to `render` (render.py, rule 1). Several commands call
+        # a script's `main` in-process -- propose, verify-groundedness, publish
+        # -- and a script prints; each such line reached stdout ahead of the
+        # payload, so `-o json` could not be parsed. While a command runs, a
+        # print is diagnostics and goes to stderr, whatever the implementation
+        # does. Only the command's run is covered: cyclopts' own `--help`
+        # output is data a reader pipes into a pager, and stays on stdout.
+        # Child processes inherit the file descriptor, not `sys.stdout`, so
+        # they are each captured where they are started.
+        with contextlib.redirect_stdout(sys.stderr):
+            return invoke(spec, *args, **kwargs)
 
     runner.__name__ = spec.name.replace("-", "_")
     runner.__doc__ = spec.summary
@@ -101,15 +119,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run one command and return its exit code."""
     tokens = list(sys.argv[1:] if argv is None else argv)
 
-    # `--output` is consumed here rather than by each command, so that a failure
-    # during parsing is still reported in the format the caller asked for.
+    # The global arguments `schema` publishes (`registry.GLOBAL_ARGS`) are
+    # consumed here rather than by each command: `--output` so that a failure
+    # during parsing is still reported in the format the caller asked for, and
+    # `--no-color` because no command declares it. Both spellings of a value
+    # (`-o json`, `--output=json`) are accepted, since the schema promises an
+    # option and an option takes either. Everything after `--` belongs to the
+    # command -- `up -- -o x` forwards `-o` to compose -- and is left alone.
     fmt = OutputFormat.AUTO
     remaining: list[str] = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token in ("-o", "--output", "--format"):
-            if index + 1 >= len(tokens):
+        if token == "--":
+            remaining.extend(tokens[index:])
+            break
+        if token == "--no-color":
+            # This tool writes no ANSI of its own (see `render.py`); colour
+            # reaches a terminal only from what a command runs -- compose,
+            # git. `NO_COLOR` is how those are told, and `use_color` reads it
+            # too, so exporting it is what makes the flag mean what it says.
+            os.environ["NO_COLOR"] = "1"
+            index += 1
+            continue
+        option, equals, attached = token.partition("=")
+        if option in ("-o", "--output", "--format"):
+            if equals:
+                value, consumed = attached, 1
+            elif index + 1 < len(tokens):
+                value, consumed = tokens[index + 1], 2
+            else:
                 return render(
                     CommandResult.failure(
                         ErrorKind.INPUT_VALIDATION,
@@ -119,17 +158,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     fmt,
                 )
             try:
-                fmt = OutputFormat(tokens[index + 1])
+                fmt = OutputFormat(value)
             except ValueError:
                 return render(
                     CommandResult.failure(
                         ErrorKind.INPUT_VALIDATION,
-                        f"unknown output format {tokens[index + 1]!r}",
+                        f"unknown output format {value!r}",
                         hint="one of: auto, text, json, yaml",
                     ),
                     fmt,
                 )
-            index += 2
+            index += consumed
             continue
         remaining.append(token)
         index += 1
@@ -149,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SystemExit as exc:  # --help and --version exit cleanly through cyclopts
         return int(exc.code or 0)
     except BaseException as exc:  # noqa: BLE001 - every failure gets one envelope
-        if __import__("os").environ.get("SNP_CLI_TRACEBACK") == "1":
+        if os.environ.get("SNP_CLI_TRACEBACK") == "1":
             raise
         result = _to_result(exc)
 

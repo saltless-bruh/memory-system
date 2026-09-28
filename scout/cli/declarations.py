@@ -31,7 +31,12 @@ from scout.cli.result import ErrorKind, ExitCode
 
 #: Every state a batch can report. Declared once: `compile-status` reports it
 #: and `compile-cancel` echoes it, and two copies would drift.
+#: Held equal to `scout.cli.tasks.TaskState` by `tests/test_cli_schema_drift.py`
+#: rather than imported from it, because importing this module must not import
+#: an implementation. `unknown` is a handle that names no readable plan:
+#: `compile-status` refuses it (exit 3), but `compile-cancel` can echo it.
 _TASK_STATES = (
+    "unknown",
     "not_started",
     "running",
     "stalled",
@@ -39,6 +44,62 @@ _TASK_STATES = (
     "complete",
     "failed",
     "cancelled",
+)
+
+#: One batch's status, as `TaskStatus.to_dict()` emits it. `compile-status`
+#: returns exactly this, and `compile-plan --background` returns it too when a
+#: run is already in progress, so it is declared once for both.
+_TASK_STATUS_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        "handle",
+        "string",
+        description="Absolute, so it names one batch from anywhere.",
+    ),
+    FieldSpec("state", "string", enum=_TASK_STATES),
+    FieldSpec(
+        "terminal",
+        "boolean",
+        description="True when the batch will not change on its own. Stop polling.",
+    ),
+    FieldSpec(
+        "poll_interval",
+        "number",
+        description="Suggested seconds between polls.",
+    ),
+    FieldSpec(
+        "ttl",
+        "number",
+        description=(
+            "Seconds a `running` claim is good for. Past this with no "
+            "heartbeat, the batch is reported stalled rather than running."
+        ),
+    ),
+    FieldSpec(
+        "last_heartbeat",
+        "number",
+        nullable=True,
+        description="When an article last finished.",
+    ),
+    FieldSpec(
+        "exit_code",
+        "integer",
+        nullable=True,
+        description="Set on a terminal state.",
+    ),
+    FieldSpec("total", "integer"),
+    FieldSpec("done", "integer"),
+    FieldSpec("pending", "array", items=FieldSpec("article", "string")),
+    FieldSpec("completed", "array", items=FieldSpec("article", "string")),
+    FieldSpec("published", "array", items=FieldSpec("page", "string")),
+    FieldSpec("pid", "integer", nullable=True),
+    FieldSpec(
+        "started_at",
+        "number",
+        nullable=True,
+        description="Unix epoch seconds, like last_heartbeat.",
+    ),
+    FieldSpec("detail", "string"),
+    FieldSpec("source", "string", description="The raw/ file the plan compiles."),
 )
 
 command(
@@ -53,6 +114,7 @@ command(
             description="Narrow the document to one command. Unknown name exits 3.",
         ),
     ),
+    errors=(ErrorKind.INPUT_VALIDATION,),
     example=("-o", "json"),
     output_fields=(
         FieldSpec(
@@ -107,7 +169,7 @@ command(
     "Scan tracked, staged, and untracked bytes for credential-shaped values.",
     "scout.cli.commands.verify:verify_secrets",
     outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION,),
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
     args=(
         ArgSpec(
             "--history",
@@ -163,7 +225,7 @@ command(
     "Name every indexed document that did not arrive whole.",
     "scout.cli.commands.verify:verify_extraction",
     outcomes=_SEMANTIC,
-    errors=(ErrorKind.INFRASTRUCTURE,),
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
     example=("-o", "json"),
     output_fields=(
         _STATUS,
@@ -263,7 +325,11 @@ command(
     "scout.cli.commands.compile:compile_plan",
     effect=Effect.WRITE,
     outcomes=_SEMANTIC,
-    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
+    errors=(
+        ErrorKind.INPUT_VALIDATION,
+        ErrorKind.INFRASTRUCTURE,
+        ErrorKind.CONFIRMATION_REQUIRED,
+    ),
     args=(
         ArgSpec(
             "plan", "path", required=True, description="An approved, human-edited plan."
@@ -305,8 +371,24 @@ command(
         FieldSpec("pid", "integer", nullable=True),
         FieldSpec("log", "string", nullable=True),
         FieldSpec("total", "integer"),
-        FieldSpec("state", "string", nullable=True),
+        FieldSpec(
+            "state",
+            "string",
+            nullable=True,
+            enum=("starting", *_TASK_STATES),
+            description=(
+                "Background runs only. `starting` means launched, before the "
+                "batch has recorded itself; poll compile-status from there."
+            ),
+        ),
         FieldSpec("reason", "string", nullable=True),
+        # A `--background` call on a batch that is already running starts
+        # nothing and answers with that batch's status instead (exit 1).
+        *(
+            field
+            for field in _TASK_STATUS_FIELDS
+            if field.name not in {"handle", "state", "total", "published", "pid"}
+        ),
     ),
 )
 command(
@@ -447,52 +529,7 @@ command(
         ),
     ),
     example=("plan.md", "-o", "json"),
-    output_fields=(
-        FieldSpec(
-            "handle",
-            "string",
-            description="Absolute, so it names one batch from anywhere.",
-        ),
-        FieldSpec("state", "string", enum=_TASK_STATES),
-        FieldSpec(
-            "terminal",
-            "boolean",
-            description="True when the batch will not change on its own. Stop polling.",
-        ),
-        FieldSpec(
-            "poll_interval",
-            "number",
-            description="Suggested seconds between polls.",
-        ),
-        FieldSpec(
-            "ttl",
-            "number",
-            description=(
-                "Seconds a `running` claim is good for. Past this with no "
-                "heartbeat, the batch is reported stalled rather than running."
-            ),
-        ),
-        FieldSpec(
-            "last_heartbeat",
-            "number",
-            nullable=True,
-            description="When an article last finished.",
-        ),
-        FieldSpec(
-            "exit_code",
-            "integer",
-            nullable=True,
-            description="Set on a terminal state.",
-        ),
-        FieldSpec("total", "integer"),
-        FieldSpec("done", "integer"),
-        FieldSpec("pending", "array", items=FieldSpec("article", "string")),
-        FieldSpec("completed", "array", items=FieldSpec("article", "string")),
-        FieldSpec("published", "array", items=FieldSpec("page", "string")),
-        FieldSpec("pid", "integer", nullable=True),
-        FieldSpec("started_at", "string", nullable=True),
-        FieldSpec("detail", "string"),
-    ),
+    output_fields=_TASK_STATUS_FIELDS,
 )
 command(
     "compile-cancel",
@@ -544,6 +581,32 @@ command(
             "boolean",
             default=False,
             description="Required to write, unless --dry-run.",
+        ),
+        ArgSpec(
+            "--allow-capability-change",
+            "boolean",
+            default=False,
+            description=(
+                "Index although this environment's parser capabilities differ "
+                "from the ones that built the stored corpus. Refused (exit 7) "
+                "without --acknowledge-capability-change."
+            ),
+        ),
+        ArgSpec(
+            "--acknowledge-capability-change",
+            "string",
+            description=(
+                "The exact difference the refusal printed, restated. Recorded in "
+                "the append-only ingest_events table."
+            ),
+        ),
+        ArgSpec(
+            "--actor-hint",
+            "string",
+            description=(
+                "Caller-supplied context recorded, as unverified, with an "
+                "override. The actor itself is the database session user."
+            ),
         ),
     ),
     confirmation_bypass_arg="--confirm",
@@ -607,7 +670,7 @@ command(
     args=(
         ArgSpec("extra", "string[]", description="Forwarded verbatim, e.g. --build."),
     ),
-    errors=(ErrorKind.INFRASTRUCTURE,),
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
     example=("--build",),
     output_fields=(
         FieldSpec("services", "array", items=FieldSpec("service", "object")),
@@ -628,7 +691,11 @@ command(
         ),
     ),
     confirmation_bypass_arg="--confirm",
-    errors=(ErrorKind.INFRASTRUCTURE, ErrorKind.CONFIRMATION_REQUIRED),
+    errors=(
+        ErrorKind.INPUT_VALIDATION,
+        ErrorKind.INFRASTRUCTURE,
+        ErrorKind.CONFIRMATION_REQUIRED,
+    ),
     example=("--confirm",),
     output_fields=(FieldSpec("status", "string", enum=("stopped",)),),
 )
@@ -637,7 +704,7 @@ command(
     "Report every service, plus the two checks docker compose cannot make.",
     "scout.cli.commands.stack:status",
     outcomes=_SEMANTIC,
-    errors=(ErrorKind.INFRASTRUCTURE,),
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
     example=("-o", "json"),
     output_fields=(
         FieldSpec(
@@ -697,10 +764,15 @@ command(
         ArgSpec("service", "string", description="Omit for every service."),
         ArgSpec("extra", "string[]", description="Forwarded verbatim, e.g. --tail 50."),
     ),
-    errors=(ErrorKind.INFRASTRUCTURE,),
+    errors=(ErrorKind.INPUT_VALIDATION, ErrorKind.INFRASTRUCTURE),
     example=("sync-job", "--tail", "20"),
     output_fields=(
-        FieldSpec("service", "string", nullable=True),
+        FieldSpec(
+            "service",
+            "string",
+            nullable=True,
+            description="The service named first; null when a flag came first.",
+        ),
         FieldSpec("lines", "array", items=FieldSpec("line", "string")),
     ),
 )
@@ -722,7 +794,12 @@ command(
         ),
     ),
     confirmation_bypass_arg="--confirm",
-    errors=(ErrorKind.CONFIRMATION_REQUIRED, ErrorKind.CONFLICT),
+    errors=(
+        ErrorKind.INPUT_VALIDATION,
+        ErrorKind.INFRASTRUCTURE,
+        ErrorKind.CONFIRMATION_REQUIRED,
+        ErrorKind.CONFLICT,
+    ),
     example=("--directory", ".secrets"),
     output_fields=(
         FieldSpec("directory", "string"),
@@ -901,6 +978,7 @@ command(
     outcomes=_SEMANTIC,
     errors=(
         ErrorKind.INPUT_VALIDATION,
+        ErrorKind.INFRASTRUCTURE,
         ErrorKind.CONFIRMATION_REQUIRED,
         ErrorKind.CONFLICT,
     ),
@@ -1152,7 +1230,15 @@ command(
             nullable=True,
             description="The first stage that failed, or null when all passed.",
         ),
-        FieldSpec("stages", "array", items=FieldSpec("stage", "string")),
+        FieldSpec(
+            "stages",
+            "object",
+            description=(
+                "Keyed by stage name, in the order run, up to and including the "
+                "first failure. Each value is that stage's own payload, as its "
+                "command (verify-vault, verify-secrets, ...) declares it."
+            ),
+        ),
     ),
 )
 

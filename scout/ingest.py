@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fnmatch
+import functools
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Mapping
@@ -20,6 +22,7 @@ import yaml
 
 from scout.capabilities import capability_fingerprint
 from scout.chunker import (
+    AsyncEmbedder,
     ContextualChunker,
     Embedder,
     EmbeddingError,
@@ -294,6 +297,39 @@ class ParseCache:
         self._entries.clear()
 
 
+#: Bumped whenever the raw lane changes how a parsed document becomes chunks in
+#: a way the chunker's own settings do not show. The bytes of a source do not
+#: move when those rules do, so without it the short-circuit in
+#: `ingest_directory` would skip exactly the documents a fix was written for.
+RAW_INGEST_REVISION = 1
+
+
+def raw_chunk_policy(chunker: ContextualChunker) -> str:
+    """Name how the raw lane cut a document, for the chunk `chunk_policy` stamp.
+
+    The same bytes cut at different boundaries retrieve differently, and
+    nothing else records it: `capability_fingerprint` covers the parser, not
+    the chunker.
+    """
+    return (
+        f"chars={chunker.max_chunk_chars};overlap={chunker.overlap_chars}"
+        f";rev={RAW_INGEST_REVISION}"
+    )
+
+
+async def _embed(embedder: Embedder, texts: list[str]) -> list[list[float]]:
+    """Embed without blocking the event loop the caller shares.
+
+    `embed_texts` is synchronous urllib, and `ingest_document` is a coroutine
+    on the loop sync-job also runs its vault watcher and readiness aggregator
+    on: every embed stalled them for the length of a gateway round trip. An
+    embedder with an async path is awaited; one without is run in a thread.
+    """
+    if isinstance(embedder, AsyncEmbedder):
+        return await embedder.aembed_texts(texts)
+    return await asyncio.to_thread(embedder.embed_texts, texts)
+
+
 def embedder_model_stamp(embedder: Embedder) -> str:
     """Name the vector space an embedder produces, for the chunk `model` stamp.
 
@@ -306,6 +342,46 @@ def embedder_model_stamp(embedder: Embedder) -> str:
     if isinstance(model, str) and model.strip():
         return model
     return type(embedder).__name__
+
+
+#: The one document upsert, shared by a document with evidence and by the
+#: tombstone of one without, so the two cannot drift in what they record.
+_UPSERT_DOCUMENT_SQL = """
+    INSERT INTO rag_documents
+        (source_uri, allowed_depts, title, ingested_at,
+         capability_fingerprint, extraction_status)
+    VALUES ($1, $2, $3, now(), $4, $5)
+    ON CONFLICT (source_uri) DO UPDATE
+    SET allowed_depts = EXCLUDED.allowed_depts,
+        title = EXCLUDED.title,
+        ingested_at = EXCLUDED.ingested_at,
+        capability_fingerprint = EXCLUDED.capability_fingerprint,
+        extraction_status = EXCLUDED.extraction_status
+    RETURNING doc_id;
+"""
+
+
+def no_text_state(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """The extraction status of a source that yielded no text at all.
+
+    Never complete: whatever the reason, the document contributes no evidence,
+    and `verify-extraction` names every document whose record is not complete.
+    `text` is always among the losses; a failed extractor (`vision` for an
+    image nobody could transcribe) is named beside it, which is what tells a
+    failed transcription apart from a genuinely empty file.
+
+    `no_text` and `corpus` mark the row as a tombstone. A tombstone has no
+    chunks, so it carries no chunk `corpus` stamp either, and the tier sweeps
+    (`_CORPUS_TIER_SQL`) read the tier from here instead -- otherwise the row
+    would outlive its file forever, claimed by no tier's reconciliation.
+    """
+    record = extraction_state(metadata)
+    record["incomplete"] = sorted({*record.get("incomplete", ()), "text"})
+    record["complete"] = False
+    record["no_text"] = True
+    corpus = metadata.get("corpus")
+    record["corpus"] = corpus if isinstance(corpus, str) else None
+    return record
 
 
 async def ingest_document(
@@ -334,10 +410,19 @@ async def ingest_document(
 
     # 1. Parse document. A retry after a failed embed must not re-parse a corpus
     # that has not changed — see `ParseCache`.
+    #
+    # Off the event loop: a parse reads the file and may call the vision route
+    # (blocking urllib, retried with sleeps). sync-job runs its watchers and
+    # readiness aggregator on one loop, so a parse done inline stalled all of
+    # them for as long as it took.
     if parse_cache is None:
-        parsed_doc = parse_file(file_path, base_dir=base_dir, env=env)
+        parsed_doc = await asyncio.to_thread(
+            parse_file, file_path, base_dir=base_dir, env=env
+        )
     else:
-        parsed_doc = parse_cache.parsed(file_path, base_dir=base_dir, env=env)
+        parsed_doc = await asyncio.to_thread(
+            parse_cache.parsed, file_path, base_dir=base_dir, env=env
+        )
     if document_transform is not None:
         parsed_doc = document_transform(parsed_doc)
     chunks = chunker.chunk_document(parsed_doc)
@@ -364,19 +449,47 @@ async def ingest_document(
         # image descriptions of audit finding B3 survived a re-ingest, still
         # carrying their earlier (possibly public) ACL. No evidence is the
         # honest outcome; retrieval then reports `no_source` for the address.
-        purged = False
-        if conn is not None:
+        #
+        # But no evidence is not no record. Returning before anything was
+        # written left `verify-extraction` -- which reads only
+        # `rag_documents.extraction_status` -- unable to name the document at
+        # all: an image whose transcription failed was indistinguishable from
+        # a file that never existed. So the address keeps a tombstone: a
+        # document row with no chunks, under the file's *current* ACL, whose
+        # extraction status says it yielded no text and which extractor, if
+        # any, is why.
+        tombstone = no_text_state(parsed_doc.metadata)
+        close_conn = False
+        if conn is None:
+            conn = await get_pg_connection(env)
+            close_conn = True
+        try:
             async with conn.transaction():
-                deleted = await conn.execute(
-                    "DELETE FROM rag_documents WHERE source_uri = $1;",
+                row = await conn.fetchrow(
+                    _UPSERT_DOCUMENT_SQL,
                     parsed_doc.source_uri,
+                    allowed_depts,
+                    parsed_doc.title,
+                    json.dumps(capability_fingerprint()),
+                    json.dumps(tombstone, default=str),
                 )
-            purged = deleted.rsplit(" ", 1)[-1] not in {"0", ""}
+                if not row:
+                    raise RuntimeError(
+                        f"Failed to record document {parsed_doc.source_uri}"
+                    )
+                deleted = await conn.execute(
+                    "DELETE FROM rag_chunks WHERE doc_id = $1;", row["doc_id"]
+                )
+        finally:
+            if close_conn:
+                await conn.close()
+        purged = str(deleted).rsplit(" ", 1)[-1] not in {"0", ""}
         return {
             "source_uri": parsed_doc.source_uri,
             "title": parsed_doc.title,
             "chunks_count": 0,
             "status": "purged_empty" if purged else "skipped_empty",
+            "extraction_status": tombstone,
         }
 
     extraction = extraction_state(parsed_doc.metadata)
@@ -389,7 +502,7 @@ async def ingest_document(
         source_uri=parsed_doc.source_uri,
         chunk_count=len(chunks),
     )
-    embeddings = embedder.embed_texts(texts_to_embed)
+    embeddings = await _embed(embedder, texts_to_embed)
     _observe_ingest_stage(
         stage_observer,
         "embed_response_received",
@@ -415,19 +528,7 @@ async def ingest_document(
         async with conn.transaction():
             # Upsert document record
             row = await conn.fetchrow(
-                """
-                INSERT INTO rag_documents
-                    (source_uri, allowed_depts, title, ingested_at,
-                     capability_fingerprint, extraction_status)
-                VALUES ($1, $2, $3, now(), $4, $5)
-                ON CONFLICT (source_uri) DO UPDATE
-                SET allowed_depts = EXCLUDED.allowed_depts,
-                    title = EXCLUDED.title,
-                    ingested_at = EXCLUDED.ingested_at,
-                    capability_fingerprint = EXCLUDED.capability_fingerprint,
-                    extraction_status = EXCLUDED.extraction_status
-                RETURNING doc_id;
-                """,
+                _UPSERT_DOCUMENT_SQL,
                 parsed_doc.source_uri,
                 allowed_depts,
                 parsed_doc.title,
@@ -517,10 +618,18 @@ async def ingest_document(
 _CORPUS_TIER_SQL = """
     SELECT d.doc_id, d.source_uri
     FROM rag_documents d
-    WHERE EXISTS (
-            SELECT 1 FROM rag_chunks c
-            WHERE c.doc_id = d.doc_id
-              AND c.metadata->>'corpus' IS NOT DISTINCT FROM $1::text
+    WHERE (
+            EXISTS (
+                SELECT 1 FROM rag_chunks c
+                WHERE c.doc_id = d.doc_id
+                  AND c.metadata->>'corpus' IS NOT DISTINCT FROM $1::text
+            )
+            OR (
+                -- A no-text tombstone (`no_text_state`): no chunk carries a
+                -- stamp, so the tier is read from its extraction record.
+                d.extraction_status->>'no_text' = 'true'
+                AND d.extraction_status->>'corpus' IS NOT DISTINCT FROM $1::text
+            )
           )
       AND NOT EXISTS (
             SELECT 1 FROM rag_chunks c
@@ -536,6 +645,7 @@ async def reconcile_deletions(
     dry_run: bool = False,
     acl: DocumentAclMap | None = None,
     corpus: str | None = None,
+    base_dir: Path | None = None,
 ) -> list[str]:
     """Finds and deletes database documents no longer part of the authorized corpus.
 
@@ -551,6 +661,11 @@ async def reconcile_deletions(
     **101 vault pages** for deletion because no file backed them *there*. The
     two corpora share one flat `source_uri` namespace, so directory name alone
     cannot say who owns a row; the corpus stamp can.
+
+    `base_dir` is what every `source_uri` is relative to -- the parent of the
+    corpus root -- and defaults to `dir_path`'s parent, which is right only when
+    `dir_path` *is* the corpus root. Sweeping `raw/papers` has to look for rows
+    named `raw/papers/...`, not `papers/...`.
     """
     close_conn = False
     if conn is None:
@@ -561,8 +676,10 @@ async def reconcile_deletions(
     try:
         rows = await conn.fetch(_CORPUS_TIER_SQL, corpus)
         dir_path_resolved = dir_path.resolve()  # noqa: ASYNC240
-        base_parent = dir_path_resolved.parent
-        dir_name = dir_path_resolved.name
+        base_parent = (
+            dir_path_resolved.parent if base_dir is None else base_dir.resolve()  # noqa: ASYNC240
+        )
+        dir_name = dir_path_resolved.relative_to(base_parent).as_posix()
 
         # Collect existing relative URIs in this directory tree
         existing_disk_uris = {
@@ -745,6 +862,156 @@ async def record_capability_override(
     )
 
 
+#: What a previous ingest left behind, per raw-tier document under one prefix.
+#: Aggregated rather than per chunk so that a document whose chunks disagree --
+#: a half-written upsert, or chunks from before these stamps existed (a NULL is
+#: not counted as a distinct value) -- is visibly inconsistent and is rebuilt
+#: instead of trusted. Only untiered documents qualify: the vault has its own
+#: top-level `raw/` folder, so the prefix alone would reach its rows too.
+_RAW_SIGNATURE_SQL = """
+    SELECT d.source_uri,
+           d.allowed_depts,
+           d.capability_fingerprint,
+           d.extraction_status,
+           count(*)                                        AS chunks,
+           count(DISTINCT c.metadata->>'content_hash')      AS hashes,
+           max(c.metadata->>'content_hash')                 AS content_hash,
+           count(DISTINCT c.metadata->>'model')             AS models,
+           max(c.metadata->>'model')                        AS model,
+           count(DISTINCT c.metadata->>'chunk_policy')      AS policies,
+           max(c.metadata->>'chunk_policy')                 AS chunk_policy
+    FROM rag_documents d
+    JOIN rag_chunks c ON c.doc_id = d.doc_id
+    WHERE d.source_uri LIKE $1
+    GROUP BY d.doc_id, d.source_uri, d.allowed_depts,
+             d.capability_fingerprint, d.extraction_status
+    HAVING bool_and(c.metadata->>'corpus' IS NULL);
+"""
+
+
+def _json_object(value: object) -> dict[str, Any] | None:
+    """Decode a jsonb column however the driver handed it over."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+@dataclass(frozen=True, slots=True)
+class _RawSignature:
+    """What one raw document's stored rows agree on, or fail to agree on."""
+
+    chunks: int
+    hashes: int
+    content_hash: str | None
+    models: int
+    model: str | None
+    policies: int
+    chunk_policy: str | None
+    allowed_depts: tuple[str, ...]
+    capability_fingerprint: dict[str, Any] | None
+    extraction_status: dict[str, Any] | None
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> _RawSignature:
+        def text(key: str) -> str | None:
+            value = row[key]
+            return value if isinstance(value, str) else None
+
+        def count(key: str) -> int:
+            value = row[key]
+            return value if isinstance(value, int) else 0
+
+        depts = row["allowed_depts"]
+        return cls(
+            chunks=count("chunks"),
+            hashes=count("hashes"),
+            content_hash=text("content_hash"),
+            models=count("models"),
+            model=text("model"),
+            policies=count("policies"),
+            chunk_policy=text("chunk_policy"),
+            allowed_depts=tuple(str(d) for d in depts) if depts else (),
+            capability_fingerprint=_json_object(row["capability_fingerprint"]),
+            extraction_status=_json_object(row["extraction_status"]),
+        )
+
+    def matches(
+        self,
+        *,
+        content_hash: str,
+        allowed_depts: list[str],
+        model: str,
+        chunk_policy: str,
+        fingerprint: Mapping[str, Any],
+    ) -> bool:
+        """True when a rebuild would write exactly what is already stored.
+
+        Every input that changes what would be written is compared, or the
+        short-circuit silently serves stale evidence:
+
+        * `content_hash` -- the source's own bytes.
+        * `allowed_depts` -- the ACL map can change while the bytes do not, and
+          a revoked grant must actually be revoked.
+        * `model` -- two vector spaces in one index is F-2.
+        * `chunk_policy` -- the same bytes cut differently retrieve differently.
+        * `capability_fingerprint` -- a different parser yields other sections.
+        * `extraction_status` -- a document that arrived degraded (a figure the
+          describer refused, say) is retried rather than frozen as it is.
+        """
+        from scout.capabilities import describe_fingerprint_difference
+
+        if self.chunks == 0:
+            return False
+        if (self.hashes, self.models, self.policies) != (1, 1, 1):
+            return False
+        if self.content_hash != content_hash:
+            return False
+        if sorted(self.allowed_depts) != sorted(allowed_depts):
+            return False
+        if self.model != model or self.chunk_policy != chunk_policy:
+            return False
+        if self.capability_fingerprint is None:
+            return False
+        if describe_fingerprint_difference(
+            self.capability_fingerprint, dict(fingerprint)
+        ):
+            return False
+        return bool(self.extraction_status and self.extraction_status.get("complete"))
+
+
+async def _raw_signatures(
+    conn: asyncpg.Connection, prefix: str
+) -> dict[str, _RawSignature]:
+    rows = await conn.fetch(_RAW_SIGNATURE_SQL, f"{prefix}%")
+    return {str(row["source_uri"]): _RawSignature.from_row(row) for row in rows}
+
+
+def _file_digest(file_path: Path) -> str:
+    return hashlib.sha256(file_path.read_bytes()).hexdigest()
+
+
+def _stamp_raw_document(
+    document: ParsedDocument, *, content_hash: str, chunk_policy: str
+) -> ParsedDocument:
+    """Carry the short-circuit's inputs onto every chunk the document yields.
+
+    A copy, never an in-place edit: the parse may be a `ParseCache` entry.
+    """
+    return ParsedDocument(
+        source_uri=document.source_uri,
+        title=document.title,
+        sections=document.sections,
+        metadata={
+            **document.metadata,
+            "content_hash": content_hash,
+            "chunk_policy": chunk_policy,
+        },
+    )
+
+
 async def ingest_directory(
     dir_path: Path,
     allowed_depts: list[str] | None = None,
@@ -757,6 +1024,7 @@ async def ingest_directory(
     acknowledge_capability_change: str | None = None,
     actor_hint: str | None = None,
     env: Mapping[str, str] | None = None,
+    base_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Recursively ingests a directory under one explicit document ACL source.
 
@@ -765,9 +1033,17 @@ async def ingest_directory(
     the ones no rule matches. Naming neither is an error — there is no implicit
     department, so nothing can become publicly readable by omission.
 
+    `base_dir` is what each document's `source_uri` is relative to: the parent
+    of the corpus root, so `raw/papers/x.md` is named `raw/papers/x.md`. It
+    defaults to `dir_path`'s parent, which is correct only when `dir_path` is
+    the corpus root itself. A caller indexing a subtree must pass it, or the
+    subtree's documents are stored under a second identity (`papers/x.md`)
+    beside the one sync-job writes, and both are retrievable.
+
     Raises:
         AclPolicyError: Neither or both ACL sources were supplied.
     """
+    uri_root = dir_path.parent if base_dir is None else base_dir
     if (allowed_depts is None) == (acl is None):
         raise AclPolicyError(
             "ingest_directory needs exactly one document ACL source: "
@@ -834,7 +1110,7 @@ async def ingest_directory(
                 # to reproduce are the untiered ones.
                 conn,
                 dir_path,
-                dir_path.parent,
+                uri_root,
                 corpus=None,
             )
             if mismatch and not allow_capability_change:
@@ -859,8 +1135,18 @@ async def ingest_directory(
                     acknowledgement=acknowledge_capability_change or "",
                     actor_hint=actor_hint,
                     dir_path=dir_path,
-                    base_dir=dir_path.parent,
+                    base_dir=uri_root,
                 )
+
+        # What the index already holds for this subtree. A dry run has no
+        # connection to ask, so it reports what a real run would consider
+        # rather than what it would skip.
+        signatures: dict[str, _RawSignature] = {}
+        if conn is not None:
+            signatures = await _raw_signatures(conn, _scanned_uri(dir_path, uri_root))
+        model_stamp = embedder_model_stamp(embedder)
+        chunk_policy = raw_chunk_policy(chunker)
+        fingerprint = capability_fingerprint()
 
         async def ingest_batch() -> None:
             for file_path in files:
@@ -872,22 +1158,51 @@ async def ingest_directory(
                     # published at all. Recorded, never silently skipped.
                     results.append(
                         {
-                            "source_uri": _scanned_uri(file_path, dir_path.parent),
+                            "source_uri": _scanned_uri(file_path, uri_root),
                             "chunks_count": 0,
                             "status": "skipped_unmapped_acl",
                         }
                     )
                     continue
                 try:
+                    source_uri = _scanned_uri(file_path, uri_root)
+                    digest = await asyncio.to_thread(_file_digest, file_path)
+                    signature = signatures.get(source_uri)
+                    if signature is not None and signature.matches(
+                        content_hash=digest,
+                        allowed_depts=file_depts,
+                        model=model_stamp,
+                        chunk_policy=chunk_policy,
+                        fingerprint=fingerprint,
+                    ):
+                        # Nothing about this source or this pipeline has
+                        # changed, so the stored chunks are exactly what a
+                        # rebuild would produce. Without this every change
+                        # under raw/ re-parsed and re-embedded the whole
+                        # corpus -- cost and cycle time that scaled with the
+                        # corpus, not with the change.
+                        results.append(
+                            {
+                                "source_uri": source_uri,
+                                "chunks_count": signature.chunks,
+                                "status": "unchanged",
+                            }
+                        )
+                        continue
                     res = await ingest_document(
                         file_path=file_path,
                         allowed_depts=file_depts,
                         conn=conn,
                         chunker=chunker,
                         embedder=embedder,
-                        base_dir=dir_path.parent,
+                        base_dir=uri_root,
                         dry_run=dry_run,
                         parse_cache=parse_cache,
+                        document_transform=functools.partial(
+                            _stamp_raw_document,
+                            content_hash=digest,
+                            chunk_policy=chunk_policy,
+                        ),
                         # The vision route too. Deciding it from `os.environ`
                         # below here recorded every image `unconfigured` and
                         # purged its good rows whenever the `.env` the CLI
@@ -908,7 +1223,7 @@ async def ingest_directory(
                         raise
                     results.append(
                         skipped_file(
-                            _scanned_uri(file_path, dir_path.parent),
+                            _scanned_uri(file_path, uri_root),
                             error=type(exc).__name__,
                             reason=str(exc),
                         )
@@ -919,6 +1234,7 @@ async def ingest_directory(
             if reconcile and conn is not None:
                 deleted = await reconcile_deletions(
                     dir_path=dir_path,
+                    base_dir=uri_root,
                     conn=conn,
                     dry_run=dry_run,
                     acl=acl,

@@ -76,9 +76,17 @@ def extraction_state(metadata: Mapping[str, Any]) -> dict[str, Any]:
     A document with no extractor state at all -- Markdown, a CSV -- is complete
     by construction: there is nothing structural to lose.
     """
+    # `vision` is an image's whole text: an unconfigured or failed VLM read as
+    # complete while the parse had lost everything the image carries.
+    # `references_status` is left out on purpose -- `no_evidence` and `lifted`
+    # are both outcomes of a working extractor, never a loss.
     states = {
         name: metadata[key]
-        for name, key in (("figures", "figures_status"), ("tables", "tables_status"))
+        for name, key in (
+            ("figures", "figures_status"),
+            ("tables", "tables_status"),
+            ("vision", "vlm_status"),
+        )
         if metadata.get(key) is not None
     }
     record: dict[str, Any] = {"extractors": states}

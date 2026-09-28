@@ -126,6 +126,13 @@ def ingest(
     async def run() -> list[dict[str, Any]]:
         return await ingest_directory(
             dir_path=target if target.is_dir() else target.parent,
+            # A document's identity is relative to the corpus root's parent
+            # whatever subtree this run names -- `raw/papers/x.md`, the same
+            # `source_uri` sync-job writes. Leaving it to default to the
+            # target's own parent stored `papers/x.md` as a second, duplicate
+            # row, and made the `--path` filter below discard the file it had
+            # just indexed.
+            base_dir=raw_root.resolve().parent,
             acl=acl,
             dry_run=dry_run,
             reconcile=target.is_dir(),
@@ -167,21 +174,32 @@ def ingest(
         wanted = target.relative_to(raw_root.parent).as_posix()
         results = [row for row in results if row.get("source_uri") == wanted]
 
-    indexed = [row for row in results if row.get("chunks_count")]
+    # A document whose stored rows already match what a rebuild would write is
+    # skipped by the pipeline and reported `unchanged`. It still carries its
+    # chunk count, so it is split out here rather than counted as indexed: this
+    # run spent nothing on it.
+    unchanged = [row for row in results if row.get("status") == "unchanged"]
+    indexed = [
+        row
+        for row in results
+        if row.get("chunks_count") and row.get("status") != "unchanged"
+    ]
     empty = [row for row in results if not row.get("chunks_count")]
     return CommandResult(
         exit_code=ExitCode.SEMANTIC_FAILURE
-        if empty and not indexed
+        if empty and not indexed and not unchanged
         else ExitCode.SUCCESS,
         data={
             "status": "dry_run" if dry_run else "indexed",
             "documents": results,
             "indexed": len(indexed),
+            "unchanged": len(unchanged),
             "no_evidence": [row.get("source_uri") for row in empty],
         },
         summary=(
             f"{'[dry-run] would index' if dry_run else 'indexed'} "
             f"{len(indexed)} document(s)"
+            + (f"; {len(unchanged)} unchanged" if unchanged else "")
             + (f"; {len(empty)} yielded no text" if empty else "")
         ),
     )

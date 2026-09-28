@@ -589,6 +589,27 @@ class _IndexedSignature:
         return not describe_fingerprint_difference(recorded, dict(fingerprint))
 
 
+#: Withdraw one vault document. The tier predicate is not decoration: the two
+#: corpora share one flat `source_uri` namespace, and the vault has its own
+#: top-level `raw/` folder, so an address alone cannot say whose row it is.
+_PURGE_WIKI_DOCUMENT_SQL = """
+    DELETE FROM rag_documents d
+    WHERE d.source_uri = $1
+      AND NOT EXISTS (
+            SELECT 1 FROM rag_chunks c
+            WHERE c.doc_id = d.doc_id
+              AND c.metadata->>'corpus' IS DISTINCT FROM $2::text
+          );
+"""
+
+
+async def _purge_wiki_document(conn: asyncpg.Connection, source_uri: str) -> bool:
+    """Delete a vault page's rows; report whether there were any to delete."""
+    async with conn.transaction():
+        status = await conn.execute(_PURGE_WIKI_DOCUMENT_SQL, source_uri, WIKI_CORPUS)
+    return str(status).rsplit(" ", 1)[-1] not in {"0", ""}
+
+
 async def _indexed_signatures(
     conn: asyncpg.Connection,
 ) -> dict[str, _IndexedSignature]:
@@ -716,14 +737,31 @@ async def ingest_wiki(
                 # A single unwritable page must not abort the corpus. The
                 # reference vault carries at least one zero-byte stub, and
                 # Obsidian creates one on every "new note". Report it and
-                # continue, matching ingest_document's own skipped_empty
-                # vocabulary for sources that yield no text.
+                # continue.
+                #
+                # But a page that *had* a body and was edited down to a stub
+                # must not keep what it used to say. The refusal is raised
+                # inside `ingest_document` before its own purge branch, so the
+                # purge is repeated here: without it the old chunks stayed
+                # searchable for as long as the stub stayed on disk, and every
+                # cycle re-attempted and re-skipped the page. No evidence is
+                # the honest outcome, as it is for a raw source with no text.
+                # A dry run may still hold a connection -- the ingest policy
+                # gate passes one to read the manifest -- and it deletes
+                # nothing: it reports what a real run would skip.
+                purged = False
+                if (
+                    signature is not None
+                    and active_connection is not None
+                    and not dry_run
+                ):
+                    purged = await _purge_wiki_document(active_connection, source_uri)
                 results.append(
                     {
-                        "source_uri": str(page.path.relative_to(root)),
+                        "source_uri": source_uri,
                         "title": page.title,
                         "chunks_count": 0,
-                        "status": "skipped_no_body",
+                        "status": "purged_empty" if purged else "skipped_no_body",
                         "reason": str(exc),
                     }
                 )

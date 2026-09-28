@@ -386,6 +386,12 @@ def _pdf_figure_sections(
     the same contract `parse_image` follows. An invented description of a
     diagram is indistinguishable from a real one to a reader, which is exactly
     what makes fabricating it unacceptable.
+
+    A *real* description is still the model's prose and not the author's: the
+    section text is the caption followed by what the vision model wrote. The
+    ``kind="figure"`` and ``vlm_status`` metadata below are the only record of
+    that, and they travel with every chunk so `wiki_quote` can mark the passage
+    ``verbatim: false`` instead of handing it out as a quotation.
     """
     from scout.pdf_structure import PdfStructureError, extract_figures
 
@@ -715,6 +721,12 @@ def parse_image(
     if extracted_markdown and extracted_markdown.strip():
         doc = parse_markdown(extracted_markdown, source_uri)
         metadata["vlm_status"] = VLM_STATUS_OK
+        # Every section of this document is the model's prose, not the image's
+        # text. Mark each one the way `_pdf_figure_sections` marks a figure, so
+        # a retrieved chunk carries its origin and `wiki_quote` can refuse to
+        # call it verbatim.
+        for section in doc.sections:
+            section.metadata.update({"kind": "image", "vlm_status": VLM_STATUS_OK})
         return ParsedDocument(
             source_uri=source_uri,
             title=title,

@@ -135,6 +135,10 @@ def test_parse_image_with_vision_extractor() -> None:
         assert "Latency: 145ms" in doc.sections[1].text
         assert doc.metadata["vlm_status"] == VLM_STATUS_OK
         assert "vlm_error" not in doc.metadata
+        # Model-written text is marked at its source, the way a figure is, so a
+        # retrieved chunk can say it is a description rather than a quotation.
+        assert all(s.metadata.get("kind") == "image" for s in doc.sections)
+        assert all(s.metadata.get("vlm_status") == "ok" for s in doc.sections)
     finally:
         if img_path.exists():
             img_path.unlink()

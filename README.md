@@ -4,8 +4,9 @@ SNP is a self-hosted memory system for coding agents and engineering teams.
 Git-backed Markdown pages provide a compact, compiled knowledge map; the same
 PostgreSQL 16 with pgvector index also stores source chunks used by the
 operator's compilation pipeline. Agents retrieve wiki pages through
-authenticated Scout: `wiki_search` finds candidates, then `wiki_read` returns
-a canonical page. Source extraction beyond indexed wiki pages is deferred.
+authenticated Scout: `wiki_search` finds candidates, `wiki_read` returns a
+canonical page, and `wiki_quote` returns the verbatim `raw/` passage behind one
+of that page's `sources[]` entries.
 
 > Before operating on the vault, read [`AGENTS.md`](AGENTS.md). It is the
 > authoritative query, page, citation, and PR-first contract. See
@@ -33,14 +34,21 @@ Git remote -- signed webhook --> host-sync --> snapshots/<commit>/wiki
   `allowed_depts`, **a file matching no rule is not indexed at all**, and an
   unreadable policy publishes nothing. There is deliberately no fallback to the
   public `all` ACL.
-- Scout exposes exactly two retrieval tools, `wiki_search(query, department, k,
-  seen)` and `wiki_read(path, department, mode)`, and never synthesizes an
-  answer from retrieved text. Read modes are `tldr`, `outline`, one `section`,
-  and `full`. `rag_fetch` is no longer an agent-facing MCP tool; the same
-  engine call still backs `scripts/verify_addresses.py` and the `scout rag`
-  CLI internally.
-- PostgreSQL RLS applies the authenticated caller's canonical departments:
-  `redteam`, `blueteam`, `ai_eng`, and `infra`.
+- Scout exposes exactly three retrieval tools, `wiki_search(query, department,
+  k, seen)`, `wiki_read(path, department, mode)`, and `wiki_quote(path, hint,
+  department)`, and never synthesizes an answer from retrieved text. Read
+  modes are `tldr`, `outline`, one `section`, and `full`. `wiki_quote` resolves
+  a `sources[]` entry to passages post-filtered to that one file, or returns
+  `status: "no_source"`. `rag_fetch` is no longer an agent-facing MCP tool;
+  `wiki_quote` and `scripts/verify_addresses.py` call the same engine function
+  internally.
+- PostgreSQL RLS applies the authenticated caller's canonical departments
+  (`redteam`, `blueteam`, `ai_eng`, `infra`) to every indexed row. Source
+  chunks carry the departments `raw/.acl.yaml` grants them, so source
+  retrieval is department-scoped. Wiki pages are **not yet department-scoped**:
+  ingestion grants every page all four departments, whatever its frontmatter
+  says, and `wiki_read` reads a page by path without comparing departments.
+  Per-department wiki restriction is planned, not present.
 - `rag_app_role` is the least-privilege query identity. `rag_ingest_role` is
   the least-privilege ingestion identity. Migration administration is confined
   to the one-shot migration/provisioning service.
@@ -66,9 +74,16 @@ the enabled OpenAI, Anthropic, or Gemini routes.
 ./scripts/bootstrap.sh
 # Review .env and the generated .secrets/* files; configure provider keys and auth.
 source .venv/bin/activate
-docker compose up -d --build
+SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build
 docker compose ps
 ```
+
+`bootstrap.sh` creates `.venv` (with `uv sync`, or `python3 -m venv` and pip
+when uv is absent), so the `source` line has something to activate.
+`SNP_GIT_REVISION` stamps the built images with the commit they came from;
+without it they are labelled `unknown`, and `snpmemory status` and the
+preflight report the stack as unverifiable. Rebuild the same way after every
+commit you deploy.
 
 The Compose dependency graph runs `postgres-migrate` before Scout and
 `sync-job`. Do not bypass this ordering or use a runtime role to apply schema
@@ -155,6 +170,10 @@ human PR handoff, and the ten-edit latency experiment.
 3. Answer from the read page. A search snippet is never sufficient answer
    text.
 4. Cite the wiki page's `path` and the heading used.
+5. When the answer needs the passage under a claim, call
+   `wiki_quote(path, hint, department)` with a `path`/`hint` pair from the read
+   page's `sources[]`. Report `status: "no_source"` as it is; never write a
+   quotation the tool did not return.
 
 The operator handles ingestion and compilation in an authorized checkout;
 the fresh retrieval agent does not gain filesystem or database authority.
@@ -259,17 +278,16 @@ no chunks at all. A declared `loc` that no longer matches is reported as an
 advisory `note:` and does not fail the gate.
 
 Its exit codes are total: `0` means all addresses pass, `1` means semantic
-`FAIL`/`DRIFT`, and `2` means infrastructure or configuration failure. The
-closed-loop CI entry point is:
+`FAIL`/`DRIFT`, and `2` means infrastructure or configuration failure. Exit `2`
+is never a content finding and never a reason to edit a page.
 
-```bash
-uv run python scripts/ci_address_gate.py --mode pr
-```
-
-Exit `2` never triggers mutation. Exit `1` permits one scoped heal pass on an
-eligible branch, followed by address and vault re-verification. Failed healing
-rolls the wiki back. Scheduled mode starts from a protected base, creates a
-`heal/*` branch, and still requires human PR review.
+Nothing runs this check automatically, and nothing repairs a drifted address.
+The closed-loop gate (`scripts/ci_address_gate.py`), its heal step and the
+`auto-healer.yaml` workflow were removed on 2026-09-06 (29f1f50). CI in
+`.gitea/workflows/` is `checks.yaml` (the offline suite, lint, format and type
+check) and `security.yaml` (the secret scans); neither runs a vault, address
+or groundedness verification. On exit `1`, re-mint the address or revise the
+page on a feature branch and hand it to human PR review.
 
 ## Documentation
 
@@ -284,10 +302,15 @@ rolls the wiki back. Scheduled mode starts from a protected base, creates a
   its findings are factual, its design is not implemented
 - [`packages/snp-agent/`](packages/snp-agent): the portable distribution — an
   **Agent Plugins 1.0.0** plugin (`plugin.json` + `mcp.json` + `skills/`).
-  `.agent/` is authoritative; `.claude/` and `packages/snp-agent/` are **tracked
-  byte-for-byte mirrors** of the files they share with it, enforced by
-  `tests/test_agent_package_sync.py` and `tests/test_docs_contract.py`. Edit
-  `.agent/`, then mirror — a one-tree edit fails the suite.
+  **It is the source of truth for every file it ships.** `.agent/` and
+  `.claude/` are **tracked byte-for-byte mirrors** generated from it, enforced
+  by `tests/test_agent_package_sync.py` and `tests/test_docs_contract.py`. Edit
+  the package, then run `python3 scripts/export_agent_bundle.py --sync`, which
+  copies it into `.agent/` and the four contract subtrees into `.claude/`; an
+  edit made only in a mirror is overwritten by the next sync, and a one-tree
+  edit fails the suite. (`--direction agent-to-packages` copies the declared
+  files the other way; it is a recovery path for an edit already made in
+  `.agent/`, not the workflow.)
 
   The trees are not identical, and the difference is a decision rather than an
   accident: the `superpowers-*` layer is **repo-local**. It is this repository's
@@ -299,8 +322,17 @@ rolls the wiki back. Scheduled mode starts from a protected base, creates a
   `unlazy` gate discipline instead, and loading both put two conflicting
   completion protocols into one session. It remains in `.agent/`, which is what
   every other agent client reads, and the mirror test enforces the absence in
-  both directions so it cannot widen into real drift. `plugin.json` / `mcp.json` live only in the package — `.agent/` is
-  a working contract, not a plugin — while `package.json` is shared.
+  both directions so it cannot widen into real drift. That repo-local layer,
+  and the development instructions `plugin.json` lists under `repoLocal`, are
+  the only files edited in `.agent/` directly, because the package does not
+  ship them. `plugin.json`, `mcp.json` and `package.json` are synced into
+  `.agent/` byte-for-byte but not into `.claude/`, since they describe the
+  distribution rather than a client's contract.
+
+  Claude Code loads `CLAUDE.md`, `.claude/rules/` and `.claude/skills/` on its
+  own. The mirrored `.claude/instructions/` and `.claude/workflows/` are kept
+  for byte parity with every other client; Claude Code does not load them by
+  itself, so a rule that matters to a Claude session belongs in `rules/`.
 
 Documents explicitly marked historical or superseded preserve design context;
 they are not deployment instructions.

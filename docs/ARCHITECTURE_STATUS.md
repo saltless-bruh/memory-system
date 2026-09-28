@@ -14,7 +14,7 @@ code, migrations, Compose files, and `AGENTS.md` operating contract win.
 | `docs/DEMO.md` | Current end-to-end demonstration |
 | `docs/CONNECT_AGENTS.md` | MCP client wiring; authentication examples are maintained separately |
 | `docs/SOURCE_HEALTH_AUDIT_AND_PROPOSAL.md` | **ACTIVE PROPOSAL, not implemented.** Its "Findings" section records verified defects in the current system and is factual; nothing under "Proposed design" exists in the codebase |
-| `.agent/` and `packages/snp-agent/` | Active agent instructions. `packages/snp-agent/` is an Agent Plugins 1.0.0 plugin; matching portable files must be equivalent, and the `superpowers-*` layer is deliberately repo-local and, since 2026-08-27, absent from `.claude/` as well — Claude Code uses `unlazy` |
+| `.agent/` and `packages/snp-agent/` | Active agent instructions. `packages/snp-agent/` is an Agent Plugins 1.0.0 plugin and the source of every file it ships; `scripts/export_agent_bundle.py --sync` generates the matching `.agent/` and `.claude/` copies, which must stay byte-identical, and the `superpowers-*` layer is deliberately repo-local and, since 2026-08-27, absent from `.claude/` as well — Claude Code uses `unlazy` |
 
 `wiki/index.md` is an authored control document in a real vault (`AGENTS.md`
 section 4): it is never regenerated, and `verify-vault` reports its difference
@@ -58,8 +58,8 @@ manual.
   Fusion weights capped near `0.033`, so no score floor is meaningful and none
   is applied.
 - `rag_fetch` is no longer an agent-facing tool — `scout/mcp_server.py` exposes
-  only `wiki_search` and `wiki_read` — but the same engine call still backs
-  `scripts/verify_addresses.py` and the `scout rag` CLI. It passes `path=` to
+  `wiki_search`, `wiki_read` and `wiki_quote` — but the same engine call backs
+  `wiki_quote`, `scripts/verify_addresses.py` and the `scout rag` CLI. It passes `path=` to
   the backend, so a mismatched `hint` returns the addressed file anyway: the
   hint governs ranking, never existence. A `loc` is a human locator that
   retrieval does not honor; it is validated at mint time (`scripts/mint.py` →
@@ -98,9 +98,12 @@ manual.
 - Offline tests run with sockets disabled. Live PostgreSQL and authenticated
   HTTP tests carry the `integration` marker.
 - Address verification returns `0` for PASS, `1` for semantic drift/failure,
-  and `2` for infrastructure/configuration failure. The CI gate never heals on
-  `2`, performs at most one scoped heal pass on `1`, re-verifies, and rolls back
-  an unsuccessful heal.
+  and `2` for infrastructure/configuration failure. It is an operator command:
+  no CI workflow runs it, or `verify-vault`, `verify-groundedness` or `check`.
+  The closed-loop gate that healed on `1` (`scripts/ci_address_gate.py`,
+  `auto-healer.yaml`) was removed on 2026-09-06 (29f1f50), so vault health is
+  checked nowhere automatically. `.gitea/workflows/` holds `checks.yaml` and
+  `security.yaml` only.
 
 ## Historical and reference documents
 
@@ -164,11 +167,22 @@ current index, which is not English-restricted by a local model.
 today, so there is nothing left to decide. The multilingual-adoption question
 would resurface only if a future change reintroduced one.
 
-### OD-2 — the auto-healer's push credential (opened 2026-08-26, owner decision)
+### OD-2 — the auto-healer's push credential (opened 2026-08-26, closed 2026-09-06 as moot)
+
+**Resolution.** Moot. `auto-healer.yaml`, the only workflow that used
+`secrets.BOT_TOKEN`, was removed with the retired auto-heal subsystem on 2026-09-06
+(29f1f50). Neither remaining workflow reads that secret, so nothing in the
+repository needs a push credential. What is left is housekeeping outside the
+repository: if a `BOT_TOKEN` was ever issued in Gitea, revoke it rather than
+narrow it, since no consumer remains.
+
+**Historical record, prior to the removal.** The analysis below describes the
+deleted workflow's source and is kept for the audit trail; the line numbers
+refer to that file as it stood on 2026-08-26.
 
 **The mitigation first proposed here would not have mitigated anything.** The
 plan called for job-level `permissions:`, which governs the **ambient Actions
-token**. Every privileged operation in `auto-healer.yaml` uses
+token**. Every privileged operation in the since-removed `auto-healer.yaml` used
 `secrets.BOT_TOKEN` instead:
 
 | Line | Job | Use |
@@ -217,9 +231,9 @@ and no local image exists. The exposure is **latent** — assembled and waiting 
 `docker compose --profile runner up` — not active.
 
 *What was done:* the chain that made the socket reachable by unattended remote
-code was removed. `auto-healer.yaml` no longer pipes an unpinned installer into a
-shell, every action is pinned to a commit, and every image and build input is
-pinned. Remote code no longer changes underneath the runner between Sundays.
+code was removed. The since-removed `auto-healer.yaml` stopped piping an
+unpinned installer into a shell before it was deleted, every action is pinned to
+a commit, and every image and build input is pinned.
 
 *What was not done:* the socket stays. `act_runner` requires it to launch job
 containers. The alternatives are all **runner-host** changes rather than
@@ -228,9 +242,11 @@ repository ones — rootless Podman exposing a user socket
 path, and Kaniko is not: Google archived it in June 2025.
 
 *Revisit when:* the runner is actually brought up, or the runner ever executes a
-workflow from an untrusted branch. Today `pr-heal` treats the PR checkout as
-data and never executes anything from it; that property is what makes the
-current arrangement defensible, and losing it changes this decision.
+workflow from an untrusted branch. The remaining workflows run on
+`ubuntu-latest`, and `security.yaml` runs its scanner from the trusted base
+branch and treats the PR checkout as data; that property is what makes the
+current arrangement defensible, and losing it changes this decision. (The
+removed `pr-heal` job relied on the same property.)
 
 ### OD-4 — production-readiness release gate (opened 2026-08-26, owner decision)
 
@@ -253,7 +269,7 @@ from later product-scope work:
 | content/judge budget | deferred product decision — see T4.1 |
 | derived-asset location and retention | deferred product decision — see T4.3 |
 | source-health thresholds and quarantine policy | deferred product decision — see Tier 5 |
-| `BOT_TOKEN` scopes and runner-host posture | deferred runner decision — see OD-2 and OD-3; runner remains disabled |
+| `BOT_TOKEN` scopes and runner-host posture | `BOT_TOKEN` moot since its only consumer was removed (OD-2); runner-host posture deferred (OD-3); runner remains disabled |
 
 **Status: EXECUTION IN PROGRESS.** The owner approved the clean commit/tag,
 isolated staging, backup/restore drill, candidate build, controlled restart,
@@ -271,7 +287,9 @@ Active instructions must not describe:
 - DOCX or an unimplemented central ingest REST endpoint as supported;
 - caller scope as `roles`, `team`, or a magic `all` authority;
 - verifier exit `2` as semantic drift or as permission to mutate;
-- direct healer use as the closed-loop CI gate;
+- a healer, a closed-loop address gate, or any CI job that runs vault,
+  address or groundedness verification — all of that was removed on
+  2026-09-06, and no workflow runs those checks today;
 - a similarity/relevance score threshold for address verification — no such
   threshold exists in code, and `RagChunk.score` is an RRF weight capped near
   `0.033`, so none can be stated as a similarity;
@@ -283,20 +301,20 @@ Active instructions must not describe:
   unauthenticated by design, never network-reachable or safe over HTTP;
 - any MCP tool other than `wiki_search`/`wiki_read`/`wiki_quote` as a door into
   the wiki or RAG index;
-- figure or table extraction as working in the deployed ingester — the
-  `snp-scout` image installs `pypdf` only (`scout/requirements.txt`), so
-  `pdfplumber` (tables) and Pillow (`pypdf[image]`, figures) are both absent,
-  and no figure in an ingested PDF is described no matter how `snp-vlm` is
-  configured;
-- `metadata.figures_status == "ok"` as evidence that a document's figures were
-  examined. **The swallow is fixed** (T5.1): `extract_figures` now re-raises the
-  `ImportError` as a `PdfStructureError`, so a Pillow-less installation reports
-  `figures_status: "unavailable"` and **no figure count at all**. What remains
-  prohibited is the inverse reading — `"no_evidence"` means the parser ran and
-  this document captions nothing; it is not a statement that figures were
-  described. Nothing in the deployed image describes a figure: `pdfplumber` and
-  Pillow are both absent (confirmed in the running `scout` and `sync-job`
-  containers), and that is a **decision** recorded in T5.1, not an oversight.
+- figure or table extraction as absent from the deployed ingester. It was
+  absent until 2026-09-06; `d287896` added `pdfplumber` (tables) and Pillow
+  (figures) to `scout/requirements.txt`, and `scout/requirements.lock` pins
+  them at 0.11.10 and 12.3.0, the versions the host corpus was built with.
+  The live index recorded 7 of 7 figures described for the audited paper on
+  2026-09-21 (`docs/AUDIT_2026-09-15.md`, "CORRECTION 2026-09-21"). A figure
+  is described only through the `snp-vlm` route: with no route the document
+  reports `figures_status: "unconfigured"` and carries no figure text;
+- a `figures_status` other than `"ok"` or `"partial"` as evidence that a
+  document's figures were described. `"ok"` means every detected figure was
+  described and `"partial"` that some were; `"failed"` (none described),
+  `"unconfigured"` (no vision route) and `"unavailable"` (extractor missing —
+  `extract_figures` re-raises the `ImportError`, T5.1) carry no figure text,
+  and `"no_evidence"` means the parser ran and the document captions nothing.
 
 When architecture changes, update implementation and active documents together,
 then re-run the stale-claim search described in the review plan. Preserve old

@@ -121,20 +121,25 @@ missing runtime secret.
 
 ### What CI runs, and what it deliberately does not
 
-Three workflows, in `.gitea/workflows/`:
+Two workflows, in `.gitea/workflows/`:
 
 | Workflow | Trigger | Runs |
 | --- | --- | --- |
 | `checks.yaml` | PR, push | `ruff check`, `ruff format --check`, `mypy scout scripts`, and the offline test suite (`-m 'not integration'`) |
 | `security.yaml` | PR, push | secret scan of the working tree, index, untracked files and all refs, plus an independent Gitleaks history scan |
-| `auto-healer.yaml` | PR touching `wiki/**`, weekly schedule | the closed-loop address gate: verify → heal → re-verify → **judge groundedness** → PR-first commit |
 
-The standard checks workflow does not run live verifications:
-`verify-addresses` and `verify-groundedness` need PostgreSQL and the LiteLLM
-gateway, and the judge runs on a route with a daily request ceiling. A CI job
-that fails because a gateway was down teaches people to ignore CI. The live
-checks belong to `auto-healer.yaml`, which already requires a self-hosted runner
-that can reach both, and to an operator at a terminal.
+They run only where an Actions runner is up; the bundled `gitea-runner`
+service sits behind the `runner` Compose profile and is not started by a
+plain `docker compose up` (see OD-3 in `docs/ARCHITECTURE_STATUS.md`).
+
+Neither workflow runs a live verification: `verify-addresses` and
+`verify-groundedness` need PostgreSQL and the LiteLLM gateway, and the judge
+runs on a route with a daily request ceiling. A CI job that fails because a
+gateway was down teaches people to ignore CI. **No workflow runs `verify-vault`,
+`verify-addresses`, `verify-groundedness` or `check` at all**, so vault health
+is checked only when an operator runs those commands at a terminal. The
+self-hosted `auto-healer.yaml` workflow that once ran the address gate was
+removed with the auto-heal subsystem on 2026-09-06 (29f1f50).
 
 `checks.yaml` needs neither — no gateway, no database, no secret. It can only
 fail on this repository's own code.
@@ -191,8 +196,10 @@ the library that parses every document in the corpus — and `basic-memory==0.22
 was one pinned line above a closure of **163** unpinned packages.
 
 It adds **staleness**, and nothing here keeps a pin fresh. A pinned action does
-not receive its own security fixes; `pip-audit` in `auto-healer.yaml` covers the
-Python side, and the action and image pins are reviewed by hand.
+not receive its own security fixes. Nothing audits the Python locks for known
+vulnerabilities either: the `pip-audit` step lived in `auto-healer.yaml`, which
+was removed on 2026-09-06, so the Python, action and image pins are all
+reviewed by hand (`uv run --with pip-audit pip-audit` is the manual check).
 
 **What is still not pinned, stated so it is not mistaken for covered:**
 
@@ -479,7 +486,7 @@ redirects and unrelated credential helpers are disabled for those operations.
 Rebuild and recreate host-sync after configuring the identity:
 
 ```bash
-docker compose build host-sync
+SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose build host-sync
 docker compose up -d --no-deps host-sync
 curl -fsS http://127.0.0.1:9000/ready
 ```
@@ -548,12 +555,11 @@ uv run python scripts/verify_addresses.py
 - `1`: semantic `FAIL` or `DRIFT`;
 - `2`: backend, model, network, or configuration failure.
 
-The supported CI remediation entry point is
-`uv run python scripts/ci_address_gate.py --mode pr`. Exit `2` fails without
-mutation. Exit `1` on an eligible branch allows one healer pass, then both
-address verification and vault lint run again. Any unsuccessful pass restores
-the wiki snapshot. Scheduled mode must start on a protected base and publishes
-a `heal/*` branch for human review.
+No CI job runs this check and nothing repairs a failure automatically; the
+closed-loop gate (`scripts/ci_address_gate.py`) and its healer were removed on
+2026-09-06. Exit `2` is an infrastructure failure: repair it and re-run, and do
+not edit the page. Exit `1` is a content finding: re-mint the address or revise
+the page on a feature branch for human PR review.
 
 ### 5.1 Asking whether the judge is alive
 
@@ -572,10 +578,11 @@ uv run python scripts/verify_groundedness.py --probe
 # exit 2 — it did not
 ```
 
-`scripts/ci_address_gate.py` runs exactly this as a preflight, before anything
-can heal. A gate that heals, commits and pushes and *then* discovers its checker
-was down has already mutated `sources[]` on the strength of a check that never
-happened.
+Run it before any groundedness verification whose result will change a page.
+The removed closed-loop gate (`scripts/ci_address_gate.py`) ran exactly this
+as its preflight, for the reason that still holds: a check that edits
+`sources[]` and *then* discovers its judge was down has changed the page on the
+strength of a check that never happened.
 
 ### 5.2 Repeatable OpenCode rehearsal preflight
 
@@ -661,8 +668,8 @@ or merges. Missing evidence leaves the corresponding gate unverified.
 | Scout rejects every request | Check auth mode and required issuer/audience/key or static-token file; never switch a non-loopback deployment to development mode. |
 | A static token must be revoked now | Delete its entry from `.secrets/scout_static_tokens.json` and restart Scout. Static tokens carry no expiry, so the restart *is* the revocation; waiting does nothing. See 1.1. |
 | Caller sees zero rows | Confirm the token's canonical department claim and the page/source department; fail-closed RLS intentionally returns no unauthorized rows. |
-| `verify_addresses.py` exits `2` | Repair infrastructure/configuration. Do not run a healer. |
-| `verify_addresses.py` exits `1` | Re-mint the address or run the closed-loop CI gate on an eligible feature branch. |
+| `verify_addresses.py` exits `2` | Repair infrastructure/configuration and re-run. Do not edit the page on an infrastructure failure. |
+| `verify_addresses.py` exits `1` | Re-mint the address or revise the page on a feature branch for human PR review; no automated repair exists. |
 | Scout cannot read a published page | Check authenticated search/read in the same department, host-sync `/ready`, and sync-job readiness; do not inspect replica files as an agent workaround. |
 | Initial host sync fails | Fix remote URL, branch, credentials, or webhook secret; there is no last-known-good snapshot on a cold start. |
 | Migration check exits `1` | Apply migrations through the migration service before starting runtime services. |

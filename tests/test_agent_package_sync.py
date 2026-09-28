@@ -14,9 +14,13 @@ PACKAGE_DIR = REPO_ROOT / "packages" / "snp-agent"
 AGENT_DIR = REPO_ROOT / ".agent"
 CLAUDE_DIR = REPO_ROOT / ".claude"
 
-# `.agent/` is the authoritative agent contract. `.claude/` mirrors these four
-# subtrees byte-for-byte so Claude Code reads exactly what every other agent
-# reads; distribution metadata stays out of `.claude/` because it describes the
+# `packages/snp-agent/` is the source of the shipped agent contract:
+# `scripts/export_agent_bundle.py --sync` copies it into `.agent/`, then these
+# four subtrees into `.claude/`. The only files edited in `.agent/` itself are
+# the repo-local ones the package does not ship (the `superpowers-*` layer and
+# the instructions `plugin.json` lists under `repoLocal`). `.claude/` mirrors
+# the subtrees byte-for-byte so Claude Code reads what every other agent reads;
+# distribution metadata stays out of `.claude/` because it describes the
 # portable bundle, not client config.
 MIRRORED_CONTRACT_DIRS = ("instructions", "rules", "skills", "workflows")
 
@@ -52,8 +56,9 @@ def _is_claude_excluded(subdir: str, rel: Path) -> bool:
 
 # Root-level files whose divergence README.md and docs/ARCHITECTURE_STATUS.md
 # explicitly promise cannot happen.
-# `.agent/` is the authoritative superset and carries byte-identical portable
-# metadata as well as the contract subtrees. `.claude/` mirrors only the four
+# `.agent/` is the superset -- the synced package plus the repo-local layer --
+# and carries byte-identical portable metadata as well as the contract
+# subtrees. `.claude/` mirrors only the four
 # contract subtrees because these root files describe distribution/install.
 REQUIRED_SHARED_ROOT_FILES = ("package.json", "plugin.json", "mcp.json")
 
@@ -217,7 +222,9 @@ def test_claude_mirrors_agent_contract() -> None:
 
     Claude Code reads `.claude/`; every other agent client reads `.agent/`. If
     they diverge, a Claude agent silently operates under a different contract.
-    `.agent/` is authoritative — resync `.claude/` from it, never the reverse.
+    Both are generated from `packages/snp-agent/` by
+    `scripts/export_agent_bundle.py --sync`; edit the package and sync, never a
+    mirror.
 
     The sole exception is the `superpowers-*` layer, which is deliberately
     absent from `.claude/`; see `CLAUDE_EXCLUDED_PREFIXES`. That carve-out is
@@ -274,14 +281,10 @@ def test_claude_mirrors_agent_contract() -> None:
         f"the superpowers layer looks truncated in .agent/: {total_excluded} file(s)"
     )
     assert not problems, (
-        "`.claude/` has drifted from the authoritative `.agent/` contract:\n  "
+        "`.claude/` has drifted from the `.agent/` contract:\n  "
         + "\n  ".join(problems)
-        + "\nResync with: for d in "
-        + " ".join(MIRRORED_CONTRACT_DIRS)
-        + "; do rsync -a --delete --exclude '"
-        + "' --exclude '".join(f"{pre}*" for pre in CLAUDE_EXCLUDED_PREFIXES)
-        + '\' ".agent/$d/" ".claude/$d/"; done'
-        + "  (then remove any file named in CLAUDE_EXCLUDED_FILES)"
+        + "\nEdit packages/snp-agent/ (or, for a repo-local file, .agent/), "
+        + "then resync with: python3 scripts/export_agent_bundle.py --sync"
     )
 
 

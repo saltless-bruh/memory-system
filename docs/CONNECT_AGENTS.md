@@ -1,7 +1,8 @@
 # Connect an agent to SNP Memory System
 
 Scout is the authenticated agent retrieval service. Agents call `wiki_search`
-to discover pages, then `wiki_read` for canonical evidence. Read
+to discover pages, `wiki_read` for canonical evidence, and `wiki_quote` for the
+`raw/` passage behind a page's `sources[]` entry. Read
 [`AGENTS.md`](../AGENTS.md) for scope, citations, authoring, and PR governance.
 The [OpenCode rehearsal](DEMO_OPENCODE.md) adds fresh-profile setup and the
 live ingestion → human-reviewed update experiment.
@@ -29,9 +30,10 @@ Agent Skill that runs it. A config written before that date still holding a
 `snpmemory` server entry is corrected by re-running `snpmemory mcp-config`,
 which removes it rather than leaving it registered.
 
-There is no separate wiki-engine endpoint in the V3 agent connection. Source
-extraction beyond indexed wiki pages is deferred. Do not invent another
-retrieval tool or use filesystem/database access when Scout lacks evidence.
+There is no separate wiki-engine endpoint in the V3 agent connection.
+`wiki_quote` reads only ingested `raw/` sources a page already cites; external
+URL fetching is not implemented. Do not invent another retrieval tool or use
+filesystem/database access when Scout lacks evidence.
 
 JWT and static deployments require the complete Scout authorization value
 in the client environment. Load the token from a secret store or hidden
@@ -175,9 +177,10 @@ Cursor and VS Code use `${env:SCOUT_AUTH_HEADER}` in the bridge environment;
 Gemini uses `$SCOUT_AUTH_HEADER`. Claude Code inherits the variable from its
 process environment without a self-referential `env` entry.
 
-No generated entry launches a local process, so nothing has to be on the
-client process's PATH and no entry pins a checkout. The local server that did
-both was deleted on 2026-09-24.
+No generated entry runs SNP code locally or pins a checkout. The `npx
+mcp-remote` bridge is a generic HTTP proxy that the client starts; it needs
+Node on the client's PATH and nothing from this repository. The local server
+that did run SNP code from a pinned checkout was deleted on 2026-09-24.
 
 Without an explicit client target, installation keeps portable `.agent/`
 behavior:
@@ -189,12 +192,12 @@ snpmemory install-agent /path/to/project
 
 `packages/snp-agent/` includes a portable manifest, MCP declarations, and
 skills. A client must support that format or receive a client-specific
-installation; the manifest establishes no automatic discovery. Its local
-server declaration leaves `SNP_MEMORY_ROOT` empty because an installed
-package cannot know the persistent system checkout. Configure that path or
-use `--root` before launching the local server. The exporter pins it from
-the checkout. For a remote shell install, record the printed source revision;
-`SNP_AGENT_REF` otherwise follows the installer's default moving ref.
+installation; the manifest establishes no automatic discovery. Its `mcp.json`
+declares one server, the remote `snpmemory` endpoint, with only an
+environment reference for `SCOUT_AUTH_HEADER`; nothing in it launches a
+process or needs a checkout path. For a remote shell install, record the
+printed source revision; `SNP_AGENT_REF` otherwise follows the installer's
+default moving ref.
 
 ## Verify retrieval through Scout
 

@@ -11,14 +11,17 @@ services against a pending schema.
 1. Run `./scripts/bootstrap.sh`.
 2. Populate `.env` with cloud-provider credentials and Scout authentication.
 3. Keep migration, query, and ingestion database identities separate.
-4. Run `docker compose up -d --build`.
+4. Run `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build`.
+   Without the revision the images are labelled `unknown` and readiness
+   checks report them as unverifiable.
 5. Confirm `postgres-migrate` completed before Scout and sync-job, then inspect
    `docker compose ps` and the documented readiness endpoints.
 
-Scout is the sole remote retrieval server and exposes `wiki_search` followed by
-`wiki_read`. The local `snpmemory` stdio server exposes the same retrieval pair
-plus authoring and verification tools. Development authentication is
-loopback-only; remote clients use a bearer token.
+Scout is the sole MCP server. Clients list it as `snpmemory` and reach it over
+authenticated Streamable HTTP; it serves `wiki_search`, `wiki_read`, and
+`wiki_quote`. Authoring and verification are `snpmemory` CLI commands run from
+a checkout, not MCP tools. Development authentication is loopback-only; remote
+clients use a bearer token.
 
 Do not infer health from a running container alone. Report a failed migration,
 credential error, or unavailable embedding provider as infrastructure failure.

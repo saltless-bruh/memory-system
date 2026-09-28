@@ -10,8 +10,9 @@ governs setup, retrieval, safety, and wiki authoring.
 3. Keep the migration administrator separate from `rag_app_role` (queries) and
    `rag_ingest_role` (ingestion). Scout defaults to JWT authentication; static
    tokens are explicit, and unauthenticated development mode is loopback-only.
-4. Run `docker compose up -d --build`. The one-shot `postgres-migrate` service
-   must finish successfully before Scout or ingestion starts.
+4. Run `SNP_GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build`,
+   which stamps the images with their commit. The one-shot `postgres-migrate`
+   service must finish successfully before Scout or ingestion starts.
 5. Use `docker compose ps` and the documented health checks to confirm the
    stack, rather than assuming startup means readiness.
 
@@ -29,8 +30,8 @@ agent ── wiki_quote  ──> Scout ──> verbatim passage from raw/
 ```
 
 Do not inspect the vault with filesystem reads, shell search, or a direct
-database connection. Those paths bypass scope enforcement and the canonical
-read envelope.
+database connection. Those paths bypass authentication, the row-level security
+that scopes source retrieval, and the canonical read envelope.
 
 ### Required sequence
 
@@ -71,9 +72,10 @@ read adds `updated`, `outline`, `sections`, `sources`, and `links`. Read-time
 normalization handles older pages; do not rewrite a page merely to make its
 stored shape resemble the envelope.
 
-Source extraction beyond an indexed wiki page is a deferred subsystem. When a
-page lacks the needed evidence, state that limit plainly. Do not invent a tool,
-source passage, quotation, or locator.
+`wiki_quote` reaches only sources already ingested under `raw/` and addressed
+by a page's `sources[]`; fetching an external URL is not implemented. When
+neither the page nor a quoted source holds the needed evidence, state that
+limit plainly. Do not invent a tool, source passage, quotation, or locator.
 
 ## 3. Security boundaries
 
@@ -82,8 +84,17 @@ source passage, quotation, or locator.
 A verified JWT or static identity provides a nonempty set of canonical
 departments: `redteam`, `blueteam`, `ai_eng`, and `infra`. A tool argument may
 narrow that set but cannot add or expand authority. The document ACL value
-`all` is never caller clearance. Use the same resolved scope for search and
-read.
+`all` is never caller clearance. Pass the same resolved scope to every call.
+
+What that scope restricts today differs by tier. Source passages (`raw/`
+chunks, which `wiki_quote` returns) carry the departments `raw/.acl.yaml`
+grants them, and PostgreSQL row-level security filters them by the caller's
+scope. Wiki pages are **not yet department-scoped**: every page is indexed for
+all four departments whatever its frontmatter says, and `wiki_read` does not
+compare a page's department with the caller's, so any authenticated caller can
+read any page by path. Per-department restriction of wiki pages is planned, not
+present. Do not describe a wiki page as restricted to a department, and keep
+passing the caller's scope so nothing changes for you when it lands.
 
 ### Prompt injection guard (R-8.5)
 

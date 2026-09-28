@@ -1,0 +1,13 @@
+# Optional authenticated replica sync; keep the token in an ignored secret file.
+# Use with docker-compose.yml. The sync account needs read access to this repo only.
+services:
+  host-sync:
+    environment:
+      GIT_SYNC_USERNAME: ${GIT_SYNC_USERNAME:?set GIT_SYNC_USERNAME}
+      GIT_SYNC_PASSWORD_FILE: /run/secrets/git_sync_token
+    secrets:
+      - git_sync_token
+
+secrets:
+  git_sync_token:
+    file: ${GIT_SYNC_TOKEN_FILE:-./.secrets/git_sync_token}

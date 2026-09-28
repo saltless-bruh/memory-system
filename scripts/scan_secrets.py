@@ -31,6 +31,31 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("GitHub personal access token", re.compile(r"\bghp_[A-Za-z0-9]{20,}\b")),
     ("GitLab personal access token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")),
     ("Slack API token", re.compile(r"\bxox[baprs]-[A-Za-z0-9_-]{20,}\b")),
+    # The credentials this stack itself handles. The five vendor prefixes above
+    # were the whole list until 2026-09-26, so the Gitea token host-sync pulls
+    # with, JWT bearer tokens, PEM keys and AWS keys were all invisible to
+    # the only scanner that has ever run here.
+    #
+    # A Gitea access token is 40 lowercase hex -- exactly a commit SHA, which
+    # this repository carries by the thousand in ledgers, docs and locks. So the
+    # bare shape is never enough: it counts only where something says it is a
+    # credential -- a key naming a token, an `Authorization: token` header, or
+    # the password slot of a URL.
+    (
+        "Gitea access token",
+        re.compile(
+            r"(?i:\b[a-z0-9_]*token[a-z0-9_]*[\"']?\s*[:=]\s*[\"']?)[0-9a-f]{40}\b"
+            r"|(?i:\bauthorization:\s*token\s+)[0-9a-f]{40}\b"
+            r"|://[^\s/:@]+:[0-9a-f]{40}@"
+        ),
+    ),
+    # Header and claims are both base64url JSON objects, so both open `eyJ`.
+    (
+        "JSON Web Token",
+        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}"),
+    ),
+    ("Private key block", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")),
+    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
 )
 
 # Placeholder policy, chosen 2026-08-19 (audit finding M6). An exemption needs a

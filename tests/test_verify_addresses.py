@@ -382,7 +382,7 @@ def test_collect_addresses_preserves_duplicate_page_and_source_identity() -> Non
             _page("one", [source], department="infra"),
             _page("two", [source], department="redteam"),
         ]
-    )
+    ).addresses
     assert len(addresses) == 2
     assert addresses[0].address == addresses[1].address
     assert {
@@ -393,11 +393,113 @@ def test_collect_addresses_preserves_duplicate_page_and_source_identity() -> Non
     }
 
 
-def test_collect_addresses_rejects_invalid_page_department_before_backend() -> None:
-    with pytest.raises(ValueError, match="canonical"):
-        _collect_addresses(
-            [_page("bad", [{"path": "raw/a", "hint": "h"}], department="all")]
-        )
+def test_collect_addresses_withholds_an_address_whose_page_department_is_invalid() -> (
+    None
+):
+    """An address is still never queried under a non-canonical department.
+
+    This used to assert a raise, which pinned defect #7: the exception escaped
+    to the command boundary and was reported as an infrastructure outage. The
+    security property the raise protected is kept -- `all` is a document ACL,
+    not a caller clearance, so the address is withheld from the backend -- but
+    the page is now a named content finding instead of an abort.
+    """
+    collection = _collect_addresses(
+        [
+            _page("bad", [{"path": "raw/a", "hint": "h"}], department="all"),
+            _page("good", [{"path": "raw/b", "hint": "h"}], department="infra"),
+        ]
+    )
+    assert [a.page_slug for a in collection.addresses] == ["good"]
+    assert [(f.page_path, f.department) for f in collection.invalid_departments] == [
+        ("wiki/concepts/bad.md", "all")
+    ]
+
+
+def test_collect_addresses_skips_pages_that_contribute_no_address() -> None:
+    """Defect #7: 432 of 434 vault pages carry no canonical department.
+
+    A page with no `sources[]` address is never queried, so its department is
+    never used as a scope and has nothing to validate. Validating it anyway made
+    the whole gate abort on the production vault before one address was checked.
+    """
+    pages = [
+        vault.Page(path=Path("wiki/concepts/bare.md"), frontmatter={}, body=""),
+        _page("empty-dept", [], department=""),
+        _page("hintless", [{"path": "raw/a"}], department="all"),
+        _page("good", [{"path": "raw/b", "hint": "h"}], department="infra"),
+    ]
+    collection = _collect_addresses(pages)
+    assert [a.page_slug for a in collection.addresses] == ["good"]
+    assert collection.invalid_departments == ()
+    assert collection.skipped_pages == (
+        "wiki/concepts/bare.md",
+        "wiki/concepts/empty-dept.md",
+        "wiki/concepts/hintless.md",
+    )
+
+
+def test_main_checks_a_vault_whose_unaddressed_pages_have_no_department(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The production-vault shape: most pages lack a department and any source."""
+    backend = RecordingBackend(
+        [RagChunk(text="kerberoasting tickets", file_path="raw/a.md", score=1.0)]
+    )
+    rc = main(
+        backend_factory=lambda: backend,
+        pages_loader=lambda: [
+            vault.Page(path=Path("wiki/concepts/bare.md"), frontmatter={}, body=""),
+            _page("page", [{"path": "raw/a.md", "hint": "kerberoasting"}]),
+        ],
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PASS " in out
+    assert "1 page(s) skipped" in out
+    assert backend.closed
+
+
+def test_main_reports_an_invalid_department_as_a_finding_not_an_outage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A page shape is content (exit 1); only a check that cannot run is 2."""
+    backend = RecordingBackend(
+        [RagChunk(text="kerberoasting tickets", file_path="raw/a.md", score=1.0)]
+    )
+    rc = main(
+        backend_factory=lambda: backend,
+        pages_loader=lambda: [
+            _page("bad", [{"path": "raw/a.md", "hint": "x"}], department="all"),
+            _page("page", [{"path": "raw/a.md", "hint": "kerberoasting"}]),
+        ],
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "wiki/concepts/bad.md" in out
+    assert "INFRASTRUCTURE" not in out
+    # The valid page is still verified, and only under its own department.
+    assert "PASS  wiki/concepts/page.md#0" in out
+    assert {scope.departments for scope in backend.scopes if scope} == {
+        frozenset({"infra"})
+    }
+    assert backend.closed
+
+
+def test_main_with_only_invalid_departments_is_a_finding_and_queries_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = RecordingBackend()
+    rc = main(
+        backend_factory=lambda: backend,
+        pages_loader=lambda: [
+            _page("bad", [{"path": "raw/a.md", "hint": "x"}], department="")
+        ],
+    )
+    assert rc == 1
+    assert "wiki/concepts/bad.md" in capsys.readouterr().out
+    assert backend.scopes == []
+    assert backend.closed
 
 
 async def test_verify_all_preserves_duplicate_order() -> None:

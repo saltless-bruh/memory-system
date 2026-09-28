@@ -98,3 +98,55 @@ def test_no_active_text_describes_the_deleted_stdio_server(relative: str) -> Non
         "the local snpmemory stdio server was deleted on 2026-09-24; these "
         "paragraphs still describe it as current:\n" + "\n".join(offenders)
     )
+
+
+# ── documented CLI flags exist ──────────────────────────────────────────────
+
+
+def _declared_flags(command: str) -> set[str]:
+    from scout.cli import app  # noqa: F401  (registers the commands)
+    from scout.cli.registry import GLOBAL_ARGS, REGISTRY
+
+    spec = REGISTRY.get(command)
+    assert spec is not None, f"documented command `snpmemory {command}` is undeclared"
+    flags = {arg.name for arg in (*spec.args, *GLOBAL_ARGS)}
+    flags |= {arg.short for arg in (*spec.args, *GLOBAL_ARGS) if arg.short}
+    return flags | {"--format"}  # the documented alias of --output
+
+
+def _skill_commands(text: str) -> set[str]:
+    return set(re.findall(r"(?m)^\s*snpmemory\s+([a-z][a-z-]*)", text))
+
+
+#: Skills whose code blocks run exactly one `snpmemory` command. For those,
+#: every flag the file mentions can only mean a flag of that command.
+SINGLE_COMMAND_SKILLS = [
+    path
+    for path in _package_texts()
+    if path.endswith("SKILL.md")
+    and len(_skill_commands((REPO_ROOT / path).read_text(encoding="utf-8"))) == 1
+]
+
+
+@pytest.mark.parametrize("relative", SINGLE_COMMAND_SKILLS)
+def test_a_single_command_skill_names_only_flags_that_command_accepts(
+    relative: str,
+) -> None:
+    """A skill about one command must not teach a flag the command rejects.
+
+    snp-export-mcp told the agent to add `--all` or `--print` to
+    `snpmemory mcp-config`. Those belong to `scripts/export_mcp_config.py`;
+    the CLI rejects both with exit 3, so the skill failed on its own
+    instructions. The flags were in prose, not in the code block, which is
+    why every backticked flag in the file is checked, not only the commands.
+    """
+    text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+    (command,) = _skill_commands(text)
+    accepted = _declared_flags(command)
+    named = set(re.findall(r"`[^`]*?(?<![\w-])(--[a-z][\w-]*)", text))
+    named |= set(re.findall(r"(?m)^\s*snpmemory\s+\S+.*?(--[a-z][\w-]*)", text))
+    unknown = sorted(named - accepted)
+    assert not unknown, (
+        f"{relative} documents `snpmemory {command}` with {unknown}, which it "
+        f"does not accept; it accepts {sorted(accepted)}"
+    )

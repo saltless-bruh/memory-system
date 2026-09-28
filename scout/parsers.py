@@ -13,11 +13,12 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,48 @@ class ParsedDocument:
         return "\n\n".join(s.text for s in self.sections if s.text.strip())
 
 
+#: A CommonMark fence opener: up to three spaces of indent, then a run of at
+#: least three backticks or tildes. A backtick fence's info string may not hold
+#: a backtick, or ```` ``code`` ```` inline spans would open fences.
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
+
+
+def fenced_lines(lines: Sequence[str]) -> frozenset[int]:
+    """Indexes of the lines that sit inside a fenced code block, fences included.
+
+    Markdown headings are a line-level syntax, and a fenced block suspends it:
+    ``# restart the service`` inside a ```` ```bash ```` block is a shell
+    comment, not a heading. Every heading splitter in this system has to ask this
+    question first, or a runbook's code comments become sections with their own
+    locators and context prefixes -- citations that point at no heading the
+    author wrote. The ingest parser and `wiki_read`'s section reader both split
+    on headings, so both call this rather than each keeping a fence rule.
+
+    The rule is CommonMark's: a fence closes only on a line of the *same*
+    character, at least as long as the opener, with nothing after it but
+    whitespace; an unclosed fence runs to the end of the document.
+    """
+    inside: set[int] = set()
+    opener: str | None = None
+    for index, line in enumerate(lines):
+        if opener is None:
+            match = _FENCE_OPEN.match(line)
+            if match:
+                opener = match.group(1)
+                inside.add(index)
+            continue
+        inside.add(index)
+        stripped = line.strip()
+        if (
+            len(line) - len(line.lstrip(" ")) <= 3
+            and stripped
+            and set(stripped) == {opener[0]}
+            and len(stripped) >= len(opener)
+        ):
+            opener = None
+    return frozenset(inside)
+
+
 def parse_markdown(content: str, source_uri: str) -> ParsedDocument:
     """Parses Markdown content, extracting frontmatter, title, and heading sections."""
     title = Path(source_uri).stem.replace("-", " ").title()
@@ -140,8 +183,10 @@ def parse_markdown(content: str, source_uri: str) -> ParsedDocument:
     current_heading = "Intro"
     current_lines: list[str] = []
 
-    for line in lines:
-        if line.startswith("#"):
+    fenced = fenced_lines(lines)
+
+    for index, line in enumerate(lines):
+        if line.startswith("#") and index not in fenced:
             if current_lines:
                 text = "\n".join(current_lines).strip()
                 if text:

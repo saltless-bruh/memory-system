@@ -55,6 +55,34 @@ def test_parse_csv_chunks_tabular_data() -> None:
     assert "Row 1: id: 1 | name: Alice | role: Admin" in doc.sections[0].text
 
 
+def test_parse_markdown_ignores_hash_lines_inside_code_fences() -> None:
+    content = (
+        "# Runbook\n"
+        "Intro.\n\n"
+        "```bash\n"
+        "# restart the service\n"
+        "systemctl restart scout\n"
+        "```\n\n"
+        "~~~~python\n"
+        "# a comment\n"
+        "~~~\n"
+        "## still inside the four-tilde fence\n"
+        "~~~~\n\n"
+        "## Rollback\n"
+        "Undo it.\n"
+    )
+    doc = parse_markdown(content, "raw/docs/runbook.md")
+    assert [s.loc for s in doc.sections] == ["Section Runbook", "Section Rollback"]
+    assert "# restart the service" in doc.sections[0].text
+    assert "## still inside the four-tilde fence" in doc.sections[0].text
+
+
+def test_unclosed_fence_swallows_the_rest_of_the_document() -> None:
+    """CommonMark: an unclosed fence runs to the end of the document."""
+    doc = parse_markdown("# Top\n```\n# not a heading\n", "raw/docs/x.md")
+    assert [s.loc for s in doc.sections] == ["Section Top"]
+
+
 def test_parse_code_preserves_language_fence() -> None:
     code_content = "def hello():\n    return 'world'\n"
     doc = parse_code(code_content, "raw/code/app.py")

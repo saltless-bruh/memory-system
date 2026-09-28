@@ -21,7 +21,7 @@ from typing import Protocol, cast, runtime_checkable
 from scout import vault
 from scout.chunker import AsyncEmbedder, LiteLLMBatchEmbedder
 from scout.core import normalize_path
-from scout.parsers import parse_markdown
+from scout.parsers import fenced_lines, parse_markdown
 from scout.types import RagBackend, RagChunk, Scope
 from scout.wiki_ingest import (
     IndexCatalog,
@@ -204,8 +204,18 @@ def _links(body: str) -> tuple[str, ...]:
 
 
 def _sections(body: str) -> dict[str, str]:
-    """Parse Markdown headings without treating horizontal rules as headings."""
-    matches = list(_HEADING.finditer(body))
+    """Parse Markdown headings without treating horizontal rules as headings.
+
+    A ``#`` line inside a fenced code block is a code comment, so the matches are
+    filtered through `fenced_lines` -- the same rule the ingest parser uses, or
+    a section read would split where the index did not.
+    """
+    fenced = fenced_lines(body.split("\n"))
+    matches = [
+        match
+        for match in _HEADING.finditer(body)
+        if body.count("\n", 0, match.start()) not in fenced
+    ]
     if not matches:
         text = body.strip()
         return {"Intro": text} if text else {}

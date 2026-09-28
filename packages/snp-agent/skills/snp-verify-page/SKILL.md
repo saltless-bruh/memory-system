@@ -13,6 +13,16 @@ The script resolves the vault's own `note-schema.json` by walking up from the
 page, so it checks the contract *that vault* holds rather than a remembered
 one. Pass `--schema` to override.
 
+## The contract it checks
+
+The body frame is AGENTS.md section 4, the same one `verify-vault` enforces:
+an H1 title; `## Cross-References` once; `## Provenance` once before it when
+the page declares `sources:`; `## TL;DR` recommended, and when present once and
+first. Headings are checked for order and duplication, not mere presence. A
+`[[Page#Section|alias]]` link resolves to `Page`. The lowercase-hyphen filename
+rule covers new pages; an existing page such as `AFFiNE.md` keeps its name, and
+outside git the rule is reported under `degraded`.
+
 ## Read the receipt, not the exit code alone
 
 ```json

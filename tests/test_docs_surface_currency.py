@@ -39,14 +39,19 @@ RETIRED_SURFACES = (
     #
     # 016ed43 (leaf-4.3) deleted the local stdio MCP server and with it the
     # `snpmemory mcp` command; `snpmemory mcp-config` is live and is not
-    # matched (see `_mentions`).
+    # matched (see `_mentions`). The command is matched only in its typed
+    # form -- backticked, or carrying its `--root` argument -- because prose
+    # is lowercased before matching and "the snpmemory MCP server" is the
+    # accurate name of the server we ship (`SERVER_NAME` in
+    # scripts/export_mcp_config.py), not the retired command.
     # Bare "stdio" is not retired: the Scout bridge a VS Code client launches
     # is `type: "stdio"`. The retired thing is a stdio *server* of our own.
     "stdio server",
     "local stdio",
     "local, stdio",
     "stdio connection",
-    "snpmemory mcp",
+    "`snpmemory mcp",
+    "snpmemory mcp --root",
     # 29f1f50 deleted .gitea/workflows/auto-healer.yaml; `auto-heal` alone
     # never matched it, because a boundary does not fall inside "healer".
     "auto-healer",
@@ -110,8 +115,8 @@ HISTORICAL_MARKERS = (
 def _mentions(name: str, text: str) -> bool:
     """`name` appears as a whole token, not as the stem of a longer one.
 
-    A hyphen counts as part of a token, so `snpmemory mcp` does not fire on
-    the live `snpmemory mcp-config` and `auto-heal` does not fire on
+    A hyphen counts as part of a token, so the retired `snpmemory mcp` does
+    not fire on the live `snpmemory mcp-config` and `auto-heal` does not fire on
     `auto-healer`; a leading dot marks a qualified Python name, so the live
     internal function `scout.core.rag_fetch` is not the retired MCP tool.
     """
@@ -172,11 +177,23 @@ def _stale_mentions(text: str) -> list[tuple[int, list[str]]]:
 
 
 def test_the_matcher_tells_a_retired_name_from_a_live_longer_one() -> None:
-    assert _mentions("snpmemory mcp", "run `snpmemory mcp` to serve stdio")
-    assert not _mentions("snpmemory mcp", "run `snpmemory mcp-config --client x`")
+    assert _mentions("`snpmemory mcp", "run `snpmemory mcp` to serve stdio")
+    assert not _mentions("`snpmemory mcp", "run `snpmemory mcp-config --client x`")
     assert _mentions("auto-healer", ".gitea/workflows/auto-healer.yaml")
     assert not _mentions("auto-heal", ".gitea/workflows/auto-healer.yaml")
     assert not _mentions("rag_fetch", "`fetch` calls `scout.core.rag_fetch`")
+
+
+def test_the_live_snpmemory_server_is_not_the_retired_command() -> None:
+    """`snpmemory` is the name of the MCP server we ship; prose may name it.
+
+    Only the retired *command* is stale: `snpmemory mcp` as typed, with or
+    without its `--root` argument.
+    """
+    assert _stale_mentions("Agents connect to the snpmemory MCP server.") == []
+    assert _stale_mentions("The `snpmemory` MCP server is configured here.") == []
+    assert _stale_mentions("Run `snpmemory mcp --root .` to serve it.") != []
+    assert _stale_mentions("    snpmemory mcp --root /srv/vault\n") != []
 
 
 def test_the_marker_is_judged_per_sentence_not_per_line() -> None:
@@ -196,7 +213,7 @@ def test_the_marker_is_judged_per_sentence_not_per_line() -> None:
     assert _stale_mentions(stale_beside_unrelated_marker) == [(2, ["local, stdio"])]
     assert _stale_mentions(history_marked_next_sentence) == []
     assert _stale_mentions(marked_list_item_beside_stale_one) == [
-        (2, ["snpmemory mcp"])
+        (2, ["`snpmemory mcp"])
     ]
 
 

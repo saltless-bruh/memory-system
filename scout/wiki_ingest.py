@@ -746,8 +746,15 @@ async def ingest_wiki(
                 # searchable for as long as the stub stayed on disk, and every
                 # cycle re-attempted and re-skipped the page. No evidence is
                 # the honest outcome, as it is for a raw source with no text.
+                # A dry run may still hold a connection -- the ingest policy
+                # gate passes one to read the manifest -- and it deletes
+                # nothing: it reports what a real run would skip.
                 purged = False
-                if signature is not None and active_connection is not None:
+                if (
+                    signature is not None
+                    and active_connection is not None
+                    and not dry_run
+                ):
                     purged = await _purge_wiki_document(active_connection, source_uri)
                 results.append(
                     {

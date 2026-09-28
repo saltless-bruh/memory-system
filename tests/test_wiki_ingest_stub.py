@@ -134,3 +134,26 @@ async def test_a_dry_run_over_a_stub_deletes_nothing(tmp_path: Path) -> None:
     results = await ingest_wiki(wiki, embedder=_Embedder(), dry_run=True, env={})
 
     assert [r["status"] for r in results] == ["skipped_no_body"]
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_with_a_supplied_connection_deletes_nothing(
+    tmp_path: Path,
+) -> None:
+    """A dry run may be handed a connection to read the manifest -- the ingest
+    policy gate does exactly that -- and must still leave the index untouched,
+    even over a stub whose former body is indexed.
+    """
+    wiki = _stub_vault(tmp_path)
+    connection = _IndexedConnection([_previously_indexed()])
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, connection),
+        embedder=_Embedder(),
+        dry_run=True,
+        env={},
+    )
+
+    assert connection.deleted == []
+    assert [r["status"] for r in results] == ["skipped_no_body"]

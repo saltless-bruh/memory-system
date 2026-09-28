@@ -12,7 +12,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
+from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 
 import asyncpg
 
@@ -30,6 +33,66 @@ DEFAULT_CONTESTED_RANK_PENALTY = 30
 # Three seconds clears the observed worst case with headroom while still
 # shedding a genuinely dead embedding service quickly.
 DEFAULT_DENSE_TIMEOUT_SECONDS = 3.0
+
+logger = logging.getLogger(__name__)
+
+#: The text `probe_dense` embeds. Any short string would do; a fixed one keeps
+#: the probe from ever carrying a caller's query into a log or a cache.
+_PROBE_TEXT = "dense arm health probe"
+
+
+@dataclass
+class DenseArmHealth:
+    """What this process has seen of the dense arm, shared by every sibling.
+
+    The sparse fallback is deliberate -- a dead embedder degrades retrieval
+    rather than turning it off -- and it used to be *silent*: the exception was
+    folded into a per-hit `degraded` flag an agent is free to ignore, with no
+    log line and no count. Under the 2026-09-26 DNS flap recall@1 fell to 0.38
+    and scout itself said nothing; only litellm's own healthcheck noticed. A
+    scout whose *own* embedder URL or key is wrong has no such bystander, and
+    answered from the sparse arm for as long as it ran while looking healthy
+    throughout. This record is what `/healthz`
+    reports, so the compose healthcheck -- and `snpmemory status`, which rolls
+    an unhealthy service into `degraded` -- can see it.
+
+    Only the exception *class* is kept. The message of a connection error can
+    carry the gateway URL or a key fragment, and this record leaves the process
+    through an unauthenticated health route.
+    """
+
+    degraded_total: int = 0
+    by_reason: Counter[str] = field(default_factory=Counter)
+    last_reason: str | None = None
+    last_error: str | None = None
+    #: The outcome of the most recent attempt, ``None`` before the first. An
+    #: ordering flag rather than two timestamps: two attempts inside one clock
+    #: tick must still resolve to whichever happened last.
+    last_attempt_ok: bool | None = None
+
+    def record_ok(self) -> None:
+        self.last_attempt_ok = True
+
+    def record_degraded(
+        self, reason: str, error: BaseException | None, *, retrieval: bool
+    ) -> None:
+        # Counts are of *answers* that came back degraded. A failed health
+        # probe moves the state but is not an answer anyone received, and
+        # counting it would let a quiet, broken scout's count grow with the
+        # healthcheck interval instead of with its traffic.
+        if retrieval:
+            self.degraded_total += 1
+            self.by_reason[reason] += 1
+        self.last_reason = reason
+        self.last_error = type(error).__name__ if error is not None else None
+        self.last_attempt_ok = False
+
+    @property
+    def state(self) -> str:
+        """`ok` or `degraded` by the most recent attempt; `unknown` before any."""
+        if self.last_attempt_ok is None:
+            return "unknown"
+        return "ok" if self.last_attempt_ok else "degraded"
 
 
 # The lexical arm is built in two tiers because it does a different job
@@ -263,6 +326,10 @@ class PgVectorRlsBackend(RagBackend):
         self.contested_rank_penalty = contested_rank_penalty
         self.dense_timeout_seconds = dense_timeout_seconds
         self.corpus = corpus
+        # One record per process, not per corpus tier: `with_corpus` makes a
+        # shallow copy, so `wiki_quote`'s raw-tier sibling reports into the
+        # same record as the wiki-tier backend `/healthz` is handed.
+        self.health = DenseArmHealth()
 
     def with_corpus(self, corpus: str | None) -> PgVectorRlsBackend:
         """A sibling reading another corpus tier, sharing this one's pool.
@@ -321,6 +388,61 @@ class PgVectorRlsBackend(RagBackend):
             await self._pool.close()
             self._pool = None
 
+    def dense_health(self) -> dict[str, object]:
+        """The dense arm's state and degradation counts, for `/healthz`."""
+        health = self.health
+        return {
+            "dense": health.state,
+            "degraded_total": health.degraded_total,
+            "by_reason": dict(health.by_reason),
+            "last_reason": health.last_reason,
+            "last_error": health.last_error,
+        }
+
+    async def probe_dense(self) -> bool:
+        """Embed a fixed probe through the query path and record the outcome.
+
+        The health route calls this only while the arm reads `degraded`, so a
+        recovered embedder is seen without waiting for an agent query, and a
+        healthy one costs no embedding call per healthcheck. A caller with a
+        tighter deadline than the query budget wraps this in `asyncio.timeout`.
+        """
+        vector, _reason = await self._embed_query(_PROBE_TEXT, retrieval=False)
+        return vector is not None
+
+    async def _embed_query(
+        self, text: str, *, retrieval: bool = True
+    ) -> tuple[str | None, str | None]:
+        """The pgvector literal for `text`, or the reason there is none.
+
+        Every failure is recorded and logged here, once, whichever caller asked.
+        """
+        error: BaseException | None = None
+        try:
+            embeddings = await asyncio.wait_for(
+                self.embedder.aembed_texts([text]),
+                timeout=self.dense_timeout_seconds,
+            )
+            if len(embeddings) == 1 and len(embeddings[0]) == 1024:
+                self.health.record_ok()
+                return f"[{','.join(str(x) for x in embeddings[0])}]", None
+            reason = "embedding_invalid"
+        except TimeoutError as exc:
+            reason, error = "embedding_timeout", exc
+        except Exception as exc:  # noqa: BLE001 - provider failures all use sparse fallback
+            reason, error = "embedding_error", exc
+        self.health.record_degraded(reason, error, retrieval=retrieval)
+        logger.warning(
+            "dense arm unavailable (%s%s); %s. %d degraded retrievals since start.",
+            reason,
+            f": {type(error).__name__}" if error is not None else "",
+            "answering from the relaxed sparse arm only"
+            if retrieval
+            else "health probe failed",
+            self.health.degraded_total,
+        )
+        return None, reason
+
     def _resolve_depts(self, scope: Scope | None) -> str:
         """Extracts and sanitizes allowed department string from caller Scope."""
         if scope is None:
@@ -344,21 +466,7 @@ class PgVectorRlsBackend(RagBackend):
         # 1. Generate the dense query vector within a bounded budget. The
         # sparse arm is independently useful, so provider failure degrades the
         # query instead of turning the whole retrieval surface off.
-        emb_str: str | None = None
-        degraded_reason: str | None = None
-        try:
-            embeddings = await asyncio.wait_for(
-                self.embedder.aembed_texts([hint]),
-                timeout=self.dense_timeout_seconds,
-            )
-            if len(embeddings) == 1 and len(embeddings[0]) == 1024:
-                emb_str = f"[{','.join(str(x) for x in embeddings[0])}]"
-            else:
-                degraded_reason = "embedding_invalid"
-        except TimeoutError:
-            degraded_reason = "embedding_timeout"
-        except Exception:  # noqa: BLE001 - provider failures all use sparse fallback
-            degraded_reason = "embedding_error"
+        emb_str, degraded_reason = await self._embed_query(hint)
 
         # 2. Extract department clearance string
         depts_str = self._resolve_depts(scope)

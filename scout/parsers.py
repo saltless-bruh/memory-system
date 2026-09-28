@@ -13,11 +13,12 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,48 @@ class ParsedDocument:
         return "\n\n".join(s.text for s in self.sections if s.text.strip())
 
 
+#: A CommonMark fence opener: up to three spaces of indent, then a run of at
+#: least three backticks or tildes. A backtick fence's info string may not hold
+#: a backtick, or ```` ``code`` ```` inline spans would open fences.
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
+
+
+def fenced_lines(lines: Sequence[str]) -> frozenset[int]:
+    """Indexes of the lines that sit inside a fenced code block, fences included.
+
+    Markdown headings are a line-level syntax, and a fenced block suspends it:
+    ``# restart the service`` inside a ```` ```bash ```` block is a shell
+    comment, not a heading. Every heading splitter in this system has to ask this
+    question first, or a runbook's code comments become sections with their own
+    locators and context prefixes -- citations that point at no heading the
+    author wrote. The ingest parser and `wiki_read`'s section reader both split
+    on headings, so both call this rather than each keeping a fence rule.
+
+    The rule is CommonMark's: a fence closes only on a line of the *same*
+    character, at least as long as the opener, with nothing after it but
+    whitespace; an unclosed fence runs to the end of the document.
+    """
+    inside: set[int] = set()
+    opener: str | None = None
+    for index, line in enumerate(lines):
+        if opener is None:
+            match = _FENCE_OPEN.match(line)
+            if match:
+                opener = match.group(1)
+                inside.add(index)
+            continue
+        inside.add(index)
+        stripped = line.strip()
+        if (
+            len(line) - len(line.lstrip(" ")) <= 3
+            and stripped
+            and set(stripped) == {opener[0]}
+            and len(stripped) >= len(opener)
+        ):
+            opener = None
+    return frozenset(inside)
+
+
 def parse_markdown(content: str, source_uri: str) -> ParsedDocument:
     """Parses Markdown content, extracting frontmatter, title, and heading sections."""
     title = Path(source_uri).stem.replace("-", " ").title()
@@ -140,8 +183,10 @@ def parse_markdown(content: str, source_uri: str) -> ParsedDocument:
     current_heading = "Intro"
     current_lines: list[str] = []
 
-    for line in lines:
-        if line.startswith("#"):
+    fenced = fenced_lines(lines)
+
+    for index, line in enumerate(lines):
+        if line.startswith("#") and index not in fenced:
             if current_lines:
                 text = "\n".join(current_lines).strip()
                 if text:
@@ -341,6 +386,12 @@ def _pdf_figure_sections(
     the same contract `parse_image` follows. An invented description of a
     diagram is indistinguishable from a real one to a reader, which is exactly
     what makes fabricating it unacceptable.
+
+    A *real* description is still the model's prose and not the author's: the
+    section text is the caption followed by what the vision model wrote. The
+    ``kind="figure"`` and ``vlm_status`` metadata below are the only record of
+    that, and they travel with every chunk so `wiki_quote` can mark the passage
+    ``verbatim: false`` instead of handing it out as a quotation.
     """
     from scout.pdf_structure import PdfStructureError, extract_figures
 
@@ -416,13 +467,23 @@ def _pdf_figure_sections(
     return sections
 
 
-def parse_csv(content: str, source_uri: str) -> ParsedDocument:
-    """Parses CSV tabular data into structured row representations."""
+def parse_csv(
+    content: str, source_uri: str, *, delimiter: str | None = None
+) -> ParsedDocument:
+    """Parses CSV or TSV tabular data into structured row representations.
+
+    The delimiter follows the file's own declaration, its suffix, unless the
+    caller names one. A ``.tsv`` read with the comma default does not fail: each
+    row becomes a single tab-joined cell, the header/value pairing that is the
+    table's meaning is gone, and the document still records as ingested.
+    """
     title = Path(source_uri).stem.replace("-", " ").title()
     sections: list[ParsedSection] = []
+    if delimiter is None:
+        delimiter = "\t" if Path(source_uri).suffix.lower() == ".tsv" else ","
 
     try:
-        reader = csv.reader(io.StringIO(content))
+        reader = csv.reader(io.StringIO(content), delimiter=delimiter)
         rows = list(reader)
         if rows:
             header = rows[0]
@@ -660,6 +721,12 @@ def parse_image(
     if extracted_markdown and extracted_markdown.strip():
         doc = parse_markdown(extracted_markdown, source_uri)
         metadata["vlm_status"] = VLM_STATUS_OK
+        # Every section of this document is the model's prose, not the image's
+        # text. Mark each one the way `_pdf_figure_sections` marks a figure, so
+        # a retrieved chunk carries its origin and `wiki_quote` can refuse to
+        # call it verbatim.
+        for section in doc.sections:
+            section.metadata.update({"kind": "image", "vlm_status": VLM_STATUS_OK})
         return ParsedDocument(
             source_uri=source_uri,
             title=title,

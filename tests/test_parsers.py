@@ -55,6 +55,49 @@ def test_parse_csv_chunks_tabular_data() -> None:
     assert "Row 1: id: 1 | name: Alice | role: Admin" in doc.sections[0].text
 
 
+def test_parse_file_splits_tsv_on_tabs(tmp_path: Path) -> None:
+    """A .tsv keeps its header/value pairing; a comma reader flattens each row."""
+    source = tmp_path / "users.tsv"
+    source.write_text("id\tname, full\trole\n1\tAlice, A.\tAdmin\n", encoding="utf-8")
+    doc = parse_file(source, tmp_path)
+    text = doc.sections[0].text
+    assert "Columns: id, name, full, role" in text
+    assert "Row 1: id: 1 | name, full: Alice, A. | role: Admin" in text
+
+
+def test_parse_csv_still_splits_on_commas_for_csv() -> None:
+    doc = parse_csv("a,b\n1,2\n", "raw/data/t.csv")
+    assert "Row 1: a: 1 | b: 2" in doc.sections[0].text
+
+
+def test_parse_markdown_ignores_hash_lines_inside_code_fences() -> None:
+    content = (
+        "# Runbook\n"
+        "Intro.\n\n"
+        "```bash\n"
+        "# restart the service\n"
+        "systemctl restart scout\n"
+        "```\n\n"
+        "~~~~python\n"
+        "# a comment\n"
+        "~~~\n"
+        "## still inside the four-tilde fence\n"
+        "~~~~\n\n"
+        "## Rollback\n"
+        "Undo it.\n"
+    )
+    doc = parse_markdown(content, "raw/docs/runbook.md")
+    assert [s.loc for s in doc.sections] == ["Section Runbook", "Section Rollback"]
+    assert "# restart the service" in doc.sections[0].text
+    assert "## still inside the four-tilde fence" in doc.sections[0].text
+
+
+def test_unclosed_fence_swallows_the_rest_of_the_document() -> None:
+    """CommonMark: an unclosed fence runs to the end of the document."""
+    doc = parse_markdown("# Top\n```\n# not a heading\n", "raw/docs/x.md")
+    assert [s.loc for s in doc.sections] == ["Section Top"]
+
+
 def test_parse_code_preserves_language_fence() -> None:
     code_content = "def hello():\n    return 'world'\n"
     doc = parse_code(code_content, "raw/code/app.py")
@@ -92,6 +135,10 @@ def test_parse_image_with_vision_extractor() -> None:
         assert "Latency: 145ms" in doc.sections[1].text
         assert doc.metadata["vlm_status"] == VLM_STATUS_OK
         assert "vlm_error" not in doc.metadata
+        # Model-written text is marked at its source, the way a figure is, so a
+        # retrieved chunk can say it is a description rather than a quotation.
+        assert all(s.metadata.get("kind") == "image" for s in doc.sections)
+        assert all(s.metadata.get("vlm_status") == "ok" for s in doc.sections)
     finally:
         if img_path.exists():
             img_path.unlink()

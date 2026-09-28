@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -183,3 +184,96 @@ async def test_a_partially_parameterised_backend_still_fills_from_settings(
     await backend._get_pool()
     assert captured["host"] == "explicit"
     assert captured["password"] == "from-env"
+
+
+# ── dense-arm degradation is visible (audit 2026-09-26) ──────────────────────
+
+
+class _UnreachableEmbedder(FakeEmbedder):
+    """The embedding route refusing, the way a wrong URL or a DNS flap does."""
+
+    async def aembed_texts(self, texts: list[str]) -> list[list[float]]:
+        raise ConnectionRefusedError("litellm:4000 refused")
+
+
+def _empty_pool() -> MagicMock:
+    mock_conn = MagicMock()
+    mock_conn.execute = AsyncMock()
+    mock_conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "chunk_id": "c1",
+                "chunk_text": "sparse hit",
+                "source_uri": "wiki/page.md",
+                "metadata": "{}",
+                "rrf_score": 0.01,
+            }
+        ]
+    )
+    mock_tx = MagicMock()
+    mock_tx.__aenter__ = AsyncMock(return_value=mock_tx)
+    mock_tx.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.transaction.return_value = mock_tx
+    mock_acquire = MagicMock()
+    mock_acquire.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_acquire.__aexit__ = AsyncMock(return_value=None)
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = mock_acquire
+    return mock_pool
+
+
+async def test_a_dead_dense_arm_is_logged_and_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sparse fallback answers, and the operator is told it had to.
+
+    Before this, the exception was swallowed into a per-hit `degraded` flag
+    with no log line and no counter, so a server whose dense arm had been dead
+    for days looked exactly like a healthy one.
+    """
+    backend = PgVectorRlsBackend(embedder=_UnreachableEmbedder(), pool=_empty_pool())
+    assert backend.dense_health()["dense"] == "unknown"
+
+    with caplog.at_level(logging.WARNING, logger="scout.backends.pgvector"):
+        chunks = await backend.retrieve("anything")
+
+    assert chunks[0].meta["degraded_reason"] == "embedding_error"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "a degraded retrieval produced no log line"
+    assert "ConnectionRefusedError" in warnings[0].getMessage()
+    assert "embedding_error" in warnings[0].getMessage()
+    # The exception message can carry a URL or a key fragment; the class is
+    # what an operator needs and all that leaves the process.
+    assert "litellm:4000" not in warnings[0].getMessage()
+
+    health = backend.dense_health()
+    assert health["dense"] == "degraded"
+    assert health["degraded_total"] == 1
+    assert health["by_reason"] == {"embedding_error": 1}
+    assert health["last_error"] == "ConnectionRefusedError"
+
+    backend.embedder = FakeEmbedder()
+    await backend.retrieve("anything")
+    health = backend.dense_health()
+    assert health["dense"] == "ok"
+    assert health["degraded_total"] == 1, "recovery must not erase the history"
+
+
+async def test_sibling_backends_report_into_one_health_record() -> None:
+    """`wiki_quote` retrieves through `with_corpus(None)`; its failures count."""
+    backend = PgVectorRlsBackend(
+        embedder=_UnreachableEmbedder(), pool=_empty_pool(), corpus="wiki"
+    )
+    await backend.with_corpus(None).retrieve("anything")
+    assert backend.dense_health()["degraded_total"] == 1
+
+
+async def test_probe_dense_records_the_outcome_like_a_query() -> None:
+    backend = PgVectorRlsBackend(embedder=_UnreachableEmbedder(), pool=_empty_pool())
+    assert await backend.probe_dense() is False
+    assert backend.dense_health()["dense"] == "degraded"
+    # A probe is not an answer anyone received, so it moves the state only.
+    assert backend.dense_health()["degraded_total"] == 0
+    backend.embedder = FakeEmbedder()
+    assert await backend.probe_dense() is True
+    assert backend.dense_health()["dense"] == "ok"

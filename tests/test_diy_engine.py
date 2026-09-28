@@ -512,6 +512,37 @@ Below the rule.
     assert page.sections["Detail"] == "Above the rule.\n\n---\n\nBelow the rule."
 
 
+async def test_hash_comments_in_code_fences_are_not_sections(
+    tmp_path: Path, scope: Scope
+) -> None:
+    _write_page(
+        tmp_path,
+        body="""# Page Title
+
+## TL;DR
+Summary.
+
+## Detail
+Run this:
+
+```bash
+# restart the service
+systemctl restart scout
+```
+
+## Cross-References
+- [[other]]
+""",
+    )
+    engine = _vault_engine(tmp_path)
+    outline = await engine.wiki_read("page", mode="outline", scope=scope)
+    headings = [item["heading"] for item in outline.outline]
+    assert headings == ["TL;DR", "Detail", "Cross-References"]
+    page = await engine.wiki_read("page", section="Detail", scope=scope)
+    assert "# restart the service" in page.sections["Detail"]
+    assert "systemctl restart scout" in page.sections["Detail"]
+
+
 async def test_read_uses_body_tldr_chain_without_summary_frontmatter(
     tmp_path: Path, scope: Scope
 ) -> None:

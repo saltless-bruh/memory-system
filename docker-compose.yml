@@ -224,7 +224,13 @@ services:
       host-sync:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 2).close()"]
+      # /healthz (scout/serve.py), not a bare TCP connect: a scout whose own
+      # embedder URL or key is wrong answers from the sparse arm only, and a
+      # socket check read that as healthy -- so did `snpmemory status`, which
+      # takes its verdict from this. urlopen raises on the 503, failing the check.
+      # While degraded the route re-probes once, bounded at 2 s (serve.py), so
+      # the answer still lands inside this 3 s timeout.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
       interval: 10s
       timeout: 3s
       retries: 12

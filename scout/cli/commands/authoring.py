@@ -205,7 +205,7 @@ def propose(
     page: str,
     title: str = "",
     base: str = "main",
-    remote: str = "origin",
+    remote: str = "gitea",
     push: bool = False,
     confirm: bool = False,
     dry_run: bool = False,
@@ -214,8 +214,14 @@ def propose(
     """Move a compiled page onto its own branch for review (R-6.4 / R-7.3).
 
     The page is never committed to the branch you are standing on: a new
-    `wiki/<slug>-<timestamp>` branch is created first, and only the named page
-    and its generated companions are committed to it.
+    `wiki/<slug>-<timestamp>` branch is cut from `base`, the PR target, and
+    only the named page and its generated companions are committed to it.
+
+    `--push` goes to the private remote by default. A push anywhere else is
+    refused by the script unless every commit the push would send carries only
+    the wiki/ tree that remote already publishes; `origin` is public, and one
+    push of a vault-bearing history there cannot be taken back. The guard lives in the script so the
+    command and the script cannot disagree about it.
     """
     from scripts import propose_page
 
@@ -249,7 +255,7 @@ def propose(
     proposed = {
         "page": normalized,
         "paths": selected,
-        "base_branch": propose_page.current_branch(),
+        "base_branch": base,
         "target": base,
     }
 
@@ -275,7 +281,9 @@ def propose(
         return CommandResult(
             exit_code=ExitCode.SEMANTIC_FAILURE,
             data={"status": "refused", **proposed},
-            summary="propose refused; the working tree and branch are unchanged",
+            # Most refusals leave everything as it was, but a push refused
+            # after the commit keeps that commit; the script says which.
+            summary="propose refused; the script's output names anything it kept",
         )
     return CommandResult(
         data={"status": "proposed", **proposed},

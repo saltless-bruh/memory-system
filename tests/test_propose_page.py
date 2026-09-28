@@ -136,7 +136,15 @@ def test_success_stages_and_commits_only_named_page_and_changed_generated_files(
     commit = next(call for call in calls if call[0] == "commit")
     assert "--only" in commit
     assert commit[-3:] == allowed
-    assert not any(argument == "wiki/" for call in calls for argument in call)
+    # Nothing that writes may name the whole of wiki/; the push guard reads the
+    # wiki/ history on purpose, and reading it stages nothing.
+    writes = {"add", "commit", "reset", "checkout", "switch", "push"}
+    assert not any(
+        argument in {"wiki", "wiki/"}
+        for call in calls
+        if call[0] in writes
+        for argument in call
+    )
 
 
 def test_dry_run_never_mutates_git_state(
@@ -242,3 +250,309 @@ def test_push_failure_preserves_verified_local_commit_for_retry(
 
     assert any(call[0] == "commit" for call in calls)
     assert not any(call[0] in {"reset", "switch", "branch"} for call in calls)
+
+
+# ── pushing against real remotes ──────────────────────────────────────────
+#
+# `origin` is public GitHub and carries twelve sample pages; `gitea` is private
+# and carries the real vault. These tests stand up that shape with bare
+# repositories, because the defect being guarded is which bytes reach which
+# remote, and only real git can show that.
+
+_VAULT_PAGES = 14
+
+
+def _run(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _commit_wiki(repo: Path, message: str) -> None:
+    _run(repo, "add", "--", "wiki")
+    _run(repo, "commit", "--no-verify", "-q", "-m", message)
+
+
+@pytest.fixture
+def two_remotes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A checkout on a vault-bearing branch, with a public and a private remote.
+
+    `main` holds the public sample and is on both remotes. `vault` adds the
+    private pages and is on `gitea` only, exactly as the integration branches
+    are. The caller stands on `vault` with one new page to propose.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    for name in ("origin", "gitea"):
+        _run(tmp_path, "init", "-q", "--bare", "-b", "main", f"{name}.git")
+    _run(work, "init", "-q", "-b", "main")
+    _run(work, "config", "user.name", "test")
+    _run(work, "config", "user.email", "test@example.invalid")
+    _run(work, "config", "commit.gpgsign", "false")
+    _run(work, "remote", "add", "origin", str(tmp_path / "origin.git"))
+    _run(work, "remote", "add", "gitea", str(tmp_path / "gitea.git"))
+
+    (work / "wiki" / "concepts").mkdir(parents=True)
+    (work / "wiki" / "index.md").write_text("index\n", encoding="utf-8")
+    (work / "wiki" / "log.md").write_text("log\n", encoding="utf-8")
+    (work / "wiki" / "concepts" / "sample.md").write_text("s\n", encoding="utf-8")
+    _commit_wiki(work, "public sample")
+    _run(work, "push", "-q", "origin", "main")
+    _run(work, "push", "-q", "gitea", "main")
+
+    _run(work, "switch", "-q", "-c", "vault")
+    for number in range(_VAULT_PAGES):
+        page = work / "wiki" / "concepts" / f"private-{number}.md"
+        page.write_text(f"private {number}\n", encoding="utf-8")
+    _commit_wiki(work, "private vault")
+    _run(work, "push", "-q", "gitea", "vault")
+    _run(work, "fetch", "-q", "origin")
+    _run(work, "fetch", "-q", "gitea")
+
+    proposed = work / "wiki" / "concepts" / "proposed.md"
+    proposed.write_text("new\n", encoding="utf-8")
+    monkeypatch.setattr(propose_page, "REPO_ROOT", work)
+    monkeypatch.setattr(propose_page, "run_lint", lambda: True)
+    monkeypatch.setattr(propose_page, "run_verify", lambda: True)
+    return tmp_path
+
+
+def _remote_branches(tmp_path: Path, name: str) -> set[str]:
+    listed = _run(tmp_path / f"{name}.git", "branch", "--format=%(refname:short)")
+    return set(listed.splitlines())
+
+
+def test_default_push_never_sends_the_vault_to_the_public_remote(
+    two_remotes: Path,
+) -> None:
+    """The default remote is the private one, so a bare `--push` is safe."""
+    result = propose_page.main(
+        ["--page", "wiki/concepts/proposed.md", "--base", "vault", "--push"]
+    )
+
+    assert _remote_branches(two_remotes, "origin") == {"main"}
+    assert result == 0
+    pushed = _remote_branches(two_remotes, "gitea") - {"main", "vault"}
+    assert len(pushed) == 1 and next(iter(pushed)).startswith("wiki/")
+
+
+def test_explicit_push_of_the_vault_to_the_public_remote_is_refused(
+    two_remotes: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = propose_page.main(
+        [
+            "--page",
+            "wiki/concepts/proposed.md",
+            "--base",
+            "vault",
+            "--remote",
+            "origin",
+            "--push",
+        ]
+    )
+
+    assert _remote_branches(two_remotes, "origin") == {"main"}
+    assert result != 0
+    assert "origin" in capsys.readouterr().out
+    # Refused before a branch was cut: the caller is left where they stood.
+    assert _run(two_remotes / "work", "branch", "--show-current") == "vault"
+
+
+def test_a_public_proposal_is_refused_even_from_the_sample_base(
+    two_remotes: Path,
+) -> None:
+    """Any wiki/ tree that differs from the public one is not the public sample."""
+    work = two_remotes / "work"
+    _run(work, "switch", "-q", "main")
+
+    result = propose_page.main(
+        ["--page", "wiki/concepts/proposed.md", "--remote", "origin", "--push"]
+    )
+
+    assert _remote_branches(two_remotes, "origin") == {"main"}
+    assert result != 0
+    # The verified commit is kept locally so it can be pushed to gitea by hand.
+    kept = _run(work, "branch", "--list", "wiki/*", "--format=%(refname:short)")
+    assert kept.startswith("wiki/")
+
+
+def test_a_remote_without_a_known_main_is_judged_by_page_count(
+    two_remotes: Path,
+) -> None:
+    """With no `<remote>/main` to compare, more than the sample is refused."""
+    work = two_remotes / "work"
+    _run(two_remotes, "init", "-q", "--bare", "-b", "main", "mirror.git")
+    _run(work, "remote", "add", "mirror", str(two_remotes / "mirror.git"))
+
+    result = propose_page.main(
+        [
+            "--page",
+            "wiki/concepts/proposed.md",
+            "--base",
+            "vault",
+            "--remote",
+            "mirror",
+            "--push",
+        ]
+    )
+
+    assert _remote_branches(two_remotes, "mirror") == set()
+    assert result != 0
+
+
+def test_the_proposal_branch_is_cut_from_base_not_from_head(
+    two_remotes: Path,
+) -> None:
+    """`--base` names the PR target, so the branch must descend from it alone."""
+    work = two_remotes / "work"
+    _run(work, "switch", "-q", "-c", "feature")
+    (work / "unrelated.txt").write_text("feature work\n", encoding="utf-8")
+    _run(work, "add", "--", "unrelated.txt")
+    _run(work, "commit", "--no-verify", "-q", "-m", "unrelated feature work")
+
+    result = propose_page.main(
+        ["--page", "wiki/concepts/proposed.md", "--base", "vault"]
+    )
+
+    assert result == 0
+    branch = _run(work, "branch", "--show-current")
+    assert branch.startswith("wiki/")
+    assert _run(work, "rev-parse", f"{branch}~1") == _run(work, "rev-parse", "vault")
+
+
+def _scrubbed_base(work: Path, pages: int = 30) -> None:
+    """A `scrubbed` branch off `main` that once added vault pages, then removed them.
+
+    Its tip wiki/ tree is the public sample again, but `git push` sends every
+    commit reachable from it, and one of those commits holds the vault.
+    """
+    _run(work, "switch", "-q", "-c", "scrubbed", "main")
+    secrets = [f"wiki/concepts/secret-{number}.md" for number in range(pages)]
+    for number, secret in enumerate(secrets):
+        (work / secret).write_text(f"secret {number}\n", encoding="utf-8")
+    # Staged by name: the caller's uncommitted proposal must stay uncommitted.
+    _run(work, "add", "--", *secrets)
+    _run(work, "commit", "--no-verify", "-q", "-m", "vault pages")
+    _run(work, "rm", "-q", "--", *secrets)
+    _run(work, "commit", "--no-verify", "-q", "-m", "scrub vault pages")
+    _run(work, "switch", "-q", "main")
+
+
+def test_a_scrubbed_tip_does_not_hide_the_vault_in_its_history(
+    two_remotes: Path,
+) -> None:
+    """Only the tip matches `origin/main:wiki`; the push would carry the rest."""
+    work = two_remotes / "work"
+    _scrubbed_base(work)
+    assert _run(work, "rev-parse", "scrubbed:wiki") == _run(
+        work, "rev-parse", "origin/main:wiki"
+    )
+
+    refusal = propose_page.public_push_refusal("origin", "scrubbed")
+
+    assert refusal is not None and "scrubbed" in refusal
+
+
+@pytest.mark.parametrize("target", ["mirror", "url"])
+def test_an_unknown_remote_is_judged_by_history_not_by_the_tip(
+    two_remotes: Path, target: str
+) -> None:
+    """With nothing known published, every reachable commit is bounded."""
+    work = two_remotes / "work"
+    _scrubbed_base(work)
+    _run(two_remotes, "init", "-q", "--bare", "-b", "main", "mirror.git")
+    mirror_url = str(two_remotes / "mirror.git")
+    if target == "mirror":
+        _run(work, "remote", "add", "mirror", mirror_url)
+    remote = "mirror" if target == "mirror" else mirror_url
+
+    result = propose_page.main(
+        [
+            "--page",
+            "wiki/concepts/proposed.md",
+            "--base",
+            "scrubbed",
+            "--remote",
+            remote,
+            "--push",
+        ]
+    )
+
+    assert _remote_branches(two_remotes, "mirror") == set()
+    assert result != 0
+
+
+def test_a_public_remote_named_by_its_url_is_still_the_public_remote(
+    two_remotes: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`origin`'s own URL must be compared with `origin/main`, not page-counted."""
+    work = two_remotes / "work"
+    _run(work, "switch", "-q", "main")
+    (work / "wiki" / "concepts" / "sample.md").write_text(
+        "edited sample\n", encoding="utf-8"
+    )
+    origin_url = str(two_remotes / "origin.git")
+
+    result = propose_page.main(
+        ["--page", "wiki/concepts/sample.md", "--remote", origin_url, "--push"]
+    )
+
+    assert _remote_branches(two_remotes, "origin") == {"main"}
+    assert result != 0
+    assert "origin/main" in capsys.readouterr().out
+
+
+def test_a_private_remote_named_by_its_url_still_pushes(two_remotes: Path) -> None:
+    """Resolving URLs must not turn the legitimate private push into a refusal."""
+    result = propose_page.main(
+        [
+            "--page",
+            "wiki/concepts/proposed.md",
+            "--base",
+            "vault",
+            "--remote",
+            str(two_remotes / "gitea.git"),
+            "--push",
+        ]
+    )
+
+    assert result == 0
+    pushed = _remote_branches(two_remotes, "gitea") - {"main", "vault"}
+    assert len(pushed) == 1
+
+
+def test_a_private_name_with_a_public_push_url_is_not_private(
+    two_remotes: Path,
+) -> None:
+    """`git push gitea` reaches every push URL, so each one must be private."""
+    work = two_remotes / "work"
+    for url in (two_remotes / "gitea.git", two_remotes / "origin.git"):
+        _run(work, "remote", "set-url", "--add", "--push", "gitea", str(url))
+
+    refusal = propose_page.public_push_refusal("gitea", "vault")
+
+    assert refusal is not None
+
+
+def test_a_scrubbed_base_is_not_pushed_to_the_public_url(two_remotes: Path) -> None:
+    """The reviewed reproduction: a scrubbed base, and `origin` named by URL."""
+    work = two_remotes / "work"
+    _scrubbed_base(work)
+    (work / "wiki" / "concepts" / "s1.md").write_text("s1\n", encoding="utf-8")
+
+    result = propose_page.main(
+        [
+            "--page",
+            "wiki/concepts/s1.md",
+            "--base",
+            "scrubbed",
+            "--remote",
+            str(two_remotes / "origin.git"),
+            "--push",
+        ]
+    )
+
+    assert result != 0
+    assert _remote_branches(two_remotes, "origin") == {"main"}
+    # Refused on --base, before anything was branched.
+    assert _run(work, "branch", "--show-current") == "main"

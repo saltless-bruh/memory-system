@@ -308,6 +308,46 @@ def embedder_model_stamp(embedder: Embedder) -> str:
     return type(embedder).__name__
 
 
+#: The one document upsert, shared by a document with evidence and by the
+#: tombstone of one without, so the two cannot drift in what they record.
+_UPSERT_DOCUMENT_SQL = """
+    INSERT INTO rag_documents
+        (source_uri, allowed_depts, title, ingested_at,
+         capability_fingerprint, extraction_status)
+    VALUES ($1, $2, $3, now(), $4, $5)
+    ON CONFLICT (source_uri) DO UPDATE
+    SET allowed_depts = EXCLUDED.allowed_depts,
+        title = EXCLUDED.title,
+        ingested_at = EXCLUDED.ingested_at,
+        capability_fingerprint = EXCLUDED.capability_fingerprint,
+        extraction_status = EXCLUDED.extraction_status
+    RETURNING doc_id;
+"""
+
+
+def no_text_state(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """The extraction status of a source that yielded no text at all.
+
+    Never complete: whatever the reason, the document contributes no evidence,
+    and `verify-extraction` names every document whose record is not complete.
+    `text` is always among the losses; a failed extractor (`vision` for an
+    image nobody could transcribe) is named beside it, which is what tells a
+    failed transcription apart from a genuinely empty file.
+
+    `no_text` and `corpus` mark the row as a tombstone. A tombstone has no
+    chunks, so it carries no chunk `corpus` stamp either, and the tier sweeps
+    (`_CORPUS_TIER_SQL`) read the tier from here instead -- otherwise the row
+    would outlive its file forever, claimed by no tier's reconciliation.
+    """
+    record = extraction_state(metadata)
+    record["incomplete"] = sorted({*record.get("incomplete", ()), "text"})
+    record["complete"] = False
+    record["no_text"] = True
+    corpus = metadata.get("corpus")
+    record["corpus"] = corpus if isinstance(corpus, str) else None
+    return record
+
+
 async def ingest_document(
     file_path: Path,
     allowed_depts: list[str],
@@ -364,19 +404,47 @@ async def ingest_document(
         # image descriptions of audit finding B3 survived a re-ingest, still
         # carrying their earlier (possibly public) ACL. No evidence is the
         # honest outcome; retrieval then reports `no_source` for the address.
-        purged = False
-        if conn is not None:
+        #
+        # But no evidence is not no record. Returning before anything was
+        # written left `verify-extraction` -- which reads only
+        # `rag_documents.extraction_status` -- unable to name the document at
+        # all: an image whose transcription failed was indistinguishable from
+        # a file that never existed. So the address keeps a tombstone: a
+        # document row with no chunks, under the file's *current* ACL, whose
+        # extraction status says it yielded no text and which extractor, if
+        # any, is why.
+        tombstone = no_text_state(parsed_doc.metadata)
+        close_conn = False
+        if conn is None:
+            conn = await get_pg_connection(env)
+            close_conn = True
+        try:
             async with conn.transaction():
-                deleted = await conn.execute(
-                    "DELETE FROM rag_documents WHERE source_uri = $1;",
+                row = await conn.fetchrow(
+                    _UPSERT_DOCUMENT_SQL,
                     parsed_doc.source_uri,
+                    allowed_depts,
+                    parsed_doc.title,
+                    json.dumps(capability_fingerprint()),
+                    json.dumps(tombstone, default=str),
                 )
-            purged = deleted.rsplit(" ", 1)[-1] not in {"0", ""}
+                if not row:
+                    raise RuntimeError(
+                        f"Failed to record document {parsed_doc.source_uri}"
+                    )
+                deleted = await conn.execute(
+                    "DELETE FROM rag_chunks WHERE doc_id = $1;", row["doc_id"]
+                )
+        finally:
+            if close_conn:
+                await conn.close()
+        purged = str(deleted).rsplit(" ", 1)[-1] not in {"0", ""}
         return {
             "source_uri": parsed_doc.source_uri,
             "title": parsed_doc.title,
             "chunks_count": 0,
             "status": "purged_empty" if purged else "skipped_empty",
+            "extraction_status": tombstone,
         }
 
     extraction = extraction_state(parsed_doc.metadata)
@@ -415,19 +483,7 @@ async def ingest_document(
         async with conn.transaction():
             # Upsert document record
             row = await conn.fetchrow(
-                """
-                INSERT INTO rag_documents
-                    (source_uri, allowed_depts, title, ingested_at,
-                     capability_fingerprint, extraction_status)
-                VALUES ($1, $2, $3, now(), $4, $5)
-                ON CONFLICT (source_uri) DO UPDATE
-                SET allowed_depts = EXCLUDED.allowed_depts,
-                    title = EXCLUDED.title,
-                    ingested_at = EXCLUDED.ingested_at,
-                    capability_fingerprint = EXCLUDED.capability_fingerprint,
-                    extraction_status = EXCLUDED.extraction_status
-                RETURNING doc_id;
-                """,
+                _UPSERT_DOCUMENT_SQL,
                 parsed_doc.source_uri,
                 allowed_depts,
                 parsed_doc.title,
@@ -517,10 +573,18 @@ async def ingest_document(
 _CORPUS_TIER_SQL = """
     SELECT d.doc_id, d.source_uri
     FROM rag_documents d
-    WHERE EXISTS (
-            SELECT 1 FROM rag_chunks c
-            WHERE c.doc_id = d.doc_id
-              AND c.metadata->>'corpus' IS NOT DISTINCT FROM $1::text
+    WHERE (
+            EXISTS (
+                SELECT 1 FROM rag_chunks c
+                WHERE c.doc_id = d.doc_id
+                  AND c.metadata->>'corpus' IS NOT DISTINCT FROM $1::text
+            )
+            OR (
+                -- A no-text tombstone (`no_text_state`): no chunk carries a
+                -- stamp, so the tier is read from its extraction record.
+                d.extraction_status->>'no_text' = 'true'
+                AND d.extraction_status->>'corpus' IS NOT DISTINCT FROM $1::text
+            )
           )
       AND NOT EXISTS (
             SELECT 1 FROM rag_chunks c

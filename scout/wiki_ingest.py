@@ -800,7 +800,17 @@ async def reconcile_wiki_deletions(
             for row in rows
             if str(row["source_uri"]) not in WIKI_CONTROL_DOCUMENTS
         ]
-        if indexed_pages and not on_disk - set(WIKI_CONTROL_DOCUMENTS):
+        # Pages are counted the way `ingest_wiki` counts them -- a `.md` that is
+        # not a root control document -- not as every file under the root. The
+        # vault skeleton ships `<category>/.gitkeep`, and attachments are files
+        # too: counted as files, a publication holding only those passed for a
+        # vault with pages, and the sweep below purged every row.
+        pages_on_disk = {
+            uri
+            for uri in on_disk
+            if uri.endswith(".md") and uri not in WIKI_CONTROL_DOCUMENTS
+        }
+        if indexed_pages and not pages_on_disk:
             # Control documents are left out on both sides: purging them is
             # this sweep's ordinary job, and a tree holding only them is still
             # a tree holding no page.

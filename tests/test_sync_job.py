@@ -1510,6 +1510,26 @@ async def test_an_empty_vault_does_not_empty_the_index(
 
 
 @pytest.mark.asyncio
+async def test_a_vault_skeleton_without_pages_does_not_empty_the_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The repository's own vault ships `<category>/.gitkeep`. A publication of
+    only that skeleton is not empty of files, and the guard that counted files
+    let it through: `ok=True`, both rows purged, readiness set -- the same full
+    purge as a missing vault."""
+    connection = _vault_index(monkeypatch)
+    wiki = tmp_path / "vault"
+    for category in ("concepts", "entities", "playbooks", "techniques"):
+        (wiki / category).mkdir(parents=True)
+        (wiki / category / ".gitkeep").write_bytes(b"")
+
+    outcome = await WikiIndexer(wiki_dir=wiki, embedder=_vault_embedder()).index()
+
+    assert outcome.ok is False, outcome.status
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
 async def test_a_malformed_page_is_skipped_visibly_and_the_cycle_succeeds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

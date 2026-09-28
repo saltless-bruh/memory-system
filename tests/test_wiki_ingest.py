@@ -843,6 +843,48 @@ async def test_reconciliation_refuses_to_empty_the_index_from_an_empty_vault(
     assert connection.purged == []
 
 
+#: What a publication that ships the vault skeleton and no page looks like. This
+#: repository's own vault carries `wiki/<category>/.gitkeep`, so "exists but
+#: holds no page" is rarely "holds no file".
+_PAGELESS_TREES = {
+    "gitkeep-skeleton": (
+        "concepts/.gitkeep",
+        "entities/.gitkeep",
+        "playbooks/.gitkeep",
+        "techniques/.gitkeep",
+    ),
+    "attachment-only": ("attachments/x.png",),
+    "skeleton-and-control-documents": (
+        "concepts/.gitkeep",
+        "index.md",
+        "log.md",
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("files", _PAGELESS_TREES.values(), ids=_PAGELESS_TREES)
+async def test_reconciliation_counts_pages_not_files(
+    tmp_path: Path, files: tuple[str, ...]
+) -> None:
+    """The guard compared the index against every *file* under the root, so a
+    `.gitkeep` or an attachment passed for a page and the sweep purged every
+    row anyway. A page is what ingest would index: a `.md` that is not a
+    root control document.
+    """
+    from scout.wiki_ingest import ReconcileRefusedError, reconcile_wiki_deletions
+
+    wiki = tmp_path / "vault"
+    for name in files:
+        (wiki / name).parent.mkdir(parents=True, exist_ok=True)
+        (wiki / name).write_bytes(b"")
+    connection = _IndexedRowsConnection()
+
+    with pytest.raises(ReconcileRefusedError):
+        await reconcile_wiki_deletions(wiki, conn=cast(asyncpg.Connection, connection))
+    assert connection.purged == []
+
+
 @pytest.mark.asyncio
 async def test_reconciliation_still_purges_when_the_vault_has_pages(
     tmp_path: Path,

@@ -178,3 +178,124 @@ def test_the_happy_path_leaves_nothing_on_main(
 
     assert len(vault.removal_attempts) == 2
     assert vault.on_main == set()
+
+
+# --------------------------------------------------------------------------
+# Against a real Git origin
+# --------------------------------------------------------------------------
+#
+# The fake vault above is idempotent: a second removal of the same page simply
+# succeeds. The real `_publish` was not. A deletion push that failed had already
+# unlinked the page and made the local deletion commit, so the finalizer's
+# retry died at `git add` on a path that no longer existed and never re-pushed
+# the pending commit -- the probe stayed on `main`. These tests run the real
+# `_publish` and `_git` against a bare repository so that path is exercised.
+
+
+def _run_git(*args: str, cwd: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@localhost", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
+
+
+@pytest.fixture
+def origin(tmp_path: Path) -> Path:
+    """A bare vault remote whose `main` holds one authored page."""
+    bare = tmp_path / "origin.git"
+    _run_git("init", "--bare", "--initial-branch=main", str(bare), cwd=tmp_path)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _run_git("init", "--initial-branch=main", cwd=seed)
+    (seed / ea.VAULT_SUBDIR).mkdir()
+    (seed / ea.VAULT_SUBDIR / "index.md").write_text("# index\n", encoding="utf-8")
+    _run_git("add", ea.VAULT_SUBDIR, cwd=seed)
+    _run_git("commit", "-m", "seed", cwd=seed)
+    _run_git("push", str(bare), "HEAD:main", cwd=seed)
+    return bare
+
+
+def _probes_on_main(bare: Path) -> list[str]:
+    listed = _run_git(
+        "ls-tree", "-r", "--name-only", "main", "--", ea.VAULT_SUBDIR, cwd=bare
+    )
+    return [line for line in listed.splitlines() if "V3-PROP-" in line]
+
+
+@pytest.mark.parametrize("failing_removal", [1, 2], ids=["positive", "negative"])
+def test_a_transient_deletion_push_failure_is_retried_to_completion(
+    origin: Path,
+    harness: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    failing_removal: int,
+) -> None:
+    """One dropped deletion push must not leave the probe on origin's main.
+
+    The network drops the n-th deletion push once; a later push would succeed.
+    The gate still fails -- the push did fail -- but the finalizer's retry has
+    to land the deletion rather than trip over its own half-finished attempt.
+    """
+    monkeypatch.setattr(ea, "VAULT_REMOTE", origin.as_uri())
+    monkeypatch.setattr(ea, "VAULT_BRANCH", "main")
+
+    real_git = subprocess.run
+
+    def flaky_git(
+        *args: str, cwd: Path, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        if args[:1] == ("push",):
+            subject = real_git(
+                ["git", "log", "-1", "--format=%s"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+            ).stdout
+            if subject.startswith("test(w2): remove"):
+                removals = int(str(harness.get("removal_pushes", 0))) + 1
+                harness["removal_pushes"] = removals
+                if removals == failing_removal:
+                    return subprocess.CompletedProcess(
+                        ["git", *args],
+                        128,
+                        "",
+                        "fatal: unable to access origin: Connection reset by peer",
+                    )
+        completed = real_git(
+            ["git", "-c", "core.quotePath=false", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if check:
+            ea.require(
+                completed.returncode == 0,
+                f"git {' '.join(args)} failed: {completed.stderr.strip()[:300]}",
+            )
+        return completed
+
+    monkeypatch.setattr(ea, "_git", flaky_git)
+
+    order: list[str] = []
+
+    async def fake_await(
+        scout: object, sentinel: str, budget: float, *, poll_seconds: float = 0.0
+    ) -> str | None:
+        if budget == 0.0:
+            return None
+        order.append(sentinel)
+        # The positive leg propagates; the negative control, as it should, does
+        # not arrive while the watcher is stopped.
+        return f"{sentinel}.md" if len(order) == 1 else None
+
+    monkeypatch.setattr(ea, "_await_sentinel", fake_await)
+
+    with pytest.raises(ea.GateFailure, match="Connection reset by peer"):
+        ea.group_vault_change_propagates()
+
+    assert _probes_on_main(origin) == []
+    # The retry re-pushed the pending deletion rather than giving up on it.
+    assert harness["removal_pushes"] == failing_removal + 1

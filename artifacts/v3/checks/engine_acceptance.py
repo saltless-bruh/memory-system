@@ -365,25 +365,41 @@ def _probe_page(sentinel: str) -> tuple[str, str]:
 def _publish(
     clone: Path, relative: str, body: str | None, message: str
 ) -> _PublishedChange:
-    """Write or delete one vault page and push it to the vault branch."""
+    """Write or delete one vault page and push it to the vault branch.
+
+    Idempotent, because the cleanup path calls it again after it failed. A
+    failed push leaves the page already changed and committed locally; a
+    retry that insisted on re-staging would die on a path that no longer
+    exists and never re-push the commit that was waiting, which is how a
+    single dropped connection left a probe on `main`. So the change is staged
+    only if it is not already there, committed only if something is staged,
+    and the push always runs -- it is the one step whose failure matters.
+    """
     target = clone / VAULT_SUBDIR / relative
+    path = f"{VAULT_SUBDIR}/{relative}"
     if body is None:
-        target.unlink(missing_ok=True)
+        _git("rm", "-q", "--ignore-unmatch", "--", path, cwd=clone)
     else:
         target.write_text(body, encoding="utf-8")
-    _git("add", "-A", f"{VAULT_SUBDIR}/{relative}", cwd=clone)
-    name = os.environ.get("SNP_GATE_GIT_NAME") or GATE_GIT_NAME_DEFAULT
-    email = os.environ.get("SNP_GATE_GIT_EMAIL") or GATE_GIT_EMAIL_DEFAULT
-    _git(
-        "-c",
-        f"user.name={name}",
-        "-c",
-        f"user.email={email}",
-        "commit",
-        "-m",
-        message,
-        cwd=clone,
+        _git("add", "--", path, cwd=clone)
+    staged = _git("diff", "--cached", "--quiet", "--", path, cwd=clone, check=False)
+    require(
+        staged.returncode in (0, 1),
+        f"git diff --cached failed: {staged.stderr.strip()[:300]}",
     )
+    if staged.returncode == 1:
+        name = os.environ.get("SNP_GATE_GIT_NAME") or GATE_GIT_NAME_DEFAULT
+        email = os.environ.get("SNP_GATE_GIT_EMAIL") or GATE_GIT_EMAIL_DEFAULT
+        _git(
+            "-c",
+            f"user.name={name}",
+            "-c",
+            f"user.email={email}",
+            "commit",
+            "-m",
+            message,
+            cwd=clone,
+        )
     push_started_at = time.time()
     commit = _push_with_rebase(clone)
     return _PublishedChange(

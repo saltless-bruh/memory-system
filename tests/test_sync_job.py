@@ -356,6 +356,7 @@ async def test_async_main_executes_cold_start_sync(
         stop: Any = None,
         initial_sync: bool = False,
         recursive: bool = True,
+        on_outcome: Any = None,
     ) -> int:
         order.append(f"watch(initial_sync={initial_sync})")
         return 1
@@ -1405,3 +1406,247 @@ async def test_gateway_readiness_is_skipped_when_no_gateway_is_configured(
 
     assert probed == []
     assert indexer.calls == 1
+
+
+# ── a missing vault is fatal; a bad page is not ────────────────────────────
+
+
+class _VaultIndexConnection:
+    """What `WikiIndexer` reaches through `get_pg_connection`: an index that
+    already holds two vault pages, accepting writes and recording purges."""
+
+    def __init__(self) -> None:
+        self.purged: list[object] = []
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        yield
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        from scout.ingest import _CORPUS_TIER_SQL
+
+        if query == _CORPUS_TIER_SQL:
+            return [
+                {"source_uri": "concepts/alpha.md", "doc_id": 1},
+                {"source_uri": "concepts/beta.md", "doc_id": 2},
+            ]
+        return []  # nothing indexed under the current pipeline signature
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, int]:
+        return {"doc_id": 9}
+
+    async def execute(self, query: str, *args: object) -> str:
+        if query.startswith("DELETE FROM rag_documents"):
+            self.purged.append(args[0])
+        return "OK 1"
+
+    async def close(self) -> None:
+        return None
+
+
+def _vault_index(monkeypatch: pytest.MonkeyPatch) -> _VaultIndexConnection:
+    connection = _VaultIndexConnection()
+
+    async def connect(_env: object = None) -> _VaultIndexConnection:
+        return connection
+
+    monkeypatch.setattr("scout.wiki_ingest.get_pg_connection", connect)
+    return connection
+
+
+def _vault_embedder() -> Any:
+    from tests.fakes import FakeEmbedder
+
+    return FakeEmbedder()
+
+
+def _good_page(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntitle: Alpha\ntype: concept\n---\n\n## TL;DR\n\nAlpha holds.\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dangling_publication_pointer_stops_the_vault_watcher_intact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`current` pointing at a snapshot that is gone read as an EMPTY vault:
+    every wiki row was deleted, the cycle reported ok and readiness was set.
+    Reproduced offline 3/3. It is a missing vault, and nothing may be purged.
+    """
+    connection = _vault_index(monkeypatch)
+    replica = tmp_path / "replica"
+    replica.mkdir()
+    (replica / "current").symlink_to(
+        Path("snapshots") / "gone", target_is_directory=True
+    )
+
+    outcome = await WikiIndexer(
+        wiki_dir=replica / "current" / "wiki", embedder=_vault_embedder()
+    ).index()
+
+    assert outcome.ok is False
+    assert outcome.retryable is False, "waiting cannot conjure a vault"
+    assert "vault" in outcome.status
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_vault_does_not_empty_the_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An existing directory with no pages passes any root check. The deletion
+    site must still refuse to purge every row on its evidence."""
+    connection = _vault_index(monkeypatch)
+    empty = tmp_path / "vault"
+    empty.mkdir()
+
+    outcome = await WikiIndexer(wiki_dir=empty, embedder=_vault_embedder()).index()
+
+    assert outcome.ok is False
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
+async def test_a_vault_skeleton_without_pages_does_not_empty_the_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The repository's own vault ships `<category>/.gitkeep`. A publication of
+    only that skeleton is not empty of files, and the guard that counted files
+    let it through: `ok=True`, both rows purged, readiness set -- the same full
+    purge as a missing vault."""
+    connection = _vault_index(monkeypatch)
+    wiki = tmp_path / "vault"
+    for category in ("concepts", "entities", "playbooks", "techniques"):
+        (wiki / category).mkdir(parents=True)
+        (wiki / category / ".gitkeep").write_bytes(b"")
+
+    outcome = await WikiIndexer(wiki_dir=wiki, embedder=_vault_embedder()).index()
+
+    assert outcome.ok is False, outcome.status
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_page_is_skipped_visibly_and_the_cycle_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One non-UTF-8 page stopped the vault watcher permanently, and a restart
+    re-hit it. It must cost that page, and say so where an operator looks."""
+    _vault_index(monkeypatch)
+    wiki = tmp_path / "vault"
+    _good_page(wiki / "concepts" / "alpha.md")
+    (wiki / "concepts" / "beta.md").write_bytes(b"# caf\xe9\n")
+
+    outcome = await WikiIndexer(wiki_dir=wiki, embedder=_vault_embedder()).index()
+
+    assert outcome.ok is True, outcome.status
+    assert "1 skipped" in outcome.status
+    assert outcome.skipped == ("concepts/beta.md: UnicodeDecodeError",)
+
+
+@pytest.mark.asyncio
+async def test_the_readiness_marker_names_what_the_cycle_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A skip that only reaches stderr is a skip nobody sees. The marker the
+    health check reads carries it, content-free: path and error class."""
+    marker = tmp_path / "ready.wiki"
+    indexer = FakeIndexer(
+        IndexOutcome(
+            ok=True,
+            status="1 indexed, 0 unchanged, 0 deleted, 1 skipped",
+            skipped=("concepts/beta.md: UnicodeDecodeError",),
+        )
+    )
+
+    async def stop_watch(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr("scout.sync_job.watch", stop_watch)
+    await _supervise(indexer, tmp_path, marker)
+
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        "ready",
+        "skipped concepts/beta.md: UnicodeDecodeError",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_watched_cycle_refreshes_the_skipped_files_it_reports() -> None:
+    """The marker describes the latest cycle, not the cold start."""
+    seen: list[IndexOutcome] = []
+    outcome = IndexOutcome(ok=True, status="s", skipped=("a.md: ValueError",))
+
+    handled = await watch(
+        FakeIndexer(outcome), changes=_batches(2), on_outcome=seen.append
+    )
+
+    assert handled == 2
+    assert seen == [outcome, outcome]
+
+
+@pytest.mark.asyncio
+async def test_the_service_marker_carries_every_watchers_skips(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "ready"
+    raw = tmp_path / "ready.raw"
+    wiki = tmp_path / "ready.wiki"
+    raw.write_text("ready\nskipped raw/scan.pdf: ParserError\n", encoding="utf-8")
+    wiki.write_text("ready\n", encoding="utf-8")
+
+    async def stop(_delay: float) -> None:
+        raise _StopSupervision
+
+    with contextlib.suppress(_StopSupervision):
+        await _aggregate_readiness(marker, [raw, wiki], sleep=stop)
+
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        "ready",
+        "skipped raw/scan.pdf: ParserError",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_raw_indexer_reports_what_it_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def fake_ingest(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {"source_uri": "raw/a.md", "status": "ingested_ok"},
+            {
+                "source_uri": "raw/scan.pdf",
+                "status": "skipped_malformed",
+                "error": "ParserError",
+            },
+        ]
+
+    monkeypatch.setattr("scout.ingest.ingest_directory", fake_ingest)
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / DEFAULT_ACL_FILENAME).write_text(
+        'version: 1\nrules:\n  - path: "**"\n    departments: [redteam]\n',
+        encoding="utf-8",
+    )
+
+    outcome = await PgVectorDirectIndexer(raw_dir=raw_dir).index()
+
+    assert outcome.ok is True
+    assert outcome.skipped == ("raw/scan.pdf: ParserError",)
+
+
+def test_sync_job_waits_for_a_published_vault() -> None:
+    """Compose avoided the empty-vault purge only by accident: sync-job could
+    start before host-sync had published `current` at all."""
+    import yaml
+
+    compose = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    depends = compose["services"]["sync-job"]["depends_on"]
+    assert depends["host-sync"]["condition"] == "service_healthy"

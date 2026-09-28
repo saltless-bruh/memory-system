@@ -19,7 +19,7 @@ from scout.ingest import (
     ingest_document,
     validate_allowed_depts,
 )
-from scout.parsers import ParsedDocument, ParsedSection, parse_file
+from scout.parsers import ParsedDocument, ParsedSection, ParserError, parse_file
 from tests.fakes import FakeEmbedder
 
 
@@ -227,6 +227,96 @@ async def test_directory_batch_rolls_back_earlier_files_on_later_failure(
         await ingest_directory(raw_dir, ["infra"], reconcile=False)
     assert conn.rows == ["last-good"]
     assert conn.closed
+
+
+class _BatchConnection:
+    """A connection that commits the batch unless it raises."""
+
+    def __init__(self) -> None:
+        self.committed = False
+
+    async def fetch(self, _sql: str, *_args: object) -> list[object]:
+        return []
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        yield
+        self.committed = True
+
+    async def close(self) -> None:
+        return None
+
+
+def _two_file_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: BaseException
+) -> tuple[Path, _BatchConnection]:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "a.md").write_text("first", encoding="utf-8")
+    (raw_dir / "scan.pdf").write_bytes(b"%PDF-1.4 scanned, no text layer")
+    conn = _BatchConnection()
+
+    async def fake_get_connection(_env: object = None) -> Any:
+        return conn
+
+    async def fake_ingest(file_path: Path, **_kwargs: object) -> dict[str, Any]:
+        if file_path.name == "scan.pdf":
+            raise fault
+        return {"source_uri": f"raw/{file_path.name}", "status": "ingested_ok"}
+
+    monkeypatch.setattr("scout.ingest.get_pg_connection", fake_get_connection)
+    monkeypatch.setattr("scout.ingest.ingest_document", fake_ingest)
+    return raw_dir, conn
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        ParserError("PDF raw/scan.pdf contains no extractable text"),
+        UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte"),
+        ValueError("malformed frontmatter"),
+    ],
+    ids=["ParserError", "UnicodeDecodeError", "ValueError"],
+)
+async def test_one_malformed_file_is_skipped_and_the_batch_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: Exception
+) -> None:
+    """A scanned PDF stopped the raw watcher permanently: the batch raised, the
+    cycle was classed permanent, and a restart re-hit the same file. The file
+    is recorded as skipped -- path and error class -- and the rest publishes.
+    """
+    raw_dir, conn = _two_file_batch(tmp_path, monkeypatch, fault)
+
+    results = await ingest_directory(raw_dir, ["infra"], reconcile=False)
+
+    assert conn.committed
+    by_uri = {r["source_uri"]: r for r in results}
+    assert by_uri["raw/a.md"]["status"] == "ingested_ok"
+    assert by_uri["raw/scan.pdf"]["status"] == "skipped_malformed"
+    assert by_uri["raw/scan.pdf"]["error"] == type(fault).__name__
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_failure_inside_a_parse_still_fails_the_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `ParserError` raised *because the gateway refused* is a dependency
+    outage wearing a content-fault class. Skipping it would publish a batch
+    that silently lost the file, and nothing would ever retry it."""
+    import urllib.error
+
+    try:
+        raise ParserError("vision extraction failed") from urllib.error.URLError(
+            "[Errno 111] Connection refused"
+        )
+    except ParserError as exc:
+        wrapped = exc
+    raw_dir, conn = _two_file_batch(tmp_path, monkeypatch, wrapped)
+
+    with pytest.raises(ParserError):
+        await ingest_directory(raw_dir, ["infra"], reconcile=False)
+    assert not conn.committed
 
 
 @pytest.mark.integration

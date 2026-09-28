@@ -273,6 +273,14 @@ services:
         condition: service_completed_successfully
       litellm:
         condition: service_healthy
+      # host-sync answers /ready only once `current` points at a published
+      # snapshot. Before that, WIKI_DIR does not exist; the vault watcher now
+      # refuses a missing vault rather than reading it as an empty one and
+      # purging every wiki row, but it refuses permanently, so starting ahead
+      # of the first publication would stop it for the container's lifetime.
+      # (Not applied on a daemon restart -- the persisted replica covers that.)
+      host-sync:
+        condition: service_healthy
     healthcheck:
       # The marker is written only after a cold-start sync succeeds and is
       # cleared while a retry is pending, so this reports the real state: a

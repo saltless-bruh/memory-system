@@ -26,6 +26,7 @@ from scout.chunker import (
     LiteLLMBatchEmbedder,
 )
 from scout.config import postgres_settings
+from scout.faults import is_file_fault, skipped_file
 from scout.parsers import ParsedDocument, extraction_state, parse_file
 from scout.policy import PolicyValidationError, validate_document_acl
 
@@ -877,21 +878,42 @@ async def ingest_directory(
                         }
                     )
                     continue
-                res = await ingest_document(
-                    file_path=file_path,
-                    allowed_depts=file_depts,
-                    conn=conn,
-                    chunker=chunker,
-                    embedder=embedder,
-                    base_dir=dir_path.parent,
-                    dry_run=dry_run,
-                    parse_cache=parse_cache,
-                    # The vision route too. Deciding it from `os.environ`
-                    # below here recorded every image `unconfigured` and
-                    # purged its good rows whenever the `.env` the CLI
-                    # resolved had not also been exported into the shell.
-                    env=env,
-                )
+                try:
+                    res = await ingest_document(
+                        file_path=file_path,
+                        allowed_depts=file_depts,
+                        conn=conn,
+                        chunker=chunker,
+                        embedder=embedder,
+                        base_dir=dir_path.parent,
+                        dry_run=dry_run,
+                        parse_cache=parse_cache,
+                        # The vision route too. Deciding it from `os.environ`
+                        # below here recorded every image `unconfigured` and
+                        # purged its good rows whenever the `.env` the CLI
+                        # resolved had not also been exported into the shell.
+                        env=env,
+                    )
+                except Exception as exc:
+                    # One scanned PDF or one non-UTF-8 byte raised out of the
+                    # batch, the cycle was classed permanent, and a restart
+                    # re-hit the same file: the raw watcher stopped for good
+                    # over a single document. A fault the file itself causes
+                    # now costs that file. Its earlier rows, if any, survive --
+                    # the file is still on disk, so reconciliation keeps them --
+                    # and anything it wrote has already rolled back to its own
+                    # savepoint. Every other fault still fails the whole batch,
+                    # which is what rolls it back to last-good.
+                    if not is_file_fault(exc):
+                        raise
+                    results.append(
+                        skipped_file(
+                            _scanned_uri(file_path, dir_path.parent),
+                            error=type(exc).__name__,
+                            reason=str(exc),
+                        )
+                    )
+                    continue
                 results.append(res)
 
             if reconcile and conn is not None:

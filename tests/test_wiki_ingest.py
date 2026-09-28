@@ -730,6 +730,289 @@ async def test_reconciliation_purges_control_documents(tmp_path: Path) -> None:
     assert purged == [1, 2, 4]
 
 
+# ── a missing vault is not an empty one ────────────────────────────────────
+
+
+class _IndexedRowsConnection:
+    """A connection whose index already holds vault pages, and records purges."""
+
+    def __init__(self) -> None:
+        self.purged: list[object] = []
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        yield
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        return [
+            {"source_uri": "concepts/alpha.md", "doc_id": 1},
+            {"source_uri": "concepts/beta.md", "doc_id": 2},
+        ]
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.purged.append(args[0] if args else query)
+        return "DELETE 1"
+
+    async def close(self) -> None:
+        raise AssertionError("caller-owned connection must not be closed")
+
+
+def _dangling_pointer(root: Path) -> Path:
+    """The replica with `current` pointing at a snapshot that is not there."""
+    wiki_dir = _snapshot_vault(root, "c0ffee")
+    for path in sorted((root / "snapshots").rglob("*"), reverse=True):
+        path.rmdir() if path.is_dir() else path.unlink()
+    (root / "snapshots").rmdir()
+    assert (root / "current").is_symlink() and not (root / "current").exists()
+    return wiki_dir
+
+
+@pytest.mark.asyncio
+async def test_a_dangling_publication_pointer_fails_ingest_instead_of_reading_empty(
+    tmp_path: Path,
+) -> None:
+    """`current -> snapshots/<gone>` resolved leniently to a path that does not
+    exist, `load_pages` answered `[]` for it, and the cycle then reported success
+    for an empty vault. A vault that is not there has to be an error.
+    """
+    from scout.wiki_ingest import VaultRootError
+
+    wiki_dir = _dangling_pointer(tmp_path)
+
+    with pytest.raises(VaultRootError):
+        await ingest_wiki(
+            wiki_dir,
+            conn=cast(asyncpg.Connection, _IndexedRowsConnection()),
+            embedder=_NamedEmbedder(),
+            env={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_dangling_publication_pointer_purges_nothing(tmp_path: Path) -> None:
+    """Reproduced offline 3/3: the sweep found no file for any row and deleted
+    every wiki-tier document -- a re-embed of the whole vault to recover.
+    """
+    from scout.wiki_ingest import VaultRootError, reconcile_wiki_deletions
+
+    wiki_dir = _dangling_pointer(tmp_path)
+    connection = _IndexedRowsConnection()
+
+    with pytest.raises(VaultRootError):
+        await reconcile_wiki_deletions(
+            wiki_dir, conn=cast(asyncpg.Connection, connection)
+        )
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
+async def test_a_vault_root_that_is_a_file_is_not_a_vault(tmp_path: Path) -> None:
+    from scout.wiki_ingest import VaultRootError, reconcile_wiki_deletions
+
+    not_a_dir = tmp_path / "wiki"
+    not_a_dir.write_text("not a directory", encoding="utf-8")
+    connection = _IndexedRowsConnection()
+
+    with pytest.raises(VaultRootError):
+        await ingest_wiki(not_a_dir, dry_run=True, env={})
+    with pytest.raises(VaultRootError):
+        await reconcile_wiki_deletions(
+            not_a_dir, conn=cast(asyncpg.Connection, connection)
+        )
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_refuses_to_empty_the_index_from_an_empty_vault(
+    tmp_path: Path,
+) -> None:
+    """Defence in depth, at the deletion site itself.
+
+    An existing directory with no page in it passes any root check, and the
+    sweep would still delete every row. The index holding pages while the tree
+    holds none is not a deletion to perform; it is a publication to distrust.
+    """
+    from scout.wiki_ingest import ReconcileRefusedError, reconcile_wiki_deletions
+
+    empty = tmp_path / "vault"
+    empty.mkdir()
+    connection = _IndexedRowsConnection()
+
+    with pytest.raises(ReconcileRefusedError, match="2"):
+        await reconcile_wiki_deletions(empty, conn=cast(asyncpg.Connection, connection))
+    assert connection.purged == []
+
+
+#: What a publication that ships the vault skeleton and no page looks like. This
+#: repository's own vault carries `wiki/<category>/.gitkeep`, so "exists but
+#: holds no page" is rarely "holds no file".
+_PAGELESS_TREES = {
+    "gitkeep-skeleton": (
+        "concepts/.gitkeep",
+        "entities/.gitkeep",
+        "playbooks/.gitkeep",
+        "techniques/.gitkeep",
+    ),
+    "attachment-only": ("attachments/x.png",),
+    "skeleton-and-control-documents": (
+        "concepts/.gitkeep",
+        "index.md",
+        "log.md",
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("files", _PAGELESS_TREES.values(), ids=_PAGELESS_TREES)
+async def test_reconciliation_counts_pages_not_files(
+    tmp_path: Path, files: tuple[str, ...]
+) -> None:
+    """The guard compared the index against every *file* under the root, so a
+    `.gitkeep` or an attachment passed for a page and the sweep purged every
+    row anyway. A page is what ingest would index: a `.md` that is not a
+    root control document.
+    """
+    from scout.wiki_ingest import ReconcileRefusedError, reconcile_wiki_deletions
+
+    wiki = tmp_path / "vault"
+    for name in files:
+        (wiki / name).parent.mkdir(parents=True, exist_ok=True)
+        (wiki / name).write_bytes(b"")
+    connection = _IndexedRowsConnection()
+
+    with pytest.raises(ReconcileRefusedError):
+        await reconcile_wiki_deletions(wiki, conn=cast(asyncpg.Connection, connection))
+    assert connection.purged == []
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_still_purges_when_the_vault_has_pages(
+    tmp_path: Path,
+) -> None:
+    """The control: the guard must not stop an ordinary deletion."""
+    from scout.wiki_ingest import reconcile_wiki_deletions
+
+    wiki = tmp_path / "vault"
+    (wiki / "concepts").mkdir(parents=True)
+    (wiki / "concepts" / "alpha.md").write_text("# alpha\n", encoding="utf-8")
+    connection = _IndexedRowsConnection()
+
+    deleted = await reconcile_wiki_deletions(
+        wiki, conn=cast(asyncpg.Connection, connection)
+    )
+
+    assert deleted == ["concepts/beta.md"]
+    assert connection.purged == [2]
+
+
+# ── one bad page costs that page, not the watcher ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_is_not_utf8_is_skipped_and_the_rest_ingested(
+    tmp_path: Path,
+) -> None:
+    """A single byte that is not UTF-8 raised `UnicodeDecodeError` out of the
+    vault walk; the watcher classed it permanent and never indexed again.
+    """
+    wiki = _one_page_vault(tmp_path)
+    (wiki / "concepts" / "latin1.md").write_bytes(b"# caf\xe9\n\nbody\n")
+    connection = _RecordingConnection()
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, connection),
+        embedder=_NamedEmbedder(),
+        env={},
+    )
+
+    by_uri = {r["source_uri"]: r for r in results}
+    assert by_uri["concepts/indexed-page.md"]["status"] == "ingested_ok"
+    assert by_uri["concepts/latin1.md"]["status"] == "skipped_malformed"
+    assert by_uri["concepts/latin1.md"]["error"] == "UnicodeDecodeError"
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_page_is_skipped_and_the_rest_ingested(
+    tmp_path: Path,
+) -> None:
+    wiki = _one_page_vault(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("# outside\n", encoding="utf-8")
+    (wiki / "concepts" / "linked.md").symlink_to(outside)
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, _RecordingConnection()),
+        embedder=_NamedEmbedder(),
+        env={},
+    )
+
+    by_uri = {r["source_uri"]: r for r in results}
+    assert by_uri["concepts/indexed-page.md"]["status"] == "ingested_ok"
+    assert by_uri["concepts/linked.md"]["status"] == "skipped_malformed"
+    assert by_uri["concepts/linked.md"]["error"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_a_page_the_database_rejects_is_skipped_and_the_rest_ingested(
+    tmp_path: Path,
+) -> None:
+    """A content fault can surface at the write, not the parse: PostgreSQL
+    rejects a NUL byte in `text`. The page's own transaction has rolled back,
+    so the next page can still be written.
+    """
+    wiki = _one_page_vault(tmp_path)
+    (wiki / "concepts" / "nul.md").write_text(
+        "---\ntitle: Nul\n---\n\n## TL;DR\n\nNUL_BYTE_PAGE\n", encoding="utf-8"
+    )
+
+    class _RejectingConnection(_RecordingConnection):
+        async def execute(self, query: str, *args: object) -> str:
+            if "INSERT INTO rag_chunks" in query and "NUL_BYTE_PAGE" in str(args):
+                raise asyncpg.CharacterNotInRepertoireError(
+                    "invalid byte sequence for encoding UTF8: 0x00"
+                )
+            return await super().execute(query, *args)
+
+    results = await ingest_wiki(
+        wiki,
+        conn=cast(asyncpg.Connection, _RejectingConnection()),
+        embedder=_NamedEmbedder(),
+        env={},
+    )
+
+    by_uri = {r["source_uri"]: r for r in results}
+    assert by_uri["concepts/indexed-page.md"]["status"] == "ingested_ok"
+    assert by_uri["concepts/nul.md"]["status"] == "skipped_malformed"
+    assert by_uri["concepts/nul.md"]["error"] == "CharacterNotInRepertoireError"
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_outage_on_one_page_still_fails_the_cycle(
+    tmp_path: Path,
+) -> None:
+    """Isolation is for faults that belong to a file. A dependency that is down
+    fails every page alike, and skipping them all would report a cycle that
+    indexed nothing as a success.
+    """
+    import urllib.error
+
+    wiki = _one_page_vault(tmp_path)
+
+    class _DownEmbedder(_NamedEmbedder):
+        def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+            raise urllib.error.URLError("[Errno 111] Connection refused")
+
+    with pytest.raises(urllib.error.URLError):
+        await ingest_wiki(
+            wiki,
+            conn=cast(asyncpg.Connection, _RecordingConnection()),
+            embedder=_DownEmbedder(),
+            env={},
+        )
+
+
 # ── the Vietnamese link heading the set already meant to catch ─────────────
 
 

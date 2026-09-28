@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import re
 import sys
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -125,7 +126,12 @@ _STOPWORDS = frozenset(
     }
 )
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+#: Runs of Unicode letters and digits. `[a-z0-9]+` split casefolded text at
+#: every accented letter, so "Kiến trúc bộ nhớ đa tầng cho tác tử" reduced to
+#: {"cho"} -- grounded by any text holding that one preposition -- and
+#: "Bảo mật mạng nội bộ" to nothing, so it could never ground at all. `[^\W_]`
+#: is `\w` without the underscore, which keeps `snake_case` splitting as before.
+_TOKEN_RE = re.compile(r"[^\W_]+")
 
 #: `scout.chunker` appends ``(i/n)`` to a locator when it splits one parsed
 #: section into several chunks (m1). A declared section-level locator is still
@@ -137,13 +143,18 @@ _LOC_PART_RE = re.compile(r"\s*\(\d+\s*/\s*\d+\)\s*$")
 def content_tokens(text: str) -> frozenset[str]:
     """Return the tokens of `text` that carry retrieval signal.
 
-    Lowercased alphanumeric runs, minus stopwords and runs shorter than
-    `_MIN_TOKEN_LENGTH`. ``"PagedAttention KV-Cache"`` yields
-    ``{"pagedattention", "cache"}``.
+    Casefolded Unicode alphanumeric runs, minus stopwords and runs shorter
+    than `_MIN_TOKEN_LENGTH`. ``"PagedAttention KV-Cache"`` yields
+    ``{"pagedattention", "cache"}``; ``"Bảo mật mạng nội bộ"`` yields
+    ``{"bảo", "mật", "mạng", "nội"}``. Text is NFC-normalized first: extracted
+    PDF text often arrives decomposed, and a combining mark is not a word
+    character, so without it `ộ` typed by a person and `ộ` pulled from a PDF
+    would be different words -- or no word at all.
     """
+    normalized = unicodedata.normalize("NFC", text).casefold()
     return frozenset(
         token
-        for token in _TOKEN_RE.findall(text.casefold())
+        for token in _TOKEN_RE.findall(normalized)
         if len(token) >= _MIN_TOKEN_LENGTH and token not in _STOPWORDS
     )
 

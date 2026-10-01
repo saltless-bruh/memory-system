@@ -165,7 +165,7 @@ callers, not just callers of the tool function.
 
 One MCP server: `snpmemory` (authenticated, Streamable HTTP, served by the
 `scout` container). It answered to `scout` until 2026-09-24, when the local
-stdio server that held the name was deleted (a3dcd16); its operations remain
+stdio server that held the name was deleted (5a21f77); its operations remain
 CLI commands and skills. Embeddings go through LiteLLM at 1024 dimensions. The retired
 retrieval container and the healer are absent; the retired source directory
 survives on disk, unbuilt, with its `requirements.lock` still a release-manifest

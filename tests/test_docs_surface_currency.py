@@ -37,7 +37,7 @@ RETIRED_SURFACES = (
     # every one of them was still asserted as current somewhere it could not
     # see, which is the failure this file was written to prevent.
     #
-    # a3dcd16 (leaf-4.3) deleted the local stdio MCP server and with it the
+    # 5a21f77 (leaf-4.3) deleted the local stdio MCP server and with it the
     # `snpmemory mcp` command; `snpmemory mcp-config` is live and is not
     # matched (see `_mentions`). The command is matched only in its typed
     # form -- backticked, or carrying its `--root` argument -- because prose

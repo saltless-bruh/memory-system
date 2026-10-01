@@ -82,7 +82,7 @@ def _paragraphs(relative: str) -> list[tuple[int, str]]:
 # ── the deleted local stdio server ──────────────────────────────────────────
 
 #: Phrases that describe a local `snpmemory` MCP server as something to
-#: configure or connect to. It was deleted on 2026-09-24 (016ed43) and the one
+#: configure or connect to. It was deleted on 2026-09-24 (a3dcd16) and the one
 #: remaining HTTP server took its name, so every such sentence now points the
 #: name at the wrong component.
 _LOCAL_SERVER = re.compile(

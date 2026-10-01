@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | **Version** | 2.3 — thêm hướng V2 cho RAG engine (swappable + RBAC). Xem §5 và `Suggestion_V2_RAG_Replacement.md`. |
-| **Tác giả** | Trần Quang Huy (Laz) |
+| **Tác giả** | saltless-bruh |
 | **Ngày** | 19/07/2026 (v2.2) · 21/07/2026 (v2.3: hướng thay RAG cho V2) |
 | **Tên project** | **SNP Memory System** — hệ thống trí nhớ dùng chung của team Security. Gồm 3 lớp: **LLM-Wiki** (RAM), **RAG-Anything** (Storage), **Scout** (thủ thư / RAG bridge). |
 | **Engine LLM-Wiki** | **PRIMARY: basic-memory** (AGPL-3.0, self-host, MCP-native) · **FALLBACK: Scout-DIY** (tự viết, chạy trên cùng vault) |
